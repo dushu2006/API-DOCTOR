@@ -26,7 +26,9 @@ def test_builds_minimal_context():
     ctx = ContextBuilder().build(_incident())
     assert ctx["incident_id"]
     assert ctx["exception_type"] == "AttributeError"
-    assert ctx["stack_trace"] == TRACE
+    # Stack trace is trimmed to project-relevant frames (no .venv noise)
+    assert "AttributeError" in ctx["stack_trace"]
+    assert "app/demo_api/bugs.py" in ctx["stack_trace"]
     assert "app/demo_api/bugs.py" in ctx["affected_files"]
     assert "app/demo_api/bugs.py" in ctx["code_snippets"]
     snippet = ctx["code_snippets"]["app/demo_api/bugs.py"]

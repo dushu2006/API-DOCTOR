@@ -41,6 +41,7 @@ class LocalRetriever:
     def retrieve(self, frames: list[StackFrame]) -> list[CodeSnippet]:
         """Return the most relevant code snippets for the given frames."""
         max_files = settings.MAX_CONTEXT_FILES
+        top_k_symbols = getattr(settings, "CODE_RETRIEVAL_TOP_K", 5)
         results: list[CodeSnippet] = []
         seen: set[str] = set()
 
@@ -60,7 +61,7 @@ class LocalRetriever:
 
         # 3. Symbol references & imports for the failing symbols.
         symbols = {f.function for f in frames if f.function and f.function not in ("<module>", "<lambda>")}
-        for rel in self._search_symbols(symbols):
+        for rel in self._search_symbols(symbols)[:top_k_symbols]:
             if rel in seen or len(results) >= max_files:
                 continue
             path = self.repo_root / rel
@@ -69,6 +70,8 @@ class LocalRetriever:
             seen.add(rel)
             snippet = self._read_with_context(path, rel, error_line=None)
             results.append(snippet)
+            if len(results) >= max_files:
+                break
         return results
 
     # ------------------------------------------------------------------
@@ -92,8 +95,9 @@ class LocalRetriever:
             start = max(0, error_line - window - 1)
             end = min(len(lines), error_line + window)
         else:
-            # Whole file up to a sensible cap (never dump huge files verbatim).
-            end = min(len(lines), 400)
+            # For symbol-search hits without a known error line, do NOT dump
+            # whole file. Keep small cap (60 lines) to save tokens.
+            end = min(len(lines), 60)
             start = 0
         numbered = [f"{i + 1:5d} | {lines[i]}" for i in range(start, end)]
         content = "\n".join(numbered)
