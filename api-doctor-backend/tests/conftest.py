@@ -33,8 +33,21 @@ def _clear_incidents():
     from app.incidents.store import incident_store
 
     incident_store.clear()
+    # Clear AI cache between tests to avoid cross-test contamination
+    try:
+        from app.ai.cache import get_global_cache
+
+        get_global_cache().clear()
+    except Exception:
+        pass
     yield
     incident_store.clear()
+    try:
+        from app.ai.cache import get_global_cache
+
+        get_global_cache().clear()
+    except Exception:
+        pass
 
 
 @pytest.fixture

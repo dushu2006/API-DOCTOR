@@ -10,6 +10,10 @@ Guarantees:
     * never auto-merges,
     * bounded repair attempts,
     * secrets are never sent to the LLM or exposed to the frontend.
+
+Latency / streaming improvements:
+- Emits progress events to the SSE hub so dashboard shows live "working..."
+- Uses trimmed context (project-relevant frames only) for faster AI calls
 """
 
 from __future__ import annotations
@@ -63,6 +67,7 @@ class Orchestrator:
         incident.add_activity("error_detected", "done", f"HTTP {detection.get('status_code')} on {method} {endpoint}")
         incident_store.update(incident)
         log_operation(logger, incident.id, "detect", "ok", error=str(detection.get("error_message") or "")[:200])
+        await emit(incident.id, "error_detected", "done", f"{method} {endpoint}")
         return incident
 
     def start_diagnosis(self, incident_id: str) -> None:
@@ -82,14 +87,17 @@ class Orchestrator:
 
         t_start = time.perf_counter()
         try:
+            await emit(inc.id, "pipeline", "running", "Starting diagnosis pipeline")
             await self._collect_context(inc)
             await self._investigate(inc)
             if inc.status in (
                 IncidentStatus.INVESTIGATION_FAILED,
                 IncidentStatus.FIX_GENERATION_FAILED,
             ):
+                await emit(inc.id, "pipeline", "failed", inc.error_message or "investigation failed")
                 return inc
             await self._sandbox_and_verify(inc)
+            await emit(inc.id, "pipeline", "done", f"status={inc.status}")
         except Exception as exc:  # noqa: BLE001
             inc.error_message = f"{type(exc).__name__}: {exc}"
             if inc.status not in (
@@ -101,6 +109,7 @@ class Orchestrator:
                 inc.status = IncidentStatus.VERIFICATION_FAILED
             inc.add_activity("pipeline_error", "failed", str(exc))
             log_operation(logger, incident_id, "pipeline", "failed", error=str(exc))
+            await emit(incident_id, "pipeline_error", "failed", str(exc)[:500])
         finally:
             incident_store.update(inc)
             log_operation(
@@ -115,6 +124,7 @@ class Orchestrator:
         inc.status = IncidentStatus.COLLECTING_CONTEXT
         inc.add_activity("collecting_context", "running")
         incident_store.update(inc)
+        await emit(inc.id, "collecting_context", "running", "Parsing stack trace and retrieving code")
         t0 = time.perf_counter()
         try:
             context = self.context_builder.build(inc)
@@ -123,11 +133,13 @@ class Orchestrator:
             inc.add_activity("stack_trace_parsed", "done")
             inc.add_activity("relevant_source_identified", "done", f"{len(context['affected_files'])} files")
             log_operation(logger, inc.id, "collect_context", "ok", duration=time.perf_counter() - t0)
+            await emit(inc.id, "collecting_context", "done", f"{len(context['affected_files'])} files")
         except Exception as exc:
             inc.status = IncidentStatus.INVESTIGATION_FAILED
             inc.error_message = f"context build failed: {exc}"
             inc.add_activity("collecting_context", "failed", str(exc))
             log_operation(logger, inc.id, "collect_context", "failed", error=str(exc))
+            await emit(inc.id, "collecting_context", "failed", str(exc)[:500])
             raise
         finally:
             incident_store.update(inc)
@@ -136,6 +148,7 @@ class Orchestrator:
         inc.status = IncidentStatus.INVESTIGATING
         inc.add_activity("investigating", "running")
         incident_store.update(inc)
+        await emit(inc.id, "investigating", "running", "Analyzing root cause with LLM")
         t0 = time.perf_counter()
         try:
             analysis: RootCauseAnalysis = await self.root_cause_agent.analyze(inc.context or {})
@@ -148,15 +161,18 @@ class Orchestrator:
                 )
                 inc.add_activity("root_cause_identified", "failed", inc.error_message)
                 log_operation(logger, inc.id, "root_cause", "failed", duration=time.perf_counter() - t0, error=inc.error_message)
+                await emit(inc.id, "investigating", "failed", inc.error_message)
                 return
             inc.status = IncidentStatus.ROOT_CAUSE_FOUND
             inc.add_activity("root_cause_identified", "done", analysis.category)
             log_operation(logger, inc.id, "root_cause", "ok", duration=time.perf_counter() - t0, error=f"confidence={analysis.confidence:.2f}")
+            await emit(inc.id, "investigating", "done", f"{analysis.category} conf={analysis.confidence:.2f}")
         except Exception as exc:
             inc.status = IncidentStatus.INVESTIGATION_FAILED
             inc.error_message = f"root cause analysis failed: {exc}"
             inc.add_activity("root_cause_identified", "failed", str(exc))
             log_operation(logger, inc.id, "root_cause", "failed", error=str(exc))
+            await emit(inc.id, "investigating", "failed", str(exc)[:500])
             raise
         finally:
             incident_store.update(inc)
@@ -168,6 +184,7 @@ class Orchestrator:
         inc.status = IncidentStatus.FIX_PLANNED
         inc.add_activity("fix_generated", "running")
         incident_store.update(inc)
+        await emit(inc.id, "fix_generated", "running", "Generating minimal patch")
         t0 = time.perf_counter()
         files = self._full_files(inc)
         try:
@@ -177,11 +194,13 @@ class Orchestrator:
             inc.fix_proposal = proposal.model_dump()
             inc.add_activity("fix_generated", "done", proposal.summary)
             log_operation(logger, inc.id, "fix_generation", "ok", duration=time.perf_counter() - t0)
+            await emit(inc.id, "fix_generated", "done", proposal.summary)
         except Exception as exc:
             inc.status = IncidentStatus.FIX_GENERATION_FAILED
             inc.error_message = f"fix generation failed: {exc}"
             inc.add_activity("fix_generated", "failed", str(exc))
             log_operation(logger, inc.id, "fix_generation", "failed", error=str(exc))
+            await emit(inc.id, "fix_generated", "failed", str(exc)[:500])
         finally:
             incident_store.update(inc)
 
@@ -199,6 +218,7 @@ class Orchestrator:
         inc.status = IncidentStatus.SANDBOX_TESTING
         inc.add_activity("sandbox_started", "running")
         incident_store.update(inc)
+        await emit(inc.id, "sandbox_started", "running", "Running verification in sandbox")
 
         attempt = 0
         result: SandboxResult | None = None
@@ -207,6 +227,7 @@ class Orchestrator:
             inc.attempt_count = attempt
             inc.add_activity("sandbox_started", "running", f"attempt {attempt}")
             incident_store.update(inc)
+            await emit(inc.id, "sandbox_started", "running", f"attempt {attempt}")
             t0 = time.perf_counter()
             try:
                 result = await self.sandbox_runner.run_verification(proposal, inc.request_snapshot)
@@ -216,6 +237,7 @@ class Orchestrator:
                 inc.add_activity("sandbox_started", "failed", str(exc))
                 log_operation(logger, inc.id, "sandbox", "failed", error=str(exc))
                 incident_store.update(inc)
+                await emit(inc.id, "sandbox_started", "failed", str(exc)[:500])
                 return
             log_operation(
                 logger, inc.id, "sandbox_attempt", "ok" if result.passed else "failed",
@@ -229,6 +251,7 @@ class Orchestrator:
                 # Regenerate the fix with the failure feedback.
                 inc.add_activity("fix_generated", "failed", f"attempt {attempt} failed — regenerating")
                 incident_store.update(inc)
+                await emit(inc.id, "fix_generated", "running", f"Attempt {attempt} failed, retrying")
                 try:
                     if analysis:
                         proposal = await self.fix_agent.generate_fix(
@@ -246,10 +269,13 @@ class Orchestrator:
             for step in result.steps:
                 inc.add_activity(step.name, "done" if step.passed else "failed", step.detail[:200])
             inc.add_activity("fix_verified", "done")
+            await emit(inc.id, "sandbox_started", "done", "Verification passed")
+            await emit(inc.id, "fix_verified", "done", "Fix verified")
         else:
             inc.status = IncidentStatus.REPAIR_LIMIT_REACHED if attempt >= settings.MAX_REPAIR_ATTEMPTS else IncidentStatus.VERIFICATION_FAILED
             inc.error_message = result.error if result else "verification failed"
             inc.add_activity("fix_verified", "failed", inc.error_message)
+            await emit(inc.id, "fix_verified", "failed", inc.error_message[:500])
         incident_store.update(inc)
 
         # Auto-create PR only if configured.
@@ -259,14 +285,13 @@ class Orchestrator:
             except Exception as exc:  # noqa: BLE001
                 inc.error_message = f"PR creation failed: {exc}"
                 incident_store.update(inc)
+                await emit(inc.id, "pull_request_created", "failed", str(exc)[:500])
 
     # ------------------------------------------------------------------
     # GitHub PR
     # ------------------------------------------------------------------
     def _full_files(self, inc: Incident) -> dict[str, str]:
         """Read full content of affected files for the fix agent."""
-        import json as _json
-
         files: dict[str, str] = {}
         affected = (inc.root_cause or {}).get("affected_files") or []
         for rel in affected:
@@ -312,6 +337,7 @@ class Orchestrator:
         inc.status = IncidentStatus.PR_CREATED
         inc.add_activity("pull_request_created", "done", pr_info.get("pr_url") or "")
         incident_store.update(inc)
+        await emit(inc.id, "pull_request_created", "done", pr_info.get("pr_url") or "")
         return pr_info
 
     async def pr_status(self, incident_id: str) -> dict[str, Any]:

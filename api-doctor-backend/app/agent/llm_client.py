@@ -2,6 +2,11 @@
 
 Thin layer over :class:`app.ai.AIClient` that turns model output into validated
 Pydantic models with retry-and-repair for structured (JSON) responses.
+
+Adds:
+- Exact response caching (hash of model + system_prompt + user_prompt + response_model)
+- Optional semantic cache when embedding model is available
+- Model fallback (delegated to NIMClient, but also handled here as safety net)
 """
 
 from __future__ import annotations
@@ -14,6 +19,7 @@ from typing import Type, TypeVar
 from pydantic import BaseModel, ValidationError
 
 from app.ai.base import AIProviderError, create_ai_client
+from app.ai.cache import get_global_cache, make_cache_key
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -26,6 +32,8 @@ _JSON_BLOCK = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 class LLMClient:
     def __init__(self, ai_client=None) -> None:
         self.ai = ai_client or create_ai_client()
+        # Cache singleton
+        self._cache = get_global_cache()
 
     # ------------------------------------------------------------------
     async def generate_structured(
@@ -43,6 +51,54 @@ class LLMClient:
         temp = settings.AI_TEMPERATURE if temperature is None else temperature
         tokens = settings.AI_MAX_TOKENS if max_tokens is None else max_tokens
 
+        # --- Caching: exact hit before any AI call --------------------
+        cache_enabled = bool(getattr(settings, "AI_CACHE_ENABLED", True))
+        cache_key = ""
+        if cache_enabled:
+            cache_key = make_cache_key(
+                model, response_model.__name__, system_prompt, user_prompt
+            )
+            # Exact cache lookup
+            cached_val = self._cache.get(cache_key)
+            if cached_val is not None:
+                try:
+                    logger.info(
+                        "AI cache hit exact model=%s response=%s key=%s",
+                        model,
+                        response_model.__name__,
+                        cache_key[:12],
+                    )
+                    return response_model.model_validate(cached_val)
+                except Exception:
+                    # Corrupted entry, evict
+                    self._cache.delete(cache_key)
+
+            # Optional semantic cache
+            if getattr(settings, "AI_CACHE_SEMANTIC_ENABLED", False):
+                try:
+                    if getattr(settings, "EMBEDDING_MODEL", ""):
+                        emb_model = settings.EMBEDDING_MODEL
+                        # Embed the user prompt (sanitized context already)
+                        q_embs = await self.ai.embed(emb_model, [user_prompt])
+                        if q_embs:
+                            threshold = float(
+                                getattr(settings, "AI_CACHE_SEMANTIC_THRESHOLD", 0.9)
+                            )
+                            sem_val = self._cache.get_semantic(
+                                q_embs[0], threshold=threshold, model=model
+                            )
+                            if sem_val is not None:
+                                logger.info(
+                                    "AI cache hit semantic model=%s response=%s sim>=%.2f",
+                                    model,
+                                    response_model.__name__,
+                                    threshold,
+                                )
+                                return response_model.model_validate(sem_val)
+                except Exception as exc:
+                    # Degrade gracefully
+                    logger.debug("Semantic cache lookup failed: %s", exc)
+
         schema = _json_schema(response_model)
         messages = [
             {"role": "system", "content": system_prompt},
@@ -56,40 +112,124 @@ class LLMClient:
 
         last_error: str | None = None
         attempts = max(1, settings.AI_MAX_RETRIES)
-        for attempt in range(attempts):
-            if last_error:
-                messages = messages[:1] + [
-                    {
-                        "role": "user",
-                        "content": user_prompt
-                        + "\n\nYour previous response failed JSON validation:\n"
-                        + last_error
-                        + "\n\nReturn ONLY valid JSON matching this schema:\n"
-                        + json.dumps(schema, indent=2),
-                    }
-                ]
-            try:
-                data = await self.ai.chat(
-                    model=model,
-                    messages=messages,
-                    temperature=temp,
-                    max_tokens=tokens,
-                    response_format={"type": "json_object"},
-                )
-            except AIProviderError:
-                raise
-            content = data["choices"][0]["message"]["content"]
-            parsed = _parse_json(content)
-            try:
-                return response_model.model_validate(parsed)
-            except ValidationError as exc:
-                last_error = json.dumps(exc.errors()[:4])
+
+        # For fallback handling at this layer, keep original model so we can
+        # retry once with FAST_MODEL if primary fails (NIMClient already does
+        # that, but we add extra safety).
+        primary_model = model
+        models_to_try = [primary_model]
+        if getattr(settings, "AI_MODEL_FALLBACK", True):
+            fast = getattr(settings, "FAST_MODEL", "")
+            if fast and fast != primary_model:
+                models_to_try.append(fast)
+
+        last_ai_error: Exception | None = None
+
+        for model_idx, try_model in enumerate(models_to_try):
+            is_fallback = model_idx > 0
+            # For fallback we only attempt once
+            attempt_budget = 1 if is_fallback else attempts
+
+            for attempt in range(attempt_budget):
+                if last_error:
+                    messages = messages[:1] + [
+                        {
+                            "role": "user",
+                            "content": user_prompt
+                            + "\n\nYour previous response failed JSON validation:\n"
+                            + last_error
+                            + "\n\nReturn ONLY valid JSON matching this schema:\n"
+                            + json.dumps(schema, indent=2),
+                        }
+                    ]
+                try:
+                    data = await self.ai.chat(
+                        model=try_model,
+                        messages=messages,
+                        temperature=temp,
+                        max_tokens=tokens,
+                        response_format={"type": "json_object"},
+                    )
+                except AIProviderError as exc:
+                    last_ai_error = exc
+                    logger.warning(
+                        "LLMClient chat failed model=%s attempt=%s/%s fallback=%s err=%s",
+                        try_model,
+                        attempt + 1,
+                        attempt_budget,
+                        is_fallback,
+                        str(exc)[:200],
+                    )
+                    # If not fallback yet, break inner loop to attempt fallback model
+                    if not is_fallback and len(models_to_try) > 1:
+                        break
+                    # else continue retry
+                    continue
+
+                content = data["choices"][0]["message"]["content"]
+                parsed = _parse_json(content)
+                try:
+                    validated = response_model.model_validate(parsed)
+
+                    # Cache successful result
+                    if cache_enabled:
+                        try:
+                            # Store dict representation (not the Pydantic instance itself)
+                            to_cache = validated.model_dump()
+                            emb = None
+                            # If semantic cache enabled, compute embedding for the request
+                            if getattr(settings, "AI_CACHE_SEMANTIC_ENABLED", False):
+                                try:
+                                    if getattr(settings, "EMBEDDING_MODEL", ""):
+                                        emb_model = settings.EMBEDDING_MODEL
+                                        q_embs = await self.ai.embed(
+                                            emb_model, [user_prompt]
+                                        )
+                                        if q_embs:
+                                            emb = q_embs[0]
+                                except Exception:
+                                    emb = None
+                            self._cache.set(
+                                cache_key,
+                                to_cache,
+                                embedding=emb,
+                                model=primary_model,
+                            )
+                            logger.debug(
+                                "AI cache set model=%s key=%s",
+                                primary_model,
+                                cache_key[:12],
+                            )
+                        except Exception as exc:
+                            logger.debug("Failed to write AI cache: %s", exc)
+
+                    return validated
+                except ValidationError as exc:
+                    last_error = json.dumps(exc.errors()[:4])
+                    logger.warning(
+                        "Structured response failed validation (attempt %s/%s): %s",
+                        attempt + 1,
+                        attempt_budget,
+                        exc.errors()[:2],
+                    )
+                    continue
+
+            # Exhausted attempts for this model; if we have fallback left, log and continue
+            if not is_fallback and len(models_to_try) > 1:
                 logger.warning(
-                    "Structured response failed validation (attempt %s/%s): %s",
-                    attempt + 1, attempts, exc.errors()[:2],
+                    "LLMClient primary model %s failed, attempting fallback %s",
+                    primary_model,
+                    models_to_try[1],
                 )
+                # Reset last_error for fallback attempt? Keep it.
                 continue
-        raise AIProviderError(f"Could not obtain a valid {response_model.__name__} after {attempts} attempts")
+
+        # If we get here, all models failed
+        if last_ai_error:
+            raise last_ai_error
+        raise AIProviderError(
+            f"Could not obtain a valid {response_model.__name__} after {attempts} attempts"
+        )
 
 
 def _parse_json(content: str) -> dict:

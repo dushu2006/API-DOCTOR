@@ -29,7 +29,8 @@ class Settings(BaseSettings):
     NVIDIA_BASE_URL: str = "https://integrate.api.nvidia.com/v1"
 
     # Model routing (exact names stay configurable — never hard-coded).
-    INVESTIGATOR_MODEL: str = "nvidia/nemotron-3-ultra-550b-a55b"
+    # Faster defaults to cut latency; users may override in .env.
+    INVESTIGATOR_MODEL: str = "deepseek-ai/deepseek-v4-flash-0731"
     CODER_MODEL: str = "z-ai/glm-5.2"
     FAST_MODEL: str = "nvidia/nemotron-3-nano-30b-a3b"
     EMBEDDING_MODEL: str = "nvidia/nv-embedcode-7b-v1"
@@ -54,9 +55,21 @@ class Settings(BaseSettings):
     # AI behaviour
     # ------------------------------------------------------------------
     AI_TIMEOUT_SECONDS: float = 90.0
-    AI_MAX_TOKENS: int = 4096
+    # Short per-request timeout for fail-fast + fallback (distinct from overall AI_TIMEOUT).
+    AI_REQUEST_TIMEOUT_SECONDS: float = 35.0
+    AI_MAX_TOKENS: int = 1500
     AI_MAX_RETRIES: int = 3
     AI_TEMPERATURE: float = 0.1
+    # Fallback: if primary model times out / fails, retry once with FAST_MODEL.
+    AI_MODEL_FALLBACK: bool = True
+
+    # Caching (exact cache keyed by hash(model + system_prompt + user_prompt)).
+    AI_CACHE_ENABLED: bool = True
+    AI_CACHE_TTL_SECONDS: int = 3600
+    AI_CACHE_MAX_SIZE: int = 128
+    # Optional semantic cache (needs EMBEDDING_MODEL; degrades gracefully if it fails).
+    AI_CACHE_SEMANTIC_ENABLED: bool = False
+    AI_CACHE_SEMANTIC_THRESHOLD: float = 0.9
 
     # ------------------------------------------------------------------
     # Sandbox
@@ -75,9 +88,9 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Code retrieval
     # ------------------------------------------------------------------
-    MAX_CONTEXT_FILES: int = 10
-    CODE_RETRIEVAL_TOP_K: int = 8
-    CONTEXT_LINE_WINDOW: int = 30
+    MAX_CONTEXT_FILES: int = 4
+    CODE_RETRIEVAL_TOP_K: int = 5
+    CONTEXT_LINE_WINDOW: int = 12
 
     # ------------------------------------------------------------------
     # Workflow gates
