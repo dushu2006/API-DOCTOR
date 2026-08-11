@@ -11,6 +11,7 @@ Adds:
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import re
@@ -167,7 +168,18 @@ class LLMClient:
                     continue
 
                 content = data["choices"][0]["message"]["content"]
-                parsed = _parse_json(content)
+                try:
+                    parsed = _parse_json(content)
+                except (json.JSONDecodeError, ValueError, SyntaxError) as exc:
+                    last_error = f"Malformed JSON: {exc}"
+                    logger.warning(
+                        "Structured response failed JSON parsing (attempt %s/%s): %s",
+                        attempt + 1,
+                        attempt_budget,
+                        exc,
+                    )
+                    continue
+
                 try:
                     validated = response_model.model_validate(parsed)
 
@@ -234,15 +246,62 @@ class LLMClient:
 
 def _parse_json(content: str) -> dict:
     content = content.strip()
-    block = _JSON_BLOCK.search(content)
-    if block:
-        content = block.group(1).strip()
-    # Tolerate surrounding prose by extracting the outermost {...}.
-    if not content.startswith("{"):
-        start = content.find("{")
-        end = content.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            content = content[start : end + 1]
+
+    # 1. Direct JSON parse (fast path & preserves embedded markdown fences)
+    try:
+        res = json.loads(content, strict=False)
+        if isinstance(res, dict):
+            return res
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # 2. Direct Python-dict literal parse (single quotes, True/False/None)
+    try:
+        res = ast.literal_eval(content)
+        if isinstance(res, dict):
+            return res
+    except (ValueError, SyntaxError, TypeError):
+        pass
+
+    # 3. If wrapped in outer markdown fence, extract block content
+    if content.startswith("```"):
+        first_newline = content.find("\n")
+        if first_newline != -1:
+            last_fence = content.rfind("```")
+            if last_fence > first_newline:
+                inner = content[first_newline + 1 : last_fence].strip()
+                try:
+                    res = json.loads(inner, strict=False)
+                    if isinstance(res, dict):
+                        return res
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                try:
+                    res = ast.literal_eval(inner)
+                    if isinstance(res, dict):
+                        return res
+                except (ValueError, SyntaxError, TypeError):
+                    pass
+
+    # 4. Extract outermost {...} to tolerate surrounding prose or fences
+    start = content.find("{")
+    end = content.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        snippet = content[start : end + 1]
+        try:
+            res = json.loads(snippet, strict=False)
+            if isinstance(res, dict):
+                return res
+        except (json.JSONDecodeError, TypeError):
+            pass
+        try:
+            res = ast.literal_eval(snippet)
+            if isinstance(res, dict):
+                return res
+        except (ValueError, SyntaxError, TypeError):
+            pass
+
+    # Final attempt with standard json.loads so proper JSONDecodeError is raised if invalid
     return json.loads(content)
 
 

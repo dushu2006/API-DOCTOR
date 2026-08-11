@@ -84,3 +84,85 @@ async def test_root_cause_parsing():
     assert analysis.category == "CODE_BUG"
     assert analysis.confidence == 0.9
     assert analysis.safe_to_repair is True
+
+
+async def test_parses_python_dict_literal():
+    client = LLMClient(FakeAI(["{'name': 'z', 'value': 42}"]))
+    result = await client.generate_structured(
+        response_model=SampleModel, system_prompt="", user_prompt=""
+    )
+    assert result.name == "z"
+    assert result.value == 42
+
+
+async def test_parses_embedded_markdown_fence_in_diff():
+    from app.agent.fix_agent import FixProposal
+
+    simulated = (
+        '{\n'
+        '  "summary": "Add null check for payment_method",\n'
+        '  "files_changed": ["app/demo_api/bugs.py"],\n'
+        '  "diff": "```diff\\n--- a/app/demo_api/bugs.py\\n+++ b/app/demo_api/bugs.py\\n@@ -118,7 +118,9 @@\\n def charge_user(user_id, amount):\\n     user = get_user(user_id)\\n-    token = user.payment_method.token\\n+    if user.payment_method is None:\\n+        raise ValueError(\'no payment method on file\')\\n+    token = user.payment_method.token\\n```",\n'
+        '  "reason": "Adds a null guard before accessing payment_method.token",\n'
+        '  "risk": "low"\n'
+        '}'
+    )
+    client = LLMClient(FakeAI([simulated]))
+    result = await client.generate_structured(
+        response_model=FixProposal, system_prompt="", user_prompt=""
+    )
+    assert result.summary == "Add null check for payment_method"
+    assert "--- a/app/demo_api/bugs.py" in result.diff
+    assert result.risk == "low"
+
+
+async def test_parses_outer_fence_with_embedded_fence():
+    from app.agent.fix_agent import FixProposal
+
+    simulated = (
+        '```json\n'
+        '{\n'
+        '  "summary": "Add null check for payment_method",\n'
+        '  "files_changed": ["app/demo_api/bugs.py"],\n'
+        '  "diff": "```diff\\n--- a/app/demo_api/bugs.py\\n+++ b/app/demo_api/bugs.py\\n```",\n'
+        '  "reason": "null guard",\n'
+        '  "risk": "low"\n'
+        '}\n'
+        '```'
+    )
+    client = LLMClient(FakeAI([simulated]))
+    result = await client.generate_structured(
+        response_model=FixProposal, system_prompt="", user_prompt=""
+    )
+    assert result.summary == "Add null check for payment_method"
+    assert result.risk == "low"
+
+
+async def test_parses_raw_newlines_in_json_strings():
+    raw_newlines = (
+        '{\n'
+        '  "name": "multiline",\n'
+        '  "value": 10\n'
+        '}'
+    )
+    client = LLMClient(FakeAI([raw_newlines]))
+    result = await client.generate_structured(
+        response_model=SampleModel, system_prompt="", user_prompt=""
+    )
+    assert result.name == "multiline"
+    assert result.value == 10
+
+
+async def test_retries_on_malformed_json():
+    fake = FakeAI([
+        '{"name": unquoted_value, ...}',   # Malformed JSON syntax error
+        '{"name": "recovered", "value": 7}',
+    ])
+    client = LLMClient(fake)
+    result = await client.generate_structured(
+        response_model=SampleModel, system_prompt="", user_prompt=""
+    )
+    assert result.name == "recovered"
+    assert result.value == 7
+    assert fake.calls == 2
+
