@@ -32,7 +32,7 @@ Constraints:
 5. The diff MUST apply cleanly with `patch -p1`.
 6. Diff paths must be relative to the repository root (e.g. `app/demo_api/bugs.py`).
 
-Respond ONLY with valid JSON matching the schema."""
+Respond ONLY with valid JSON matching the schema (double-quoted keys and strings — never single quotes, never a Python dict literal). Escape all newlines in the diff field as \\n. Do not wrap the diff value in its own markdown code fence."""
 
 
 class FixAgent:

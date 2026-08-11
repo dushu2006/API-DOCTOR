@@ -45,7 +45,7 @@ Identify the exact root cause. Reference specific files and line numbers from th
 provided snippets. Be precise and concise. Classify the failure into one of the
 given categories. Lower confidence when important context is missing.
 
-Respond ONLY with valid JSON matching the schema."""
+Respond ONLY with valid JSON matching the schema (double-quoted keys and strings — never single quotes, never a Python dict literal)."""
 
 
 class RootCauseAgent:
