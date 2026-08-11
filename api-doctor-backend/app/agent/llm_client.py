@@ -28,6 +28,9 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T", bound=BaseModel)
 
 _JSON_BLOCK = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
+# Reasoning models may prepend internal reasoning before their final response.  Do
+# not let JSON-like examples or notes in that block become the structured result.
+_THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
 
 class LLMClient:
@@ -173,10 +176,12 @@ class LLMClient:
                 except (json.JSONDecodeError, ValueError, SyntaxError) as exc:
                     last_error = f"Malformed JSON: {exc}"
                     logger.warning(
-                        "Structured response failed JSON parsing (attempt %s/%s): %s",
+                        "Structured response failed JSON parsing (attempt %s/%s): %s\n"
+                        "RAW CONTENT: %s",
                         attempt + 1,
                         attempt_budget,
                         exc,
+                        content[:2000],
                     )
                     continue
 
@@ -219,10 +224,12 @@ class LLMClient:
                 except ValidationError as exc:
                     last_error = json.dumps(exc.errors()[:4])
                     logger.warning(
-                        "Structured response failed validation (attempt %s/%s): %s",
+                        "Structured response failed validation (attempt %s/%s): %s\n"
+                        "RAW CONTENT: %s",
                         attempt + 1,
                         attempt_budget,
                         exc.errors()[:2],
+                        content[:2000],
                     )
                     continue
 
@@ -244,8 +251,60 @@ class LLMClient:
         )
 
 
+def _extract_json_candidates(content: str) -> list[str]:
+    """Return balanced top-level object candidates, without matching braces in strings."""
+    candidates: list[str] = []
+    depth = 0
+    start: int | None = None
+    in_string = False
+    escaped = False
+
+    for index, char in enumerate(content):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            if depth == 0:
+                start = index
+            depth += 1
+        elif char == "}" and depth:
+            depth -= 1
+            if depth == 0 and start is not None:
+                candidates.append(content[start : index + 1])
+                start = None
+
+    # Reasoning fragments tend to be small; prefer a complete, larger response.
+    return sorted(candidates, key=len, reverse=True)
+
+
+def _parse_object(value: str) -> dict | None:
+    """Parse a JSON object, accepting Python dict literals as a compatibility fallback."""
+    try:
+        result = json.loads(value, strict=False)
+        if isinstance(result, dict):
+            return result
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    try:
+        result = ast.literal_eval(value)
+        if isinstance(result, dict):
+            return result
+    except (ValueError, SyntaxError, TypeError):
+        pass
+    return None
+
+
 def _parse_json(content: str) -> dict:
-    content = content.strip()
+    content = _THINK_BLOCK.sub("", content).strip()
 
     # 1. Direct JSON parse (fast path & preserves embedded markdown fences)
     try:
@@ -283,23 +342,22 @@ def _parse_json(content: str) -> dict:
                 except (ValueError, SyntaxError, TypeError):
                     pass
 
-    # 4. Extract outermost {...} to tolerate surrounding prose or fences
-    start = content.find("{")
-    end = content.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        snippet = content[start : end + 1]
-        try:
-            res = json.loads(snippet, strict=False)
-            if isinstance(res, dict):
-                return res
-        except (json.JSONDecodeError, TypeError):
-            pass
-        try:
-            res = ast.literal_eval(snippet)
-            if isinstance(res, dict):
-                return res
-        except (ValueError, SyntaxError, TypeError):
-            pass
+    # 4. Scan each balanced object rather than spanning the first and last
+    # brace in the entire response.  A reasoning/prose prefix can contain its
+    # own JSON-like object before the final structured answer.
+    parsed_candidates: list[dict] = []
+    for candidate in _extract_json_candidates(content):
+        parsed = _parse_object(candidate)
+        if parsed is not None:
+            parsed_candidates.append(parsed)
+
+    # Prefer a substantive object.  Keep a one-key fallback for response
+    # models that legitimately have only one field.
+    for parsed in parsed_candidates:
+        if len(parsed) > 1:
+            return parsed
+    if parsed_candidates:
+        return parsed_candidates[0]
 
     # Final attempt with standard json.loads so proper JSONDecodeError is raised if invalid
     return json.loads(content)
