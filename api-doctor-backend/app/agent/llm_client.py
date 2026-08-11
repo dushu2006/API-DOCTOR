@@ -305,6 +305,49 @@ def _repair_html_entities(content: str) -> str:
     return _html.unescape(repaired)
 
 
+def _safe_eval_ast(node: ast.AST) -> Any:
+    """Safely evaluate an AST node into Python primitives, accepting JSON-style booleans/null."""
+    if isinstance(node, ast.Dict):
+        return {_safe_eval_ast(k): _safe_eval_ast(v) for k, v in zip(node.keys, node.values)}
+    if isinstance(node, ast.List):
+        return [_safe_eval_ast(elt) for elt in node.elts]
+    if isinstance(node, ast.Tuple):
+        return tuple(_safe_eval_ast(elt) for elt in node.elts)
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Name):
+        if node.id in ("true", "True"):
+            return True
+        if node.id in ("false", "False"):
+            return False
+        if node.id in ("null", "None"):
+            return None
+        raise ValueError(f"Unsupported identifier: {node.id}")
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        val = _safe_eval_ast(node.operand)
+        return -val if isinstance(node.op, ast.USub) else val
+    raise ValueError(f"Unsupported AST node: {type(node)}")
+
+
+def _parse_dict_literal(text: str) -> dict | None:
+    """Parse Python dict literals with support for single quotes and JSON literals (true/false/null)."""
+    try:
+        res = ast.literal_eval(text)
+        if isinstance(res, dict):
+            return res
+    except (ValueError, SyntaxError, TypeError):
+        pass
+
+    try:
+        tree = ast.parse(text.strip(), mode="eval")
+        res = _safe_eval_ast(tree.body)
+        if isinstance(res, dict):
+            return res
+    except Exception:
+        pass
+    return None
+
+
 def _parse_object(value: str) -> dict | None:
     """Parse a JSON object, accepting Python dict literals as a compatibility fallback."""
     try:
@@ -314,18 +357,18 @@ def _parse_object(value: str) -> dict | None:
     except (json.JSONDecodeError, TypeError):
         pass
 
-    try:
-        result = ast.literal_eval(value)
-        if isinstance(result, dict):
-            return result
-    except (ValueError, SyntaxError, TypeError):
-        pass
+    result = _parse_dict_literal(value)
+    if result is not None:
+        return result
 
     try:
         repaired = _repair_html_entities(value)
         if repaired != value:
             result = json.loads(repaired, strict=False)
             if isinstance(result, dict):
+                return result
+            result = _parse_dict_literal(repaired)
+            if result is not None:
                 return result
     except (json.JSONDecodeError, TypeError):
         pass
@@ -345,13 +388,10 @@ def _parse_json(content: str) -> dict:
     except (json.JSONDecodeError, TypeError):
         pass
 
-    # 2. Direct Python-dict literal parse (single quotes, True/False/None)
-    try:
-        res = ast.literal_eval(content)
-        if isinstance(res, dict):
-            return res
-    except (ValueError, SyntaxError, TypeError):
-        pass
+    # 2. Direct Python-dict literal parse (single quotes, True/False/None or true/false/null)
+    dict_res = _parse_dict_literal(content)
+    if dict_res is not None:
+        return dict_res
 
     # 3. If wrapped in outer markdown fence, extract block content
     if content.startswith("```"):
@@ -366,12 +406,9 @@ def _parse_json(content: str) -> dict:
                         return res
                 except (json.JSONDecodeError, TypeError):
                     pass
-                try:
-                    res = ast.literal_eval(inner)
-                    if isinstance(res, dict):
-                        return res
-                except (ValueError, SyntaxError, TypeError):
-                    pass
+                dict_inner = _parse_dict_literal(inner)
+                if dict_inner is not None:
+                    return dict_inner
 
     # 4. Scan each balanced object rather than spanning the first and last
     # brace in the entire response.  A reasoning/prose prefix can contain its
@@ -397,7 +434,13 @@ def _parse_json(content: str) -> dict:
         # Some models substitute HTML entities for JSON-unsafe characters
         # instead of properly escaping them -- recover and retry once.
         repaired = _repair_html_entities(content)
-        return json.loads(repaired)
+        try:
+            return json.loads(repaired)
+        except json.JSONDecodeError:
+            dict_repaired = _parse_dict_literal(repaired)
+            if dict_repaired is not None:
+                return dict_repaired
+            raise
 
 
 def _json_schema(model: Type[BaseModel]) -> dict:
