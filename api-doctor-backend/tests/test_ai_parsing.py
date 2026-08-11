@@ -199,3 +199,35 @@ def test_recovers_html_entities_in_json_strings():
     assert 'raise ValueError("no payment method")' in parsed["diff"]
 
 
+async def test_parses_python_dict_with_json_boolean_and_null_literals():
+    content = (
+        "{\n"
+        "  'root_cause': 'user.payment_method is None; accessing .token crashes with AttributeError',\n"
+        "  'category': 'CODE_BUG',\n"
+        "  'confidence': 0.95,\n"
+        "  'affected_files': ['app/demo_api/bugs.py'],\n"
+        "  'affected_functions': ['charge_user'],\n"
+        "  'safe_to_repair': true,\n"
+        "  'reason': 'clear null pointer on optional field'\n"
+        "}"
+    )
+    client = LLMClient(FakeAI([content]))
+    result = await client.generate_structured(
+        response_model=RootCauseAnalysis, system_prompt="", user_prompt=""
+    )
+    assert result.category == "CODE_BUG"
+    assert result.safe_to_repair is True
+    assert result.confidence == 0.95
+    assert result.affected_files == ["app/demo_api/bugs.py"]
+
+
+def test_parse_json_handles_nested_single_quoted_dict_with_booleans():
+    content = "{'summary': 'Fix bug', 'files_changed': ['app/demo_api/bugs.py'], 'diff': '--- a/bugs.py\\n+++ b/bugs.py\\n', 'reason': 'null check', 'risk': 'low', 'active': true, 'disabled': false, 'extra': null}"
+    parsed = _parse_json(content)
+    assert parsed["summary"] == "Fix bug"
+    assert parsed["active"] is True
+    assert parsed["disabled"] is False
+    assert parsed["extra"] is None
+
+
+

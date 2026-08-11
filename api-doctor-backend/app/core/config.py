@@ -57,7 +57,7 @@ class Settings(BaseSettings):
     AI_TIMEOUT_SECONDS: float = 90.0
     # Short per-request timeout for fail-fast + fallback (distinct from overall AI_TIMEOUT).
     AI_REQUEST_TIMEOUT_SECONDS: float = 35.0
-    AI_MAX_TOKENS: int = 1500
+    AI_MAX_TOKENS: int = 4096
     AI_MAX_RETRIES: int = 3
     AI_TEMPERATURE: float = 0.1
     # Fallback: if primary model times out / fails, retry once with FAST_MODEL.
