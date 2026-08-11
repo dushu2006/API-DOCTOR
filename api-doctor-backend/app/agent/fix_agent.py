@@ -25,14 +25,26 @@ class FixProposal(BaseModel):
 SYSTEM_PROMPT = """You are a staff engineer writing a minimal, safe patch.
 
 Constraints:
-1. Produce ONE unified diff (standard `diff -u` format, hunk headers `@@ -a,b +c,d @@`).
+1. Produce ONE unified diff (standard diff -u format, hunk headers @@ -a,b +c,d @@).
 2. Make the smallest possible change. Never rewrite whole files.
 3. No style-only changes. Only add imports if required for the fix.
 4. Preserve behaviour for all unrelated cases.
-5. The diff MUST apply cleanly with `patch -p1`.
-6. Diff paths must be relative to the repository root (e.g. `app/demo_api/bugs.py`).
+5. The diff MUST apply cleanly with patch -p1.
+6. Diff paths must be relative to the repository root (e.g. app/demo_api/bugs.py).
 
-Respond ONLY with valid JSON matching the schema (double-quoted keys and strings — never single quotes, never a Python dict literal). Escape all newlines in the diff field as \\n. Do not wrap the diff value in its own markdown code fence."""
+Respond ONLY with valid JSON matching EXACTLY this shape (top-level keys:
+summary, files_changed, diff, reason, risk). Do NOT return a mapping of
+file paths to diffs -- always use this exact structure:
+{
+  "summary": "Add null check for payment_method before accessing .token",
+  "files_changed": ["app/demo_api/bugs.py"],
+  "diff": "--- a/app/demo_api/bugs.py\\n+++ b/app/demo_api/bugs.py\\n@@ -118,3 +118,5 @@\\n     user = get_user(user_id)\\n-    token = user.payment_method.token\\n+    if user.payment_method is None:\\n+        raise ValueError(\\"no payment method\\")\\n+    token = user.payment_method.token\\n",
+  "reason": "user.payment_method can be None; accessing .token crashes with AttributeError",
+  "risk": "low"
+}
+Inside the diff string: use \\n for every newline and \\" for every double
+quote. NEVER use HTML entities (no &#10;, no &quot;, no &amp;) and never a
+literal unescaped newline or quote inside the JSON string."""
 
 
 class FixAgent:

@@ -12,6 +12,7 @@ Adds:
 from __future__ import annotations
 
 import ast
+import html as _html
 import json
 import logging
 import re
@@ -285,6 +286,25 @@ def _extract_json_candidates(content: str) -> list[str]:
     return sorted(candidates, key=len, reverse=True)
 
 
+def _repair_html_entities(content: str) -> str:
+    # Some models substitute HTML entities for JSON-unsafe characters
+    # instead of properly escaping them -- recover and retry once.
+    repaired = (
+        content.replace("&#13;&#10;", "\\n")
+        .replace("&#x0D;&#x0A;", "\\n")
+        .replace("&#10;", "\\n")
+        .replace("&#x0A;", "\\n")
+        .replace("&#x0a;", "\\n")
+        .replace("&#13;", "")
+        .replace("&#x0D;", "")
+        .replace("&#x0d;", "")
+        .replace("&quot;", '\\"')
+        .replace("&#34;", '\\"')
+        .replace("&#x22;", '\\"')
+    )
+    return _html.unescape(repaired)
+
+
 def _parse_object(value: str) -> dict | None:
     """Parse a JSON object, accepting Python dict literals as a compatibility fallback."""
     try:
@@ -300,11 +320,22 @@ def _parse_object(value: str) -> dict | None:
             return result
     except (ValueError, SyntaxError, TypeError):
         pass
+
+    try:
+        repaired = _repair_html_entities(value)
+        if repaired != value:
+            result = json.loads(repaired, strict=False)
+            if isinstance(result, dict):
+                return result
+    except (json.JSONDecodeError, TypeError):
+        pass
+
     return None
 
 
 def _parse_json(content: str) -> dict:
     content = _THINK_BLOCK.sub("", content).strip()
+    content = _repair_html_entities(content)
 
     # 1. Direct JSON parse (fast path & preserves embedded markdown fences)
     try:
@@ -360,7 +391,13 @@ def _parse_json(content: str) -> dict:
         return parsed_candidates[0]
 
     # Final attempt with standard json.loads so proper JSONDecodeError is raised if invalid
-    return json.loads(content)
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        # Some models substitute HTML entities for JSON-unsafe characters
+        # instead of properly escaping them -- recover and retry once.
+        repaired = _repair_html_entities(content)
+        return json.loads(repaired)
 
 
 def _json_schema(model: Type[BaseModel]) -> dict:
