@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from app.agent.llm_client import LLMClient
+from app.agent.llm_client import LLMClient, _parse_json
 from app.agent.root_cause_agent import RootCauseAnalysis
 
 
@@ -49,6 +49,26 @@ async def test_parses_bare_json_with_surrounding_prose():
         response_model=SampleModel, system_prompt="", user_prompt=""
     )
     assert result.name == "y"
+
+
+def test_ignores_think_block_before_structured_response():
+    content = '''
+    <think>
+    I am inspecting files: {"./app/demo_api/router.py": "/app/demo_api/router.py"}
+    </think>
+    {"name": "final answer", "value": 9}
+    '''
+
+    assert _parse_json(content) == {"name": "final answer", "value": 9}
+
+
+def test_selects_balanced_response_after_json_like_prose_fragment():
+    content = (
+        'Inspecting context: {"./app/demo_api/bugs.py": []}. '
+        'Final response: {"name": "selected", "value": 4}'
+    )
+
+    assert _parse_json(content) == {"name": "selected", "value": 4}
 
 
 async def test_retries_on_validation_error():
