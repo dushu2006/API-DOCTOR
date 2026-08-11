@@ -186,3 +186,16 @@ async def test_retries_on_malformed_json():
     assert result.value == 7
     assert fake.calls == 2
 
+
+def test_recovers_html_entities_in_json_strings():
+    content = (
+        '{"name": "test &amp; recovery", '
+        '"value": 5, '
+        '"diff": "--- a/foo&#10;+++ b/foo&#10;- token = user.payment_method.token&#10;+ if user.payment_method is None:&#10;+     raise ValueError(&quot;no payment method&quot;)&#10;"}'
+    )
+    parsed = _parse_json(content)
+    assert parsed["name"] == "test & recovery"
+    assert "--- a/foo\n" in parsed["diff"]
+    assert 'raise ValueError("no payment method")' in parsed["diff"]
+
+
