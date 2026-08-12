@@ -582,7 +582,15 @@ export default function App() {
       setIsDiagnosing(false);
       await fetchIncidentDetails(activeIncidentId);
     } catch (err) {
-      alert(`Failed to stop diagnosis: ${err.message}`);
+      // A paused/stuck incident has no running worker, but the user still
+      // expects Stop to clear the diagnosing state. Refresh and only surface
+      // unexpected failures.
+      setIsDiagnosing(false);
+      await fetchIncidentDetails(activeIncidentId);
+      const detail = String(err.message || '');
+      if (!/no active diagnosis/i.test(detail)) {
+        alert(`Failed to stop diagnosis: ${detail}`);
+      }
     }
   };
 
@@ -599,9 +607,11 @@ export default function App() {
   const handleApproveFileRead = async (approved) => {
     if (!activeIncidentId) return;
     try {
+      setIsDiagnosing(Boolean(approved));
       await api.approveFileRead(activeIncidentId, approved);
       await fetchIncidentDetails(activeIncidentId);
     } catch (err) {
+      setIsDiagnosing(false);
       alert(`Failed to record file read approval: ${err.message}`);
     }
   };
@@ -609,9 +619,11 @@ export default function App() {
   const handleApproveFixProposal = async (approved) => {
     if (!activeIncidentId) return;
     try {
+      setIsDiagnosing(Boolean(approved));
       await api.approveFixProposal(activeIncidentId, approved);
       await fetchIncidentDetails(activeIncidentId);
     } catch (err) {
+      setIsDiagnosing(false);
       alert(`Failed to record fix approval: ${err.message}`);
     }
   };

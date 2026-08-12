@@ -126,32 +126,22 @@ class Orchestrator:
         await emit(incident.id, "error_detected", "done", "Error detected")
         return incident
 
+    def has_active_pipeline(self, incident_id: str) -> bool:
+        task = self._pipeline_tasks.get(incident_id)
+        return bool(task and not task.done())
+
     def start_diagnosis(self, incident_id: str) -> bool:
-        """Start one background pipeline for an incident."""
+        """Start or resume one background pipeline for an incident."""
         inc = incident_store.get(incident_id)
         if not inc:
             return False
 
-        existing = self._pipeline_tasks.get(incident_id)
-        if existing and not existing.done():
+        if self.has_active_pipeline(incident_id):
             return False
 
-        retryable_states = {
-            IncidentStatus.RECEIVED,
-            IncidentStatus.DETECTED,
-            IncidentStatus.FAILED,
-            IncidentStatus.REQUIRES_HUMAN_REVIEW,
-            IncidentStatus.PR_READY,
-            IncidentStatus.INVESTIGATION_FAILED,
-            IncidentStatus.FIX_GENERATION_FAILED,
-            IncidentStatus.VERIFICATION_FAILED,
-            IncidentStatus.REPAIR_LIMIT_REACHED,
-            IncidentStatus.CANCELLED,
-            # Interactive workflow pause points - can be resumed
-            IncidentStatus.AWAITING_FILE_READ_APPROVAL,
-            IncidentStatus.AWAITING_FIX_APPROVAL,
-        }
-        if inc.status not in retryable_states:
+        # Allow resume from paused/stuck in-progress states as long as no
+        # worker is running. PR_CREATED is the only non-restartable success.
+        if inc.status == IncidentStatus.PR_CREATED:
             return False
 
         task = asyncio.create_task(
@@ -177,22 +167,39 @@ class Orchestrator:
             logger.exception("Unhandled diagnosis task failure for %s", incident_id)
 
     async def cancel_diagnosis(self, incident_id: str) -> bool:
-        """Cancel an active pipeline and persist an explicit terminal state."""
-        task = self._pipeline_tasks.get(incident_id)
-        if not task or task.done():
+        """Cancel a running, paused, or stuck diagnosis and persist a terminal state.
+
+        The pipeline task exits when it pauses for user approval, so cancel must
+        still succeed for AWAITING_* and other non-terminal statuses even when
+        no asyncio task is registered.
+        """
+        inc = incident_store.get(incident_id)
+        if not inc:
+            return False
+        if inc.status.is_terminal:
             return False
 
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        task = self._pipeline_tasks.get(incident_id)
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
         inc = incident_store.get(incident_id)
         if not inc:
             return False
+        if inc.status == IncidentStatus.CANCELLED:
+            return True
+        if inc.status.is_terminal:
+            return False
+
         inc.status = IncidentStatus.CANCELLED
         inc.error_message = "Diagnosis cancelled by user"
+        for ev in inc.activity:
+            if ev.status in {"running", "pending"}:
+                ev.status = "cancelled"
         inc.add_activity("pipeline", "cancelled", inc.error_message)
         incident_store.update(inc)
         await emit(incident_id, "pipeline", "cancelled", inc.error_message)
@@ -232,19 +239,23 @@ class Orchestrator:
                     inc.add_activity("project_discovered", "done", "Project discovered")
                     await emit(inc.id, "project_discovered", "done", "Project discovered")
 
-            # Context collection (may pause for file read approval)
-            await self._collect_context(inc, profile)
-            if inc.status == IncidentStatus.AWAITING_FILE_READ_APPROVAL:
-                # Paused for approval - return and wait
-                await emit(inc.id, "pipeline", "paused", "Waiting for file read approval")
-                return inc
+            resuming_approved_fix = self._should_resume_approved_fix(inc)
 
-            # Investigation (may pause for fix approval)
-            await self._investigate(inc, profile)
-            if inc.status == IncidentStatus.AWAITING_FIX_APPROVAL:
-                # Paused for approval - return and wait
-                await emit(inc.id, "pipeline", "paused", "Waiting for fix approval")
-                return inc
+            # Context collection (may pause for file read approval). Skip when
+            # we already have context and are only resuming sandbox testing.
+            if not (resuming_approved_fix and inc.context):
+                await self._collect_context(inc, profile)
+                if inc.status == IncidentStatus.AWAITING_FILE_READ_APPROVAL:
+                    await emit(inc.id, "pipeline", "paused", "Waiting for file read approval")
+                    return inc
+
+            # Investigation (may pause for fix approval). Skip when the user
+            # already approved an existing proposal so we don't re-call the LLM.
+            if not resuming_approved_fix:
+                await self._investigate(inc, profile)
+                if inc.status == IncidentStatus.AWAITING_FIX_APPROVAL:
+                    await emit(inc.id, "pipeline", "paused", "Waiting for fix approval")
+                    return inc
 
             if inc.status in (
                 IncidentStatus.FAILED,
@@ -255,8 +266,11 @@ class Orchestrator:
                 await emit(inc.id, "pipeline", "failed", inc.error_message or "investigation failed")
                 return inc
 
-            await self._sandbox_and_verify(inc, profile)
+            if inc.fix_proposal:
+                await self._sandbox_and_verify(inc, profile)
             await emit(inc.id, "pipeline", "done", f"status={inc.status}")
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:  # noqa: BLE001
             inc.error_message = f"{type(exc).__name__}: {exc}"
             if inc.status not in (
@@ -265,19 +279,43 @@ class Orchestrator:
                 IncidentStatus.FIX_GENERATION_FAILED,
                 IncidentStatus.VERIFICATION_FAILED,
                 IncidentStatus.REPAIR_LIMIT_REACHED,
+                IncidentStatus.CANCELLED,
             ):
                 inc.status = IncidentStatus.VERIFICATION_FAILED
             inc.add_activity("pipeline_error", "failed", str(exc))
             log_operation(logger, incident_id, "pipeline", "failed", error=str(exc))
             await emit(incident_id, "pipeline_error", "failed", str(exc)[:500])
         finally:
-            incident_store.update(inc)
+            # Don't clobber an explicit user cancel that landed during unwind.
+            latest = incident_store.get(incident_id)
+            if latest and latest.status == IncidentStatus.CANCELLED:
+                inc = latest
+            else:
+                incident_store.update(inc)
             log_operation(
                 logger, incident_id, "pipeline", "done",
                 duration=time.perf_counter() - t_start,
                 error=inc.error_message,
             )
         return inc
+
+    @staticmethod
+    def _has_activity(inc: Incident, step: str, status: str) -> bool:
+        return any(ev.step == step and ev.status == status for ev in inc.activity)
+
+    def _should_resume_approved_fix(self, inc: Incident) -> bool:
+        """True when we should continue from sandbox instead of regenerating a fix."""
+        if not inc.fix_proposal or not self._has_activity(inc, "fix_approval", "done"):
+            return False
+        return inc.status in {
+            IncidentStatus.AWAITING_FIX_APPROVAL,
+            IncidentStatus.FIX_PLANNED,
+            IncidentStatus.FIX_READY,
+            IncidentStatus.SANDBOX_TESTING,
+            IncidentStatus.SANDBOX_RUNNING,
+            IncidentStatus.TESTING,
+            IncidentStatus.VERIFYING,
+        }
 
     # ------------------------------------------------------------------
     async def _collect_context(self, inc: Incident, profile: Any = None) -> None:
@@ -296,19 +334,19 @@ class Orchestrator:
             inc.add_activity("stack_trace_parsed", "done", "Stack trace extracted")
             inc.add_activity("relevant_source_identified", "done", f"{len(context['affected_files'])} files")
             
-            # Pause for file read approval - show user which files will be read
+            # Pause for file read approval unless the user already approved.
             affected_files = context.get("affected_files", [])
-            if affected_files:
+            if affected_files and not self._has_activity(inc, "file_read_approval", "done"):
                 file_list = "\n".join(f"  - {f}" for f in affected_files)
                 inc.add_activity("files_to_read", "pending", f"{len(affected_files)} files identified for reading")
                 inc.add_activity("file_read_approval", "pending", f"Files to read:\n{file_list}")
+                inc.set_activity("collecting_context", "running", "Waiting for file read approval")
                 inc.status = IncidentStatus.AWAITING_FILE_READ_APPROVAL
                 incident_store.update(inc)
                 await emit(inc.id, "file_read_approval", "pending", f"Approval needed: {len(affected_files)} files")
-                # Don't auto-continue - wait for user approval
+                await emit(inc.id, "pipeline", "paused", "Waiting for file read approval")
                 return
-            
-            # If no files to read, continue as before
+
             for f in affected_files:
                 inc.add_activity("file_read", "done", f"Reading {f}")
                 await emit(inc.id, "file_read", "done", f"Reading {f}")
@@ -390,13 +428,13 @@ class Orchestrator:
             await emit(inc.id, "fix_generated", "done", proposal.summary)
             
             # Pause for fix approval - show user the proposed fix before sandbox testing
-            if proposal and proposal.diff:
+            if proposal and proposal.diff and not self._has_activity(inc, "fix_approval", "done"):
                 inc.status = IncidentStatus.AWAITING_FIX_APPROVAL
                 inc.add_activity("fix_approval", "pending", f"Fix proposed: {proposal.summary}")
                 inc.add_activity("diff_ready", "pending", f"Files to change: {', '.join(proposal.files_changed or [])}")
                 incident_store.update(inc)
                 await emit(inc.id, "fix_approval", "pending", "Approval needed: review proposed fix")
-                # Don't auto-continue to sandbox - wait for user approval
+                await emit(inc.id, "pipeline", "paused", "Waiting for fix approval")
                 return
         except Exception as exc:
             inc.status = IncidentStatus.FIX_GENERATION_FAILED
@@ -503,7 +541,7 @@ class Orchestrator:
     # Resume from approval pause points
     # ------------------------------------------------------------------
     async def resume_file_read(self, incident_id: str) -> bool:
-        """Resume pipeline after user approves file read."""
+        """Mark file-read as approved and continue the diagnosis pipeline."""
         inc = incident_store.get(incident_id)
         if not inc:
             logger.error("Incident %s not found", incident_id)
@@ -511,34 +549,21 @@ class Orchestrator:
         if inc.status != IncidentStatus.AWAITING_FILE_READ_APPROVAL:
             logger.warning("Incident %s not in AWAITING_FILE_READ_APPROVAL state", incident_id)
             return False
-        
-        # Now actually read the files and continue
-        inc.status = IncidentStatus.COLLECTING_CONTEXT
+
         inc.add_activity("file_read_approval", "done", "User approved file reading")
+        inc.status = IncidentStatus.COLLECTING_CONTEXT
+        inc.set_activity("collecting_context", "running", "Reading approved files")
         incident_store.update(inc)
         await emit(inc.id, "file_read_approval", "done", "File read approved")
-        
-        # Rebuild context to actually read files
-        try:
-            context = self.context_builder.build(inc)
-            inc.context = context
-            for f in context.get("affected_files", []):
-                inc.add_activity("file_read", "done", f"Reading {f}")
-                await emit(inc.id, "file_read", "done", f"Reading {f}")
-            inc.set_activity("collecting_context", "done", f"{len(context['affected_files'])} files")
-            log_operation(logger, inc.id, "collect_context", "ok", duration=0)
-            await emit(inc.id, "collecting_context", "done", f"{len(context['affected_files'])} files")
-        except Exception as exc:
-            inc.status = IncidentStatus.INVESTIGATION_FAILED
-            inc.error_message = f"context build failed: {exc}"
-            incident_store.update(inc)
+        await emit(inc.id, "collecting_context", "running", "Reading approved files")
+
+        if not self.start_diagnosis(incident_id):
+            logger.error("Failed to resume diagnosis after file-read approval for %s", incident_id)
             return False
-        
-        incident_store.update(inc)
         return True
 
     async def resume_fix(self, incident_id: str) -> bool:
-        """Resume pipeline after user approves fix."""
+        """Mark the proposed fix as approved and continue into sandbox testing."""
         inc = incident_store.get(incident_id)
         if not inc:
             logger.error("Incident %s not found", incident_id)
@@ -546,10 +571,14 @@ class Orchestrator:
         if inc.status != IncidentStatus.AWAITING_FIX_APPROVAL:
             logger.warning("Incident %s not in AWAITING_FIX_APPROVAL state", incident_id)
             return False
-        
+
         inc.add_activity("fix_approval", "done", "User approved fix")
         incident_store.update(inc)
         await emit(inc.id, "fix_approval", "done", "Fix approved")
+
+        if not self.start_diagnosis(incident_id):
+            logger.error("Failed to resume diagnosis after fix approval for %s", incident_id)
+            return False
         return True
 
     # ------------------------------------------------------------------

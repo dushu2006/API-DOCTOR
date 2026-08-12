@@ -29,6 +29,11 @@ const STEP_LABELS = {
   relevant_source_identified: 'Relevant source retrieved',
   file_read: 'Reading source file',
   collecting_context: 'Retrieving relevant source',
+  files_to_read: 'Files identified for reading',
+  file_read_approval: 'File read approval',
+  fix_approval: 'Fix approval',
+  diff_ready: 'Proposed diff ready',
+  pipeline: 'Diagnosis pipeline',
   investigation_started: 'Investigating root cause',
   investigating: 'Investigating root cause',
   root_cause_identified: 'Root cause identified',
@@ -233,13 +238,17 @@ export default function APIDoctorPanel({
                           <div style={{ width: '16px', height: '16px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--surface-1)' }}>
                             <span className="agent-dot" />
                           </div>
+                        ) : ev.status === 'pending' || ev.status === 'paused' ? (
+                          <div style={{ width: '16px', height: '16px', borderRadius: '50%', backgroundColor: 'var(--surface-1)', border: '1px solid var(--color-warning)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--color-warning)' }}>
+                            <Clock size={10} />
+                          </div>
                         ) : (
                           <div style={{ width: '16px', height: '16px', borderRadius: '50%', backgroundColor: 'var(--surface-1)', border: `1px solid ${['failed', 'cancelled'].includes(ev.status) ? 'var(--color-failure)' : 'var(--color-success)'}`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: ['failed', 'cancelled'].includes(ev.status) ? 'var(--color-failure)' : 'var(--color-success)' }}>
                             {['failed', 'cancelled'].includes(ev.status) ? <XCircle size={10} /> : <Check size={10} />}
                           </div>
                         )}
                         <div style={{ flex: 1, display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
-                          <span style={{ color: ev.status === 'running' ? 'var(--color-accent)' : 'var(--text-primary)', fontWeight: ev.status === 'running' ? 600 : 400 }}>
+                          <span style={{ color: ev.status === 'running' || ev.status === 'pending' || ev.status === 'paused' ? 'var(--color-accent)' : 'var(--text-primary)', fontWeight: ev.status === 'running' ? 600 : 400 }}>
                             {ev.message || STEP_LABELS[ev.step] || ev.step?.replace(/_/g, ' ') || 'Processing investigation step'}
                           </span>
                           <span style={{ fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--text-muted)' }}>
