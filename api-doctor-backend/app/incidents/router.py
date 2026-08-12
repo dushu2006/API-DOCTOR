@@ -34,7 +34,7 @@ from app.integrations.factory import get_log_provider
 from app.orchestrator import orchestrator
 from app.projects.store import project_store
 from app.render.client import RenderError
-from app.security.sanitizer import sanitize
+from app.security.sanitizer import redact_text, sanitize
 
 logger = logging.getLogger(__name__)
 
@@ -313,6 +313,17 @@ async def sync_render_logs(
             "owner_id": payload.get("owner_id"),
             "service_name": payload.get("service_name"),
         }
+
+    # Keep a small, redacted sample in the application logs while validating a
+    # provider's log format. This makes a zero-detection result auditable without
+    # sending potentially sensitive production text to the browser or logger.
+    sample_entries = [
+        redact_text(str(entry.get("message") or entry.get("text") or ""))[:200]
+        if isinstance(entry, dict)
+        else redact_text(str(entry))[:200]
+        for entry in logs[:10]
+    ]
+    logger.info("Sample Render log entries: %s", sample_entries)
 
     detector = FailureDetector(service=render.get("service_id") or "render")
     detections = detector.detect_from_logs(logs, service=render.get("service_id") or "render", source="render")

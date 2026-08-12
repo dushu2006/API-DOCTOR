@@ -5,6 +5,7 @@ Render log ingestion, and project file APIs.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import tempfile
 from pathlib import Path
@@ -240,7 +241,8 @@ def _configure_render(project_id: str = "default") -> None:
     )
 
 
-async def test_api_sync_render_success_creates_incident(httpx_mock, tmp_path, auth_headers, project_factory):
+async def test_api_sync_render_success_creates_incident(httpx_mock, tmp_path, auth_headers, project_factory, caplog):
+    caplog.set_level(logging.INFO, logger="app.incidents.router")
     (tmp_path / "app").mkdir()
     (tmp_path / "app" / "services").mkdir()
     (tmp_path / "app" / "services" / "payment.py").write_text("def charge():\n    pass\n")
@@ -277,10 +279,17 @@ async def test_api_sync_render_success_creates_incident(httpx_mock, tmp_path, au
     assert len(data["logs"]) == 4
     assert len(data["incidents_created"]) == 1
     assert data["diagnosis_started"] is False
+    assert "Sample Render log entries:" in caplog.text
+    assert "AttributeError: 'NoneType' object has no attribute 'token'" in caplog.text
     assert not any("/services/srv_test/logs" in str(r.url) for r in httpx_mock.get_requests())
 
 
-async def test_api_render_logs_returns_sanitized_entries(httpx_mock, auth_headers, project_factory):
+async def test_api_render_logs_returns_sanitized_entries(httpx_mock, auth_headers, project_factory, monkeypatch):
+    # The raw viewer must not invoke detection or create incidents.
+    def should_not_detect(*args, **kwargs):
+        raise AssertionError("raw log viewer must not detect incidents")
+
+    monkeypatch.setattr("app.incidents.router.FailureDetector.detect_from_logs", should_not_detect)
     project = project_factory()
     _configure_render(project.id)
     httpx_mock.add_response(
