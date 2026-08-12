@@ -411,6 +411,48 @@ async def approve(incident_id: str, req: ApproveRequest) -> dict:
     return {"incident_id": incident_id, "approved": True}
 
 
+@router.post("/{incident_id}/approve-file-read")
+async def approve_file_read(incident_id: str, req: ApproveRequest) -> dict:
+    """Resume pipeline after user approves file reading."""
+    inc = _get_or_404(incident_id)
+    if inc.status != IncidentStatus.AWAITING_FILE_READ_APPROVAL:
+        raise HTTPException(
+            409,
+            f"Cannot approve file read: incident is in {inc.status.value} state, not AWAITING_FILE_READ_APPROVAL"
+        )
+    if not req.approved:
+        inc.status = IncidentStatus.REQUIRES_HUMAN_REVIEW
+        inc.add_activity("file_read_approval", "failed", "rejected by user")
+        incident_store.update(inc)
+        return {"incident_id": incident_id, "approved": False}
+    
+    success = await orchestrator.resume_file_read(incident_id)
+    if not success:
+        raise HTTPException(500, "Failed to resume file reading")
+    return {"incident_id": incident_id, "approved": True}
+
+
+@router.post("/{incident_id}/approve-fix")
+async def approve_fix(incident_id: str, req: ApproveRequest) -> dict:
+    """Resume pipeline after user approves the proposed fix."""
+    inc = _get_or_404(incident_id)
+    if inc.status != IncidentStatus.AWAITING_FIX_APPROVAL:
+        raise HTTPException(
+            409,
+            f"Cannot approve fix: incident is in {inc.status.value} state, not AWAITING_FIX_APPROVAL"
+        )
+    if not req.approved:
+        inc.status = IncidentStatus.REQUIRES_HUMAN_REVIEW
+        inc.add_activity("fix_approval", "failed", "rejected by user")
+        incident_store.update(inc)
+        return {"incident_id": incident_id, "approved": False}
+    
+    success = await orchestrator.resume_fix(incident_id)
+    if not success:
+        raise HTTPException(500, "Failed to resume fix")
+    return {"incident_id": incident_id, "approved": True}
+
+
 @router.post("/{incident_id}/create-pr")
 async def create_pr(incident_id: str, req: CreatePRRequest | None = None) -> dict:
     inc = _get_or_404(incident_id)

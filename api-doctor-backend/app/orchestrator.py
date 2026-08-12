@@ -147,6 +147,9 @@ class Orchestrator:
             IncidentStatus.VERIFICATION_FAILED,
             IncidentStatus.REPAIR_LIMIT_REACHED,
             IncidentStatus.CANCELLED,
+            # Interactive workflow pause points - can be resumed
+            IncidentStatus.AWAITING_FILE_READ_APPROVAL,
+            IncidentStatus.AWAITING_FIX_APPROVAL,
         }
         if inc.status not in retryable_states:
             return False
@@ -229,8 +232,20 @@ class Orchestrator:
                     inc.add_activity("project_discovered", "done", "Project discovered")
                     await emit(inc.id, "project_discovered", "done", "Project discovered")
 
+            # Context collection (may pause for file read approval)
             await self._collect_context(inc, profile)
+            if inc.status == IncidentStatus.AWAITING_FILE_READ_APPROVAL:
+                # Paused for approval - return and wait
+                await emit(inc.id, "pipeline", "paused", "Waiting for file read approval")
+                return inc
+
+            # Investigation (may pause for fix approval)
             await self._investigate(inc, profile)
+            if inc.status == IncidentStatus.AWAITING_FIX_APPROVAL:
+                # Paused for approval - return and wait
+                await emit(inc.id, "pipeline", "paused", "Waiting for fix approval")
+                return inc
+
             if inc.status in (
                 IncidentStatus.FAILED,
                 IncidentStatus.INVESTIGATION_FAILED,
@@ -280,7 +295,21 @@ class Orchestrator:
             inc.add_activity("logs_retrieved", "done", "Logs retrieved")
             inc.add_activity("stack_trace_parsed", "done", "Stack trace extracted")
             inc.add_activity("relevant_source_identified", "done", f"{len(context['affected_files'])} files")
-            for f in context.get("affected_files", []):
+            
+            # Pause for file read approval - show user which files will be read
+            affected_files = context.get("affected_files", [])
+            if affected_files:
+                file_list = "\n".join(f"  - {f}" for f in affected_files)
+                inc.add_activity("files_to_read", "pending", f"{len(affected_files)} files identified for reading")
+                inc.add_activity("file_read_approval", "pending", f"Files to read:\n{file_list}")
+                inc.status = IncidentStatus.AWAITING_FILE_READ_APPROVAL
+                incident_store.update(inc)
+                await emit(inc.id, "file_read_approval", "pending", f"Approval needed: {len(affected_files)} files")
+                # Don't auto-continue - wait for user approval
+                return
+            
+            # If no files to read, continue as before
+            for f in affected_files:
                 inc.add_activity("file_read", "done", f"Reading {f}")
                 await emit(inc.id, "file_read", "done", f"Reading {f}")
             inc.set_activity("collecting_context", "done", f"{len(context['affected_files'])} files")
@@ -359,6 +388,16 @@ class Orchestrator:
             inc.set_activity("fix_generated", "done", proposal.summary)
             log_operation(logger, inc.id, "fix_generation", "ok", duration=time.perf_counter() - t0)
             await emit(inc.id, "fix_generated", "done", proposal.summary)
+            
+            # Pause for fix approval - show user the proposed fix before sandbox testing
+            if proposal and proposal.diff:
+                inc.status = IncidentStatus.AWAITING_FIX_APPROVAL
+                inc.add_activity("fix_approval", "pending", f"Fix proposed: {proposal.summary}")
+                inc.add_activity("diff_ready", "pending", f"Files to change: {', '.join(proposal.files_changed or [])}")
+                incident_store.update(inc)
+                await emit(inc.id, "fix_approval", "pending", "Approval needed: review proposed fix")
+                # Don't auto-continue to sandbox - wait for user approval
+                return
         except Exception as exc:
             inc.status = IncidentStatus.FIX_GENERATION_FAILED
             inc.error_message = f"fix generation failed: {exc}"
@@ -459,6 +498,59 @@ class Orchestrator:
                 inc.error_message = f"PR creation failed: {exc}"
                 incident_store.update(inc)
                 await emit(inc.id, "pr_created", "failed", str(exc)[:500])
+
+    # ------------------------------------------------------------------
+    # Resume from approval pause points
+    # ------------------------------------------------------------------
+    async def resume_file_read(self, incident_id: str) -> bool:
+        """Resume pipeline after user approves file read."""
+        inc = incident_store.get(incident_id)
+        if not inc:
+            logger.error("Incident %s not found", incident_id)
+            return False
+        if inc.status != IncidentStatus.AWAITING_FILE_READ_APPROVAL:
+            logger.warning("Incident %s not in AWAITING_FILE_READ_APPROVAL state", incident_id)
+            return False
+        
+        # Now actually read the files and continue
+        inc.status = IncidentStatus.COLLECTING_CONTEXT
+        inc.add_activity("file_read_approval", "done", "User approved file reading")
+        incident_store.update(inc)
+        await emit(inc.id, "file_read_approval", "done", "File read approved")
+        
+        # Rebuild context to actually read files
+        try:
+            context = self.context_builder.build(inc)
+            inc.context = context
+            for f in context.get("affected_files", []):
+                inc.add_activity("file_read", "done", f"Reading {f}")
+                await emit(inc.id, "file_read", "done", f"Reading {f}")
+            inc.set_activity("collecting_context", "done", f"{len(context['affected_files'])} files")
+            log_operation(logger, inc.id, "collect_context", "ok", duration=0)
+            await emit(inc.id, "collecting_context", "done", f"{len(context['affected_files'])} files")
+        except Exception as exc:
+            inc.status = IncidentStatus.INVESTIGATION_FAILED
+            inc.error_message = f"context build failed: {exc}"
+            incident_store.update(inc)
+            return False
+        
+        incident_store.update(inc)
+        return True
+
+    async def resume_fix(self, incident_id: str) -> bool:
+        """Resume pipeline after user approves fix."""
+        inc = incident_store.get(incident_id)
+        if not inc:
+            logger.error("Incident %s not found", incident_id)
+            return False
+        if inc.status != IncidentStatus.AWAITING_FIX_APPROVAL:
+            logger.warning("Incident %s not in AWAITING_FIX_APPROVAL state", incident_id)
+            return False
+        
+        inc.add_activity("fix_approval", "done", "User approved fix")
+        incident_store.update(inc)
+        await emit(inc.id, "fix_approval", "done", "Fix approved")
+        return True
 
     # ------------------------------------------------------------------
     # GitHub PR

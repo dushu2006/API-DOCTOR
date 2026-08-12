@@ -69,6 +69,71 @@ _TRACEBACK_START = re.compile(r"Traceback \(most recent call last\):", re.IGNORE
 _HTTP_ERROR_LINE = re.compile(r"(?:HTTP\s+|status\s*=?\s*|code\s*=?\s*)([45]\d\d)|(5\d\d\s+Internal\s+Server\s+Error)", re.IGNORECASE)
 _EXCEPTION_LINE = re.compile(r"(?:Exception|Error|FATAL|CRITICAL):\s*(.+)", re.IGNORECASE)
 
+# Generic error indicators that commonly appear in production logs
+_GENERIC_ERROR_MARKERS = re.compile(
+    r"(?:error[:\s]|exception[:\s]|failed[:\s]|failure[:\s]|"
+    r"uncaught[:\s]|unhandled[:\s]|assertion[:\s]|"
+    r"panic[:\s]|abort[:\s]|signal[:\s])",
+    re.IGNORECASE
+)
+
+# Common Node.js/Express error patterns
+_NODE_ERROR_PATTERNS = [
+    "TypeError:",
+    "ReferenceError:",
+    "SyntaxError:",
+    "RangeError:",
+    "EvalError:",
+    "URIError:",
+    "Error:",
+    " UnhandledPromiseRejection:",
+    'Unhandled "error" event',
+    " ECONNRESET",
+    " ETIMEDOUT",
+    " EADDRINUSE",
+    " ECONNREFUSED",
+]
+
+# Common Python error patterns (beyond traceback)
+_PYTHON_ERROR_PATTERNS = [
+    "ModuleNotFoundError:",
+    "ImportError:",
+    "IndentationError:",
+    "TabError:",
+    "SystemExit:",
+    "MemoryError:",
+    "RecursionError:",
+    "NotImplementedError:",
+    "OSError:",
+    "IOError:",
+    "ValueError:",
+    "KeyError:",
+    "AttributeError:",
+    "IndexError:",
+    "ZeroDivisionError:",
+    "NameError:",
+    "RuntimeError:",
+]
+
+# Common Java/Java-like stack trace indicators
+_JAVA_ERROR_INDICATORS = [
+    "Exception in thread",
+    "NullPointerException",
+    "ArrayIndexOutOfBoundsException",
+    "ClassCastException",
+    "IllegalArgumentException",
+    "IllegalStateException",
+    "IndexOutOfBoundsException",
+    "ConcurrentModificationException",
+    "NoSuchMethodException",
+    "ClassNotFoundException",
+    "InterruptedException",
+    "IOException",
+    "FileNotFoundException",
+    "SQLException",
+    "TimeoutException",
+]
+
 
 class FailureDetector:
     def __init__(self, service: str = "production") -> None:
@@ -186,6 +251,79 @@ class FailureDetector:
                 results.append(
                     _build_detection(
                         status_code=503,
+                        error_message=line.strip(),
+                        stack_trace=line.strip(),
+                        service=svc,
+                        source=source,
+                        raw_logs=line.strip(),
+                    )
+                )
+                i += 1
+                continue
+
+            # 5. Detect Node.js/Express error patterns
+            if any(marker in line for marker in _NODE_ERROR_PATTERNS):
+                trace_lines = [line]
+                i += 1
+                # Collect subsequent stack frames (Node.js "at " lines)
+                while i < n and raw_text_lines[i].strip().startswith("at "):
+                    trace_lines.append(raw_text_lines[i])
+                    i += 1
+                full_trace = "\n".join(trace_lines)
+                results.append(
+                    _build_detection(
+                        status_code=500,
+                        error_message=line.strip(),
+                        stack_trace=full_trace,
+                        service=svc,
+                        source=source,
+                        raw_logs=full_trace,
+                    )
+                )
+                continue
+
+            # 6. Detect Python exception patterns (non-traceback)
+            if any(marker in line for marker in _PYTHON_ERROR_PATTERNS):
+                results.append(
+                    _build_detection(
+                        status_code=500,
+                        error_message=line.strip(),
+                        stack_trace=line.strip(),
+                        service=svc,
+                        source=source,
+                        raw_logs=line.strip(),
+                    )
+                )
+                i += 1
+                continue
+
+            # 7. Detect Java/JVM exception patterns
+            if any(marker in line for marker in _JAVA_ERROR_INDICATORS):
+                trace_lines = [line]
+                i += 1
+                # Collect subsequent stack frames
+                while i < n and (raw_text_lines[i].strip().startswith("at ") or "Caused by:" in raw_text_lines[i]):
+                    trace_lines.append(raw_text_lines[i])
+                    i += 1
+                full_trace = "\n".join(trace_lines)
+                results.append(
+                    _build_detection(
+                        status_code=500,
+                        error_message=line.strip(),
+                        stack_trace=full_trace,
+                        service=svc,
+                        source=source,
+                        raw_logs=full_trace,
+                    )
+                )
+                continue
+
+            # 8. Detect generic error lines (error:, exception:, failed:, etc.)
+            if _GENERIC_ERROR_MARKERS.search(line) and len(line.strip()) > 20:
+                # Only flag if it looks like a real error message (not just a log prefix)
+                results.append(
+                    _build_detection(
+                        status_code=500,
                         error_message=line.strip(),
                         stack_trace=line.strip(),
                         service=svc,

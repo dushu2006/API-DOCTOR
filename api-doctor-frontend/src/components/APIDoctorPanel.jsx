@@ -52,6 +52,8 @@ export default function APIDoctorPanel({
   timelineEvents = [],
   isDiagnosing,
   onApproveFix,
+  onApproveFileRead,
+  onApproveFixProposal,
   onCreatePR,
   onSelectIncident,
   onSyncRender,
@@ -363,7 +365,110 @@ export default function APIDoctorPanel({
               )}
             </div>
 
-            {/* Section 5: Proposed Fix Card */}
+            {/* Section 4b: File Read Approval (interactive workflow) */}
+            {activeIncident?.status === 'AWAITING_FILE_READ_APPROVAL' && (
+              <div style={{ backgroundColor: 'rgba(124, 140, 248, 0.08)', border: '1px solid rgba(124, 140, 248, 0.3)', borderRadius: '6px', padding: '12px' }}>
+                <div style={{ fontSize: '10px', fontWeight: 700, color: 'var(--color-accent)', letterSpacing: '0.05em', marginBottom: '8px' }}>
+                  FILES TO READ - APPROVAL REQUIRED
+                </div>
+                <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '10px', lineHeight: 1.4 }}>
+                  The agent has identified the following files to read for investigation. Approve to allow reading:
+                </p>
+                <div style={{ fontSize: '11px', fontFamily: 'var(--font-mono)', backgroundColor: 'var(--surface-1)', padding: '8px', borderRadius: '4px', marginBottom: '12px', maxHeight: '120px', overflowY: 'auto' }}>
+                  {incidentContext?.implicated_files?.map((filePath) => (
+                    <div key={filePath} style={{ padding: '2px 0', color: 'var(--text-primary)' }}>
+                      <ChevronRight size={10} style={{ marginRight: '4px', verticalAlign: 'middle' }} />
+                      {filePath}
+                    </div>
+                  )) || <div style={{ color: 'var(--text-muted)' }}>No files identified</div>}
+                </div>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <button onClick={() => onApproveFileRead(true)} className="btn-success" style={{ flex: 1, justifyContent: 'center' }}>
+                    <Check size={14} />
+                    <span>Approve Reading</span>
+                  </button>
+                  <button onClick={() => onApproveFileRead(false)} className="btn-outline" style={{ flex: 1, justifyContent: 'center' }}>
+                    Deny
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Section 5: Proposed Fix Card (with approval for interactive workflow) */}
+            {activeIncident?.status === 'AWAITING_FIX_APPROVAL' && incidentDiff && incidentDiff.present && (
+              <div style={{ backgroundColor: 'rgba(232, 162, 61, 0.08)', border: '1px solid rgba(232, 162, 61, 0.3)', borderRadius: '6px', padding: '12px' }}>
+                <div style={{ fontSize: '10px', fontWeight: 700, color: 'var(--color-warning)', letterSpacing: '0.05em', marginBottom: '8px' }}>
+                  PROPOSED FIX - APPROVAL REQUIRED
+                </div>
+                <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '8px', lineHeight: 1.4 }}>
+                  The agent has generated a fix. Review and approve before sandbox testing:
+                </p>
+                
+                <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '10px', fontFamily: 'var(--font-mono)' }}>
+                  {incidentDiff.files_changed?.length || 1} file(s) changed
+                </div>
+
+                <p style={{ fontSize: '12px', color: 'var(--text-primary)', marginBottom: '12px' }}>
+                  {incidentDiff.summary}
+                </p>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  <button onClick={() => onApproveFixProposal(true)} className="btn-success" style={{ justifyContent: 'center', width: '100%' }}>
+                    <Check size={14} />
+                    <span>Approve Fix & Test</span>
+                  </button>
+
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    <button onClick={() => onApproveFixProposal(false)} className="btn-outline" style={{ flex: 1, justifyContent: 'center' }}>
+                      Reject
+                    </button>
+                    <button 
+                      onClick={() => setIsDiffMode(true)} 
+                      style={{ background: 'none', border: 'none', color: 'var(--color-accent)', cursor: 'pointer', fontSize: '11px', textDecoration: 'underline' }}
+                    >
+                      Review Diff
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Section 5b: Proposed Fix Card (standard workflow, after approval) */}
+            {activeIncident?.status !== 'AWAITING_FIX_APPROVAL' && incidentDiff && incidentDiff.present && (
+              <div style={{ backgroundColor: 'var(--surface-2)', border: '1px solid var(--border-color)', borderRadius: '6px', padding: '12px' }}>
+                <div style={{ fontSize: '10px', fontWeight: 700, color: 'var(--text-muted)', letterSpacing: '0.05em', marginBottom: '8px' }}>
+                  AI PROPOSED PATCH
+                </div>
+
+                <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '10px', fontFamily: 'var(--font-mono)' }}>
+                  {incidentDiff.files_changed?.length || 1} file(s) changed
+                </div>
+
+                <p style={{ fontSize: '12px', color: 'var(--text-primary)', marginBottom: '12px' }}>
+                  {incidentDiff.summary}
+                </p>
+
+                {/* Approvals */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  <button onClick={() => onApproveFix(true)} className="btn-success" style={{ justifyContent: 'center', width: '100%' }}>
+                    <Check size={14} />
+                    <span>Keep Changes</span>
+                  </button>
+
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    <button onClick={() => onApproveFix(false)} className="btn-outline" style={{ flex: 1, justifyContent: 'center' }}>
+                      Reject
+                    </button>
+                    <button 
+                      onClick={() => setIsDiffMode(true)} 
+                      style={{ background: 'none', border: 'none', color: 'var(--color-accent)', cursor: 'pointer', fontSize: '11px', textDecoration: 'underline' }}
+                    >
+                      Review Diff
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
             {incidentDiff && incidentDiff.present && (
               <div style={{ backgroundColor: 'var(--surface-2)', border: '1px solid var(--border-color)', borderRadius: '6px', padding: '12px' }}>
                 <div style={{ fontSize: '10px', fontWeight: 700, color: 'var(--text-muted)', letterSpacing: '0.05em', marginBottom: '8px' }}>
