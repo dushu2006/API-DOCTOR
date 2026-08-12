@@ -7,11 +7,14 @@ import json
 import logging
 from typing import Any
 
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from app.auth.dependencies import require_authenticated_user
 from app.auth.schemas import UserResponse
+from app.context_builder.context_builder import ContextBuilder
 from app.core.config import settings
 from app.detector.failure_detector import FailureDetector
 from app.events.hub import event_hub
@@ -140,13 +143,31 @@ async def get_status(incident_id: str) -> StatusResponse:
 @router.get("/{incident_id}/context", response_model=ContextResponse)
 async def get_context(incident_id: str) -> ContextResponse:
     inc = _get_or_404(incident_id)
-    if not inc.context:
-        raise HTTPException(409, "context not built yet")
-    ctx = inc.context
+    if inc.context:
+        ctx = inc.context
+    else:
+        # Build context on demand when the pipeline hasn't finished saving it.
+        project = project_store.get(inc.project_id)
+        workspace_path = (
+            project.workspace_path
+            if project and project.workspace_path and Path(project.workspace_path).is_dir()
+            else settings.INTERNAL_REPO_ROOT
+        )
+
+        def _build() -> dict:
+            builder = ContextBuilder(repo_root=workspace_path)
+            return builder.build_incident_payload(inc)
+
+        ctx = await asyncio.to_thread(_build)
+    # Saved context uses "affected_files"; dynamic payload uses "implicated_files".
+    if "implicated_files" in ctx:
+        implicated_files = ctx["implicated_files"]
+    else:
+        implicated_files = ctx.get("affected_files", [])
     return ContextResponse(
         incident_id=incident_id,
         stack_trace=ctx.get("stack_trace", ""),
-        implicated_files=ctx.get("affected_files", []),
+        implicated_files=implicated_files,
         code_snippets=ctx.get("code_snippets", {}),
         git_log=ctx.get("git_log", ""),
     )
