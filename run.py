@@ -82,7 +82,7 @@ def _validate_configuration() -> None:
     """Validate and log configuration state."""
     ai_key = os.getenv("NVIDIA_API_KEY", "")
     ai_provider = os.getenv("AI_PROVIDER", "auto")
-    database_url = os.getenv("DATABASE_URL", "sqlite:///./data/api_doctor.db")
+    database_url = os.getenv("DATABASE_URL", "sqlite:///./api_doctor.db")
 
     _print("\n=== API DOCTOR CONFIGURATION ===")
     _print(f"✓ Database: {database_url}")

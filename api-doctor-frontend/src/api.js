@@ -100,6 +100,10 @@ export const api = {
     body: JSON.stringify(data)
   }),
   deleteProject: (projectId) => request(`/api/projects/${projectId}`, { method: 'DELETE' }),
+  duplicateProject: (projectId, name) => request(`/api/projects/${projectId}/duplicate`, {
+    method: 'POST',
+    body: JSON.stringify({ name })
+  }),
   activateProject: (projectId) => request(`/api/projects/${projectId}/activate`, { method: 'POST' }),
   previewProject: (data) => request('/api/projects/onboarding/preview', {
     method: 'POST',

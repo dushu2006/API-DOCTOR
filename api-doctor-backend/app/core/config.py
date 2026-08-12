@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     HOST: str = "0.0.0.0"
     PORT: int = 8000
     SECRET_KEY: str = "api-doctor-dev-secret"
-    DATABASE_URL: str = "sqlite:///./data/api_doctor.db"
+    DATABASE_URL: str = "sqlite:///./api_doctor.db"
 
     # ------------------------------------------------------------------
     # Operational Mode
