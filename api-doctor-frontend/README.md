@@ -4,7 +4,13 @@ React/Vite dashboard for the API Doctor incident workflow. It consumes the FastA
 
 ## Run locally
 
-Start the backend first on port 8000, then:
+The easiest way to start the backend, frontend, and browser together is from the repository root:
+
+```bash
+python run.py
+```
+
+To start only this frontend, start the backend first on port 8000, then:
 
 ```bash
 npm install
