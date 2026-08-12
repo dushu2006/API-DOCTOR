@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import json
+
 from pydantic import BaseModel, Field
 
-from app.agent.llm_client import LLMClient, _parse_json
+import pytest
+
+from app.agent.llm_client import LLMClient, _choice_content, _parse_json
 from app.agent.root_cause_agent import RootCauseAnalysis
+from app.ai.base import AIProviderError
 
 
 class SampleModel(BaseModel):
@@ -231,3 +236,111 @@ def test_parse_json_handles_nested_single_quoted_dict_with_booleans():
 
 
 
+
+def test_choice_content_falls_back_to_reasoning_fields():
+    assert _choice_content(
+        {"choices": [{"message": {"role": "assistant", "content": None, "reasoning_content": '{"name": "x"}'}}]}
+    ) == '{"name": "x"}'
+    assert _choice_content(
+        {"choices": [{"message": {"content": "", "reasoning": '{"ok": true}'}}]}
+    ) == '{"ok": true}'
+    assert _choice_content({"choices": [{"message": {"content": None}}]}) == ""
+    assert _choice_content({}) == ""
+    assert _choice_content(None) == ""  # type: ignore[arg-type]
+
+
+def test_parse_json_accepts_none_without_raising_typeerror():
+    with pytest.raises((json.JSONDecodeError, ValueError)):
+        _parse_json(None)  # type: ignore[arg-type]
+
+
+def test_parse_json_recovers_after_unclosed_think_block():
+    content = (
+        "<think>\n"
+        "Looking at the stack trace. payment_method is None.\n"
+        '{"name": "recovered", "value": 4}'
+    )
+    assert _parse_json(content) == {"name": "recovered", "value": 4}
+
+
+def test_root_cause_accepts_percentage_confidence():
+    analysis = RootCauseAnalysis.model_validate(
+        {
+            "root_cause": "null deref",
+            "classification": "CODE_BUG",
+            "confidence": "95%",
+            "affected_files": ["app/demo_api/bugs.py"],
+        }
+    )
+    assert analysis.confidence == 0.95
+
+    analysis = RootCauseAnalysis.model_validate(
+        {
+            "root_cause": "null deref",
+            "confidence": 87,
+        }
+    )
+    assert analysis.confidence == 0.87
+
+
+async def test_generate_structured_recovers_from_null_content():
+    fake = FakeAI(['{"name": "recovered", "value": 2}'])
+    original_chat = fake.chat
+    calls = {"n": 0}
+
+    async def chat_with_null(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {
+                "choices": [{"message": {"role": "assistant", "content": None}}],
+                "usage": {},
+            }
+        return await original_chat(**kwargs)
+
+    fake.chat = chat_with_null  # type: ignore[method-assign]
+    client = LLMClient(fake)
+    result = await client.generate_structured(
+        response_model=SampleModel, system_prompt="", user_prompt=""
+    )
+    assert result.name == "recovered"
+    assert result.value == 2
+
+
+async def test_generate_structured_uses_reasoning_content():
+    fake = FakeAI([])
+
+    async def chat_reasoning(**kwargs):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "reasoning_content": '{"name": "from_reasoning", "value": 8}',
+                    }
+                }
+            ],
+            "usage": {},
+        }
+
+    fake.chat = chat_reasoning  # type: ignore[method-assign]
+    client = LLMClient(fake)
+    result = await client.generate_structured(
+        response_model=SampleModel, system_prompt="", user_prompt=""
+    )
+    assert result.name == "from_reasoning"
+    assert result.value == 8
+
+
+async def test_generate_structured_does_not_crash_on_missing_choices():
+    fake = FakeAI([])
+
+    async def chat_empty(**kwargs):
+        return {"choices": [], "usage": {}}
+
+    fake.chat = chat_empty  # type: ignore[method-assign]
+    client = LLMClient(fake)
+    with pytest.raises(AIProviderError, match="valid SampleModel"):
+        await client.generate_structured(
+            response_model=SampleModel, system_prompt="", user_prompt=""
+        )

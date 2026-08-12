@@ -21,7 +21,7 @@ import pytest
 from pydantic import BaseModel, Field
 
 from app.ai.base import AIProviderError
-from app.ai.nim_client import NIMClient
+from app.ai.nim_client import NIMClient, normalize_chat_response
 from app.agent.llm_client import LLMClient
 from app.core.config import settings
 
@@ -306,6 +306,206 @@ async def test_llm_client_fails_fast_on_provider_error_without_fallback():
     finally:
         settings.AI_CACHE_ENABLED = orig_cache
         settings.AI_MODEL_FALLBACK = orig_fallback
+
+
+def test_normalize_chat_response_promotes_reasoning_content():
+    data = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "reasoning_content": '{"root_cause": "null deref"}',
+                }
+            }
+        ]
+    }
+    normalized = normalize_chat_response(data)
+    assert normalized["choices"][0]["message"]["content"] == '{"root_cause": "null deref"}'
+
+
+def test_normalize_chat_response_keeps_real_content():
+    data = {
+        "choices": [
+            {
+                "message": {
+                    "content": '{"name": "kept"}',
+                    "reasoning_content": "internal monologue",
+                }
+            }
+        ]
+    }
+    assert normalize_chat_response(data)["choices"][0]["message"]["content"] == '{"name": "kept"}'
+
+
+async def test_nim_client_disables_thinking_for_structured_json(monkeypatch):
+    orig_key = settings.NVIDIA_API_KEY
+    orig_fallback = settings.AI_MODEL_FALLBACK
+    orig_thinking = getattr(settings, "AI_DISABLE_THINKING", True)
+    settings.NVIDIA_API_KEY = "test-key"
+    settings.AI_MODEL_FALLBACK = False
+    settings.AI_DISABLE_THINKING = True
+
+    try:
+        client = NIMClient()
+        captured: list[dict] = []
+
+        async def mock_post(url, json=None, timeout=None):
+            captured.append(json or {})
+            return _ok_response()
+
+        monkeypatch.setattr(client.client, "post", mock_post)
+
+        await client.chat(
+            model="nvidia/nemotron-3.5-lightning-30b-a3b",
+            messages=[{"role": "user", "content": "diagnose"}],
+            response_format={"type": "json_object"},
+        )
+        assert captured[0]["chat_template_kwargs"] == {"enable_thinking": False}
+
+        captured.clear()
+        await client.chat(
+            model="nvidia/nemotron-3.5-lightning-30b-a3b",
+            messages=[{"role": "user", "content": "ping"}],
+        )
+        assert "chat_template_kwargs" not in captured[0]
+        await client.close()
+    finally:
+        settings.NVIDIA_API_KEY = orig_key
+        settings.AI_MODEL_FALLBACK = orig_fallback
+        settings.AI_DISABLE_THINKING = orig_thinking
+
+
+async def test_nim_client_retries_without_thinking_kwargs_on_400(monkeypatch):
+    orig_key = settings.NVIDIA_API_KEY
+    orig_fallback = settings.AI_MODEL_FALLBACK
+    orig_retries = settings.AI_MAX_RETRIES
+    settings.NVIDIA_API_KEY = "test-key"
+    settings.AI_MODEL_FALLBACK = False
+    settings.AI_MAX_RETRIES = 2
+
+    try:
+        client = NIMClient()
+        calls: list[dict] = []
+
+        async def mock_post(url, json=None, timeout=None):
+            payload = json or {}
+            calls.append(dict(payload))
+            if "chat_template_kwargs" in payload:
+                request = httpx.Request("POST", url)
+                response = httpx.Response(400, request=request, text="unknown field chat_template_kwargs")
+                raise httpx.HTTPStatusError("bad request", request=request, response=response)
+            return _ok_response()
+
+        monkeypatch.setattr(client.client, "post", mock_post)
+        data = await client.chat(
+            model="other-model",
+            messages=[{"role": "user", "content": "diagnose"}],
+            response_format={"type": "json_object"},
+        )
+        assert len(calls) == 2
+        assert "chat_template_kwargs" in calls[0]
+        assert "chat_template_kwargs" not in calls[1]
+        assert data["choices"][0]["message"]["content"]
+        await client.close()
+    finally:
+        settings.NVIDIA_API_KEY = orig_key
+        settings.AI_MODEL_FALLBACK = orig_fallback
+        settings.AI_MAX_RETRIES = orig_retries
+
+
+async def test_nim_client_streaming_uses_reasoning_content(monkeypatch):
+    orig_key = settings.NVIDIA_API_KEY
+    orig_fallback = settings.AI_MODEL_FALLBACK
+    settings.NVIDIA_API_KEY = "test-key"
+    settings.AI_MODEL_FALLBACK = False
+
+    try:
+        client = NIMClient()
+
+        class ReasoningStream(FakeStream):
+            def __init__(self):
+                self._fail = None
+                self._lines = [
+                    'data: {"choices":[{"delta":{"reasoning_content":"{\\"ok\\": true}"}}]}',
+                    "data: [DONE]",
+                ]
+
+        monkeypatch.setattr(
+            client.client, "stream", lambda *a, **k: ReasoningStream()
+        )
+        data = await client.chat(
+            model="nvidia/nemotron-3.5-lightning-30b-a3b",
+            messages=[{"role": "user", "content": "ping"}],
+            stream=True,
+        )
+        assert json.loads(data["choices"][0]["message"]["content"]) == {"ok": True}
+        await client.close()
+    finally:
+        settings.NVIDIA_API_KEY = orig_key
+        settings.AI_MODEL_FALLBACK = orig_fallback
+
+
+async def test_nim_client_promotes_null_content_from_nonstream(monkeypatch):
+    orig_key = settings.NVIDIA_API_KEY
+    orig_fallback = settings.AI_MODEL_FALLBACK
+    settings.NVIDIA_API_KEY = "test-key"
+    settings.AI_MODEL_FALLBACK = False
+
+    try:
+        client = NIMClient()
+
+        async def mock_post(url, json=None, timeout=None):
+            return DummyJsonResponse(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": None,
+                                "reasoning_content": '{"ok": true}',
+                            }
+                        }
+                    ],
+                    "usage": {},
+                    "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
+                }
+            )
+
+        monkeypatch.setattr(client.client, "post", mock_post)
+        data = await client.chat(
+            model="nvidia/nemotron-3.5-lightning-30b-a3b",
+            messages=[{"role": "user", "content": "ping"}],
+        )
+        assert data["choices"][0]["message"]["content"] == '{"ok": true}'
+        await client.close()
+    finally:
+        settings.NVIDIA_API_KEY = orig_key
+        settings.AI_MODEL_FALLBACK = orig_fallback
+
+
+class DummyJsonResponse:
+    status_code = 200
+
+    def __init__(self, payload):
+        self._json = payload
+        self.text = json.dumps(payload)
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._json
+
+
+def _ok_response():
+    return DummyJsonResponse(
+        {
+            "choices": [{"message": {"role": "assistant", "content": '{"ok": true}'}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            "model": "test",
+        }
+    )
 
 
 async def test_llm_client_still_tries_fallback_model_on_provider_error():

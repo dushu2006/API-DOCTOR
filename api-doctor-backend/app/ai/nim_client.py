@@ -25,6 +25,56 @@ logger = logging.getLogger(__name__)
 
 RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
 
+# Reasoning models (Nemotron 3.x, etc.) put the chain-of-thought in one of
+# these fields and leave message.content null. Prefer the final answer, then
+# fall back so a successful HTTP response is still parseable.
+_REASONING_KEYS = ("reasoning_content", "reasoning")
+
+
+def _text_from_message(message: dict[str, Any] | None) -> str:
+    """Return the best available assistant text from a chat message/delta."""
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content")
+    if isinstance(content, str) and content.strip():
+        return content
+    if isinstance(content, list):
+        parts = [
+            part.get("text", "")
+            for part in content
+            if isinstance(part, dict) and part.get("text")
+        ]
+        joined = "".join(parts)
+        if joined.strip():
+            return joined
+    for key in _REASONING_KEYS:
+        val = message.get(key)
+        if isinstance(val, str) and val.strip():
+            return val
+    return ""
+
+
+def normalize_chat_response(data: dict[str, Any]) -> dict[str, Any]:
+    """Guarantee choices[0].message.content is a string when any text exists.
+
+    NVIDIA reasoning models often return ``content: null`` with the actual
+    output in ``reasoning_content``. Downstream JSON parsing assumes a string.
+    """
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return data
+    first = choices[0] if isinstance(choices[0], dict) else {}
+    message = first.get("message")
+    if not isinstance(message, dict):
+        message = {}
+        first["message"] = message
+        choices[0] = first
+    if not (isinstance(message.get("content"), str) and message["content"].strip()):
+        text = _text_from_message(message) or _text_from_message(first.get("delta"))
+        if text:
+            message["content"] = text
+    return data
+
 
 class NIMClient(AIClient):
     name = "nvidia-nim"
@@ -101,6 +151,11 @@ class NIMClient(AIClient):
         }
         if response_format:
             base_payload["response_format"] = response_format
+            # Structured JSON must not spend the token budget on a thinking
+            # trace — Nemotron 3.5 Lightning thinks by default and then
+            # returns content=null, which crashed root-cause parsing.
+            if getattr(settings, "AI_DISABLE_THINKING", True):
+                base_payload["chat_template_kwargs"] = {"enable_thinking": False}
 
         url = f"{self.base_url}/chat/completions"
 
@@ -147,6 +202,7 @@ class NIMClient(AIClient):
                         stream=stream,
                         url=url,
                     )
+                    data = normalize_chat_response(data if isinstance(data, dict) else {})
                     duration = time.perf_counter() - start
                     total_duration = time.perf_counter() - overall_start
                     usage = data.get("usage", {})
@@ -199,6 +255,14 @@ class NIMClient(AIClient):
                         attempts,
                         status,
                     )
+                    # Some OpenAI-compatible endpoints reject chat_template_kwargs.
+                    # Drop it and retry the same model instead of failing the call.
+                    if status == 400 and payload.pop("chat_template_kwargs", None) is not None:
+                        logger.warning(
+                            "AI chat rejected chat_template_kwargs; retrying without it model=%s",
+                            try_model,
+                        )
+                        continue
                     if status in RETRYABLE_STATUS and attempt + 1 < attempts:
                         await asyncio.sleep(min(0.5 * (2 ** attempt), 4.0))
                         continue
@@ -251,7 +315,8 @@ class NIMClient(AIClient):
         raise AIProviderError(err_msg) from last_exc
 
     async def _stream_chat(self, url: str, payload: dict, model: str, timeout: float | None = None) -> dict[str, Any]:
-        full_text: list[str] = []
+        content_parts: list[str] = []
+        reasoning_parts: list[str] = []
         usage: dict[str, Any] = {}
         t = timeout or self.request_timeout
         try:
@@ -271,17 +336,32 @@ class NIMClient(AIClient):
                         obj = json.loads(chunk)
                     except json.JSONDecodeError:
                         continue
-                    delta = obj.get("choices", [{}])[0].get("delta", {})
+                    choice = (obj.get("choices") or [{}])[0] or {}
+                    delta = choice.get("delta") or {}
                     content = delta.get("content")
                     if content:
-                        full_text.append(content)
+                        content_parts.append(content)
+                    for key in _REASONING_KEYS:
+                        val = delta.get(key)
+                        if val:
+                            reasoning_parts.append(val)
+                    # Some providers only emit the full message on the last chunk.
+                    message = choice.get("message")
+                    if isinstance(message, dict):
+                        msg_content = message.get("content")
+                        if msg_content and not content_parts:
+                            content_parts.append(msg_content)
+                        for key in _REASONING_KEYS:
+                            val = message.get(key)
+                            if val and not reasoning_parts:
+                                reasoning_parts.append(val)
                     if obj.get("usage"):
                         usage = obj["usage"]
         except httpx.TimeoutException as exc:
             # Re-raise so chat() treats it like any other request timeout
             # (logs, backs off, and can still fall back to FAST_MODEL).
             raise exc
-        content = "".join(full_text)
+        content = "".join(content_parts) or "".join(reasoning_parts)
         return {
             "choices": [{"message": {"role": "assistant", "content": content}}],
             "usage": usage,
