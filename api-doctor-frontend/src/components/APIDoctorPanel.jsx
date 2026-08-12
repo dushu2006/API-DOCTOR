@@ -18,8 +18,18 @@ import {
 } from 'lucide-react';
 
 export default function APIDoctorPanel({ 
-  currentState, 
-  setCurrentState, 
+  incidentsList,
+  activeIncident,
+  incidentContext,
+  incidentDiff,
+  incidentSandbox,
+  incidentPR,
+  timelineEvents,
+  isDiagnosing,
+  onStartDiagnosis,
+  onApproveFix,
+  onCreatePR,
+  onSelectIncident,
   doctorWidth, 
   isDoctorOpen, 
   setIsDoctorOpen,
@@ -29,22 +39,16 @@ export default function APIDoctorPanel({
   const [expandedFiles, setExpandedFiles] = useState(true);
   const [expandedFileDetails, setExpandedFileDetails] = useState({});
   const [historyOpen, setHistoryOpen] = useState(true);
-  const [fixApplied, setFixApplied] = useState(false);
 
   if (!isDoctorOpen) return null;
 
-  const handleKeepChanges = () => {
-    setFixApplied(true);
-    setCurrentState('verified_pr');
-  };
-
-  const handleReject = () => {
-    setFixApplied(false);
-    setCurrentState('idle');
-  };
-
   const toggleFileDetail = (path) => {
     setExpandedFileDetails(prev => ({ ...prev, [path]: !prev[path] }));
+  };
+
+  const getCategoryColor = (reason) => {
+    if (!reason) return 'rgba(240, 96, 90, 0.15)';
+    return 'rgba(240, 96, 90, 0.15)';
   };
 
   return (
@@ -78,7 +82,12 @@ export default function APIDoctorPanel({
           }}>
             API DOCTOR
           </span>
-          <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: 'var(--color-success)' }} />
+          <span style={{ 
+            width: '6px', 
+            height: '6px', 
+            borderRadius: '50%', 
+            backgroundColor: isDiagnosing ? 'var(--color-accent)' : 'var(--color-success)' 
+          }} />
         </div>
         
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -94,8 +103,8 @@ export default function APIDoctorPanel({
       {/* Panel Body */}
       <div style={{ flex: 1, overflowY: 'auto', padding: '12px' }}>
         
-        {/* 7a. IDLE STATE */}
-        {currentState === 'idle' && (
+        {/* IDLE STATE */}
+        {!activeIncident && (
           <div style={{ textAlign: 'center', padding: '24px 12px' }}>
             <div style={{
               width: '48px',
@@ -115,37 +124,51 @@ export default function APIDoctorPanel({
               Ready to diagnose your project.
             </h3>
             <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '20px' }}>
-              No active incidents detected. Trigger an automated run or select a bug.
+              No active incident selected. Trigger an automated run to test backend APIs.
             </p>
             <button 
-              onClick={() => setCurrentState('diagnosing')}
+              onClick={() => onStartDiagnosis('null_pointer')}
               className="btn-primary"
               style={{ width: '100%', justifyContent: 'center', padding: '8px 16px' }}
             >
               <Stethoscope size={14} />
-              <span>Start Diagnosis</span>
+              <span>Start Diagnosis (null_pointer)</span>
             </button>
           </div>
         )}
 
-        {/* 7b. ACTIVE / DIAGNOSING / FIX / VERIFIED STATES */}
-        {currentState !== 'idle' && (
+        {/* ACTIVE INCIDENT STATE */}
+        {activeIncident && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
             
-            {/* Section 1: Current Incident */}
+            {/* Section 1: Current Incident Header */}
             <div style={{ backgroundColor: 'var(--surface-2)', border: '1px solid var(--border-color)', borderRadius: '6px', padding: '12px' }}>
               <div style={{ fontSize: '10px', fontWeight: 700, color: 'var(--text-muted)', letterSpacing: '0.05em', marginBottom: '8px' }}>
                 CURRENT INCIDENT
               </div>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
-                <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 600, color: 'var(--text-primary)', fontSize: '13px' }}>#C0489BDA</span>
-                <span style={{ backgroundColor: 'rgba(240, 96, 90, 0.15)', color: 'var(--color-failure)', padding: '2px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: 600, fontFamily: 'var(--font-mono)' }}>
-                  HTTP 500
+                <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 600, color: 'var(--text-primary)', fontSize: '12px' }}>
+                  #{activeIncident.id.slice(0, 8).toUpperCase()}
+                </span>
+                <span style={{ 
+                  backgroundColor: activeIncident.status?.includes('VERIFIED') || activeIncident.status?.includes('PR') 
+                    ? 'rgba(61, 214, 140, 0.15)' 
+                    : 'rgba(240, 96, 90, 0.15)', 
+                  color: activeIncident.status?.includes('VERIFIED') || activeIncident.status?.includes('PR')
+                    ? 'var(--color-success)'
+                    : 'var(--color-failure)', 
+                  padding: '2px 8px', 
+                  borderRadius: '4px', 
+                  fontSize: '11px', 
+                  fontWeight: 600, 
+                  fontFamily: 'var(--font-mono)' 
+                }}>
+                  {activeIncident.status}
                 </span>
               </div>
               <div style={{ fontSize: '11px', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', display: 'flex', justifyContent: 'space-between' }}>
-                <span>POST /api/v1/checkout</span>
-                <span>14:32:05</span>
+                <span>{activeIncident.detection?.method || 'POST'} {activeIncident.detection?.endpoint || '/api/v1/checkout'}</span>
+                <span>{activeIncident.created_at ? new Date(activeIncident.created_at).toLocaleTimeString() : ''}</span>
               </div>
             </div>
 
@@ -156,150 +179,114 @@ export default function APIDoctorPanel({
               </div>
               
               <div style={{ paddingLeft: '8px', position: 'relative' }}>
-                {/* Vertical connecting line */}
                 <div style={{ position: 'absolute', left: '15px', top: '10px', bottom: '10px', width: '2px', backgroundColor: 'var(--border-color)', zIndex: 0 }} />
 
-                {/* Event Rows */}
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', position: 'relative', zIndex: 1 }}>
-                  
-                  {/* Step 1 */}
-                  <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-start' }}>
-                    <div style={{ width: '16px', height: '16px', borderRadius: '50%', backgroundColor: 'var(--surface-1)', border: '1px solid var(--color-success)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--color-success)', background: 'var(--surface-1)' }}>
-                      <Check size={10} />
-                    </div>
-                    <div style={{ flex: 1, display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
-                      <span style={{ color: 'var(--text-primary)' }}>Parsed HTTP 500 stack trace</span>
-                      <span style={{ fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--text-muted)' }}>14:32:05</span>
-                    </div>
-                  </div>
-
-                  {/* Step 2 */}
-                  <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-start' }}>
-                    <div style={{ width: '16px', height: '16px', borderRadius: '50%', backgroundColor: 'var(--surface-1)', border: '1px solid var(--color-success)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--color-success)', background: 'var(--surface-1)' }}>
-                      <Check size={10} />
-                    </div>
-                    <div style={{ flex: 1, display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
-                      <span style={{ color: 'var(--text-primary)' }}>Isolated 4 relevant workspace files</span>
-                      <span style={{ fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--text-muted)' }}>14:32:07</span>
-                    </div>
-                  </div>
-
-                  {/* Step 3 (Active running or finished) */}
-                  <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-start' }}>
-                    {currentState === 'diagnosing' ? (
-                      <div style={{ width: '16px', height: '16px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--surface-1)' }}>
-                        <span className="agent-dot" />
+                  {timelineEvents && timelineEvents.length > 0 ? (
+                    timelineEvents.map((ev, index) => (
+                      <div key={index} style={{ display: 'flex', gap: '10px', alignItems: 'flex-start' }}>
+                        {ev.status === 'running' ? (
+                          <div style={{ width: '16px', height: '16px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--surface-1)' }}>
+                            <span className="agent-dot" />
+                          </div>
+                        ) : (
+                          <div style={{ width: '16px', height: '16px', borderRadius: '50%', backgroundColor: 'var(--surface-1)', border: `1px solid ${ev.status === 'failed' ? 'var(--color-failure)' : 'var(--color-success)'}`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: ev.status === 'failed' ? 'var(--color-failure)' : 'var(--color-success)', background: 'var(--surface-1)' }}>
+                            <Check size={10} />
+                          </div>
+                        )}
+                        <div style={{ flex: 1, display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
+                          <span style={{ color: ev.status === 'running' ? 'var(--color-accent)' : 'var(--text-primary)', fontWeight: ev.status === 'running' ? 600 : 400 }}>
+                            {ev.step || ev.message || 'Processing investigation step'}
+                          </span>
+                          <span style={{ fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--text-muted)' }}>
+                            {ev.timestamp ? new Date(ev.timestamp).toLocaleTimeString() : ''}
+                          </span>
+                        </div>
                       </div>
-                    ) : (
-                      <div style={{ width: '16px', height: '16px', borderRadius: '50%', backgroundColor: 'var(--surface-1)', border: '1px solid var(--color-success)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--color-success)', background: 'var(--surface-1)' }}>
-                        <Check size={10} />
-                      </div>
-                    )}
-                    <div style={{ flex: 1, display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
-                      <span style={{ color: currentState === 'diagnosing' ? 'var(--color-accent)' : 'var(--text-primary)', fontWeight: currentState === 'diagnosing' ? 600 : 400 }}>
-                        {currentState === 'diagnosing' ? 'Analyzing app/demo_api/bugs.py...' : 'Identified AttributeError on line 122'}
-                      </span>
-                      <span style={{ fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--text-muted)' }}>14:32:10</span>
-                    </div>
-                  </div>
-
-                  {/* Step 4 */}
-                  {currentState !== 'diagnosing' && (
-                    <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-start' }}>
-                      <div style={{ width: '16px', height: '16px', borderRadius: '50%', backgroundColor: 'var(--surface-1)', border: '1px solid var(--color-success)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--color-success)', background: 'var(--surface-1)' }}>
-                        <Check size={10} />
-                      </div>
-                      <div style={{ flex: 1, display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
-                        <span style={{ color: 'var(--text-primary)' }}>Generated proposed patch</span>
-                        <span style={{ fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--text-muted)' }}>14:32:14</span>
-                      </div>
-                    </div>
+                    ))
+                  ) : (
+                    <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Initializing timeline stream...</div>
                   )}
-
                 </div>
               </div>
             </div>
 
-            {/* Section 3: Relevant Files */}
-            <div style={{ border: '1px solid var(--border-color)', borderRadius: '6px', overflow: 'hidden' }}>
-              <div 
-                onClick={() => setExpandedFiles(!expandedFiles)}
-                style={{
-                  padding: '8px 12px',
-                  backgroundColor: 'var(--surface-2)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justify: 'space-between',
-                  cursor: 'pointer',
-                  fontSize: '11px',
-                  fontWeight: 600
-                }}
-              >
-                <span>4 files analyzed</span>
-                {expandedFiles ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-              </div>
+            {/* Section 3: Implicated Relevant Files */}
+            {incidentContext && incidentContext.implicated_files && incidentContext.implicated_files.length > 0 && (
+              <div style={{ border: '1px solid var(--border-color)', borderRadius: '6px', overflow: 'hidden' }}>
+                <div 
+                  onClick={() => setExpandedFiles(!expandedFiles)}
+                  style={{
+                    padding: '8px 12px',
+                    backgroundColor: 'var(--surface-2)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justify: 'space-between',
+                    cursor: 'pointer',
+                    fontSize: '11px',
+                    fontWeight: 600
+                  }}
+                >
+                  <span>{incidentContext.implicated_files.length} files analyzed</span>
+                  {expandedFiles ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                </div>
 
-              {expandedFiles && (
-                <div style={{ padding: '6px 0', backgroundColor: 'var(--surface-1)' }}>
-                  {[
-                    { path: 'app/demo_api/bugs.py', reason: 'Direct stack trace failure origin' },
-                    { path: 'app/demo_api/checkout.py', reason: 'Invokes payment handler' },
-                    { path: 'app/routes/payments.py', reason: 'Endpoint router specification' },
-                    { path: 'requirements.txt', reason: 'Dependency version checks' }
-                  ].map((f) => (
-                    <div key={f.path} style={{ borderBottom: '1px solid var(--border-color)' }}>
-                      <div 
-                        onClick={() => { setSelectedFile(f.path); toggleFileDetail(f.path); }}
-                        style={{
-                          padding: '6px 12px',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justify: 'space-between',
-                          cursor: 'pointer',
-                          fontSize: '11px',
-                          fontFamily: 'var(--font-mono)'
-                        }}
-                        className="hover-bg"
-                      >
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <CheckCircle2 size={12} style={{ color: 'var(--color-success)' }} />
-                          <span style={{ color: 'var(--text-primary)' }}>{f.path}</span>
+                {expandedFiles && (
+                  <div style={{ padding: '6px 0', backgroundColor: 'var(--surface-1)' }}>
+                    {incidentContext.implicated_files.map((filePath) => (
+                      <div key={filePath} style={{ borderBottom: '1px solid var(--border-color)' }}>
+                        <div 
+                          onClick={() => { setSelectedFile(filePath); toggleFileDetail(filePath); }}
+                          style={{
+                            padding: '6px 12px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justify: 'space-between',
+                            cursor: 'pointer',
+                            fontSize: '11px',
+                            fontFamily: 'var(--font-mono)'
+                          }}
+                          className="hover-bg"
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <CheckCircle2 size={12} style={{ color: 'var(--color-success)' }} />
+                            <span style={{ color: 'var(--text-primary)' }}>{filePath}</span>
+                          </div>
+                          <ChevronRight size={12} style={{ color: 'var(--text-muted)' }} />
                         </div>
-                        <ChevronRight size={12} style={{ color: 'var(--text-muted)' }} />
+                        
+                        {expandedFileDetails[filePath] && (
+                          <div style={{ padding: '6px 12px 6px 30px', fontSize: '11px', color: 'var(--text-muted)', backgroundColor: 'var(--bg-canvas)' }}>
+                            Selected by AST & stack trace analyzer as implicated source.
+                          </div>
+                        )}
                       </div>
-                      
-                      {expandedFileDetails[f.path] && (
-                        <div style={{ padding: '6px 12px 6px 30px', fontSize: '11px', color: 'var(--text-muted)', backgroundColor: 'var(--bg-canvas)' }}>
-                          Why this file? {f.reason}
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
-            {/* Section 4: Root Cause */}
+            {/* Section 4: Root Cause Card */}
             <div style={{ backgroundColor: 'var(--surface-2)', border: '1px solid var(--border-color)', borderRadius: '6px', padding: '12px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
                 <div style={{ fontSize: '10px', fontWeight: 700, color: 'var(--text-muted)', letterSpacing: '0.05em' }}>
-                  ROOT CAUSE
+                  ROOT CAUSE ANALYSIS
                 </div>
-                {currentState !== 'diagnosing' && (
+                {incidentDiff?.reason && (
                   <span style={{ backgroundColor: 'rgba(240, 96, 90, 0.15)', color: 'var(--color-failure)', padding: '2px 6px', borderRadius: '4px', fontSize: '10px', fontWeight: 700 }}>
-                    CODE BUG
+                    BUG DETECTED
                   </span>
                 )}
               </div>
 
-              {currentState === 'diagnosing' ? (
+              {!incidentDiff || !incidentDiff.present ? (
                 <div style={{ fontSize: '12px', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '6px' }}>
                   <Clock size={13} />
-                  <span>Waiting for investigation...</span>
+                  <span>Agent analyzing stack trace & context...</span>
                 </div>
               ) : (
                 <>
-                  {/* Confidence Bar */}
                   <div style={{ marginBottom: '10px' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', marginBottom: '4px' }}>
                       <span style={{ color: 'var(--text-muted)' }}>Confidence</span>
@@ -311,146 +298,168 @@ export default function APIDoctorPanel({
                   </div>
 
                   <p style={{ fontSize: '12px', color: 'var(--text-primary)', marginBottom: '10px', lineHeight: 1.4 }}>
-                    <code>payment_method</code> evaluates to <code>None</code> when <code>payment_method</code> payload field is omitted, causing <code>AttributeError</code> on dereference.
+                    {incidentDiff.reason || incidentDiff.summary || 'Root cause identified.'}
                   </p>
 
-                  <button 
-                    onClick={() => setSelectedFile('app/demo_api/bugs.py')}
-                    className="btn-outline"
-                    style={{ width: '100%', justifyContent: 'center', fontSize: '11px' }}
-                  >
-                    <span>Open Location (bugs.py:121)</span>
-                    <ArrowUpRight size={12} />
-                  </button>
+                  {incidentContext?.implicated_files?.[0] && (
+                    <button 
+                      onClick={() => setSelectedFile(incidentContext.implicated_files[0])}
+                      className="btn-outline"
+                      style={{ width: '100%', justifyContent: 'center', fontSize: '11px' }}
+                    >
+                      <span>Open File ({incidentContext.implicated_files[0]})</span>
+                      <ArrowUpRight size={12} />
+                    </button>
+                  )}
                 </>
               )}
             </div>
 
-            {/* Section 5: Proposed Fix / Change Approval */}
-            {currentState !== 'diagnosing' && (
+            {/* Section 5: Proposed Fix Card */}
+            {incidentDiff && incidentDiff.present && (
               <div style={{ backgroundColor: 'var(--surface-2)', border: '1px solid var(--border-color)', borderRadius: '6px', padding: '12px' }}>
                 <div style={{ fontSize: '10px', fontWeight: 700, color: 'var(--text-muted)', letterSpacing: '0.05em', marginBottom: '8px' }}>
                   AI PROPOSED CHANGE
                 </div>
 
-                {!fixApplied && currentState === 'fix_proposed' ? (
-                  <>
-                    <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '10px', fontFamily: 'var(--font-mono)' }}>
-                      1 file changed · <span style={{ color: 'var(--color-success)' }}>+3</span> <span style={{ color: 'var(--color-failure)' }}>−1</span>
-                    </div>
-                    <ul style={{ paddingLeft: '16px', fontSize: '11px', color: 'var(--text-primary)', marginBottom: '14px', lineHeight: 1.6 }}>
-                      <li><span style={{ color: 'var(--color-success)' }}>+</span> Added null safety check for payment_method</li>
-                      <li><span style={{ color: 'var(--color-failure)' }}>−</span> Removed unsafe direct property dereference</li>
-                    </ul>
+                <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '10px', fontFamily: 'var(--font-mono)' }}>
+                  {incidentDiff.files_changed?.length || 1} file(s) changed
+                </div>
 
-                    {/* Semantically distinct buttons */}
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                      <button onClick={handleKeepChanges} className="btn-success" style={{ justifyContent: 'center', width: '100%' }}>
-                        <Check size={14} />
-                        <span>Keep Changes</span>
-                      </button>
+                <p style={{ fontSize: '12px', color: 'var(--text-primary)', marginBottom: '12px' }}>
+                  {incidentDiff.summary}
+                </p>
 
-                      <div style={{ display: 'flex', gap: '8px' }}>
-                        <button onClick={handleReject} className="btn-outline" style={{ flex: 1, justifyContent: 'center' }}>
-                          Reject
-                        </button>
-                        <button 
-                          onClick={() => setIsDiffMode(true)} 
-                          style={{ background: 'none', border: 'none', color: 'var(--color-accent)', cursor: 'pointer', fontSize: '11px', textDecoration: 'underline' }}
-                        >
-                          Review Full Diff
-                        </button>
-                      </div>
-                    </div>
-                  </>
-                ) : (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--color-success)', fontSize: '12px', fontWeight: 500 }}>
-                    <CheckCircle2 size={16} />
-                    <span>Changes applied to workspace</span>
+                {/* Approvals */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  <button onClick={() => onApproveFix(true)} className="btn-success" style={{ justifyContent: 'center', width: '100%' }}>
+                    <Check size={14} />
+                    <span>Keep Changes</span>
+                  </button>
+
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    <button onClick={() => onApproveFix(false)} className="btn-outline" style={{ flex: 1, justifyContent: 'center' }}>
+                      Reject
+                    </button>
+                    <button 
+                      onClick={() => setIsDiffMode(true)} 
+                      style={{ background: 'none', border: 'none', color: 'var(--color-accent)', cursor: 'pointer', fontSize: '11px', textDecoration: 'underline' }}
+                    >
+                      Review Full Diff
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Section 6: Sandbox Result */}
+            {incidentSandbox && incidentSandbox.present && (
+              <div style={{ 
+                backgroundColor: incidentSandbox.passed ? 'rgba(61, 214, 140, 0.08)' : 'rgba(240, 96, 90, 0.08)', 
+                border: `1px solid ${incidentSandbox.passed ? 'var(--color-success)' : 'var(--color-failure)'}`, 
+                borderRadius: '6px', 
+                padding: '12px' 
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: incidentSandbox.passed ? 'var(--color-success)' : 'var(--color-failure)', fontWeight: 700, fontSize: '13px', marginBottom: '6px' }}>
+                  <ShieldCheck size={18} />
+                  <span>{incidentSandbox.passed ? 'FIX VERIFIED' : 'VERIFICATION FAILED'}</span>
+                </div>
+                <p style={{ fontSize: '12px', color: 'var(--text-primary)', marginBottom: '8px' }}>
+                  {incidentSandbox.passed ? 'Original error resolved in verification sandbox.' : incidentSandbox.error || 'Tests failed.'}
+                </p>
+                {incidentSandbox.steps && (
+                  <div style={{ fontSize: '11px', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>
+                    Steps completed: {incidentSandbox.steps.length}
                   </div>
                 )}
               </div>
             )}
 
-            {/* Section 6: Sandbox & GitHub PR (Visible when verified) */}
-            {currentState === 'verified_pr' && (
-              <>
-                {/* Verification Box */}
-                <div style={{ backgroundColor: 'rgba(61, 214, 140, 0.08)', border: '1px solid var(--color-success)', borderRadius: '6px', padding: '12px' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--color-success)', fontWeight: 700, fontSize: '13px', marginBottom: '6px' }}>
-                    <ShieldCheck size={18} />
-                    <span>FIX VERIFIED</span>
-                  </div>
-                  <p style={{ fontSize: '12px', color: 'var(--text-primary)', marginBottom: '8px' }}>
-                    Original HTTP 500 error no longer reproduced in sandbox.
-                  </p>
-                  <div style={{ fontSize: '11px', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>
-                    Test stats: <span style={{ color: 'var(--color-success)' }}>12 passed</span> · 0 failed
-                  </div>
+            {/* Section 7: GitHub PR Card */}
+            {incidentPR && incidentPR.present && (
+              <div style={{ backgroundColor: 'var(--surface-2)', border: '1px solid var(--border-color)', borderRadius: '6px', padding: '12px' }}>
+                <div style={{ fontSize: '10px', fontWeight: 700, color: 'var(--text-muted)', letterSpacing: '0.05em', marginBottom: '8px' }}>
+                  GITHUB PULL REQUEST
+                </div>
+                <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '4px' }}>
+                  PR #{incidentPR.pr_number || '1'} — API Repair
+                </div>
+                <div style={{ fontSize: '11px', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', marginBottom: '8px' }}>
+                  Branch: <code>{incidentPR.branch || 'fix/api-doctor'}</code>
+                </div>
+                <div style={{ display: 'inline-block', backgroundColor: 'rgba(232, 162, 61, 0.15)', color: 'var(--color-warning)', padding: '2px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: 600, marginBottom: '12px' }}>
+                  {incidentPR.status || 'Awaiting human review'}
                 </div>
 
-                {/* GitHub PR Card */}
-                <div style={{ backgroundColor: 'var(--surface-2)', border: '1px solid var(--border-color)', borderRadius: '6px', padding: '12px' }}>
-                  <div style={{ fontSize: '10px', fontWeight: 700, color: 'var(--text-muted)', letterSpacing: '0.05em', marginBottom: '8px' }}>
-                    GITHUB PULL REQUEST
-                  </div>
-                  <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '4px' }}>
-                    Fix payment method null handling
-                  </div>
-                  <div style={{ fontSize: '11px', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', marginBottom: '8px' }}>
-                    Branch: <code>api-doctor/fix/c0489bda</code>
-                  </div>
-                  <div style={{ display: 'inline-block', backgroundColor: 'rgba(232, 162, 61, 0.15)', color: 'var(--color-warning)', padding: '2px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: 600, marginBottom: '12px' }}>
-                    Awaiting human review
-                  </div>
+                <a 
+                  href={incidentPR.pr_url || '#'} 
+                  target="_blank" 
+                  rel="noreferrer" 
+                  className="btn-primary" 
+                  style={{ width: '100%', justifyContent: 'center', textDecoration: 'none' }}
+                >
+                  <span>Open Pull Request</span>
+                  <ExternalLink size={12} />
+                </a>
+              </div>
+            )}
 
-                  <button className="btn-primary" style={{ width: '100%', justifyContent: 'center' }}>
-                    <span>Open Pull Request</span>
-                    <ExternalLink size={12} />
-                  </button>
-                  <div style={{ textAlign: 'center', fontSize: '10px', color: 'var(--text-muted)', marginTop: '6px' }}>
-                    Note: Merging requires human PR review on GitHub.
-                  </div>
-                </div>
-              </>
+            {/* Create PR button if approved & sandbox passed */}
+            {incidentSandbox && incidentSandbox.passed && (!incidentPR || !incidentPR.present) && (
+              <button onClick={onCreatePR} className="btn-primary" style={{ width: '100%', justifyContent: 'center' }}>
+                <GitPullRequest size={14} />
+                <span>Create GitHub Pull Request</span>
+              </button>
             )}
 
           </div>
         )}
 
-        {/* Persistent Incident History (§12) */}
+        {/* Persistent Incident History */}
         <div style={{ marginTop: '24px', borderTop: '1px solid var(--border-color)', paddingTop: '16px' }}>
           <div 
             onClick={() => setHistoryOpen(!historyOpen)}
             style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer', marginBottom: '10px' }}
           >
             <span style={{ fontSize: '10px', fontWeight: 700, color: 'var(--text-muted)', letterSpacing: '0.05em' }}>
-              INCIDENT HISTORY
+              BACKEND INCIDENT HISTORY ({incidentsList ? incidentsList.length : 0})
             </span>
             {historyOpen ? <ChevronUp size={14} style={{ color: 'var(--text-muted)' }} /> : <ChevronDown size={14} style={{ color: 'var(--text-muted)' }} />}
           </div>
 
           {historyOpen && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              {[
-                { id: '#C0489BDA', status: 'FIX VERIFIED', color: 'var(--color-success)' },
-                { id: '#A12F94BC', status: 'PR OPEN', color: 'var(--color-warning)' },
-                { id: '#79B8823D', status: 'FIX FAILED', color: 'var(--color-failure)' }
-              ].map(inc => (
-                <div key={inc.id} style={{
-                  padding: '8px 10px',
-                  backgroundColor: 'var(--surface-2)',
-                  borderRadius: '4px',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justify: 'space-between',
-                  fontSize: '11px',
-                  fontFamily: 'var(--font-mono)'
-                }}>
-                  <span>{inc.id}</span>
-                  <span style={{ color: inc.color, fontWeight: 600, fontSize: '10px' }}>{inc.status}</span>
-                </div>
-              ))}
+              {incidentsList && incidentsList.length > 0 ? (
+                incidentsList.map(inc => (
+                  <div 
+                    key={inc.id} 
+                    onClick={() => onSelectIncident(inc.id)}
+                    style={{
+                      padding: '8px 10px',
+                      backgroundColor: activeIncident?.id === inc.id ? 'var(--surface-hover)' : 'var(--surface-2)',
+                      borderLeft: activeIncident?.id === inc.id ? '2px solid var(--color-accent)' : '2px solid transparent',
+                      borderRadius: '4px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justify: 'space-between',
+                      fontSize: '11px',
+                      fontFamily: 'var(--font-mono)',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    <span>#{inc.id.slice(0, 8).toUpperCase()}</span>
+                    <span style={{ 
+                      color: inc.status?.includes('VERIFIED') ? 'var(--color-success)' : 'var(--color-failure)', 
+                      fontWeight: 600, 
+                      fontSize: '10px' 
+                    }}>
+                      {inc.status}
+                    </span>
+                  </div>
+                ))
+              ) : (
+                <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>No backend incidents stored yet.</div>
+              )}
             </div>
           )}
         </div>

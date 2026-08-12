@@ -1,80 +1,71 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { 
   X, 
   Lock, 
   FileCode, 
   FileText, 
   FileLock, 
-  Search, 
   Columns, 
-  FileDiff,
-  AlertTriangle,
-  ArrowUp,
-  ArrowDown
+  AlertTriangle 
 } from 'lucide-react';
 
 export default function EditorRegion({ 
   selectedFile, 
   setSelectedFile, 
-  currentState, 
+  incidentContext,
+  incidentDiff,
+  isDiagnosing,
   isDiffMode,
   setIsDiffMode
 }) {
-  const [showSearch, setShowSearch] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [gotoLine, setGotoLine] = useState('');
-  const [showGoto, setShowGoto] = useState(false);
-
   const openTabs = [
-    { path: 'app/demo_api/bugs.py', name: 'bugs.py', ext: 'py', isAgentActive: currentState === 'diagnosing' },
-    { path: 'README.md', name: 'README.md', ext: 'md' },
+    { path: selectedFile || 'app/demo_api/bugs.py', name: selectedFile ? selectedFile.split('/').pop() : 'bugs.py', isAgentActive: isDiagnosing },
+    { path: 'README.md', name: 'README.md' },
   ];
 
-  const getIcon = (ext) => {
-    switch(ext) {
-      case 'py': return <FileCode size={13} style={{ color: '#3572A5' }} />;
-      case 'env': return <FileLock size={13} style={{ color: '#E8A23D' }} />;
-      case 'md': return <FileText size={13} style={{ color: '#7C8CF8' }} />;
-      default: return <FileText size={13} style={{ color: 'var(--text-muted)' }} />;
-    }
-  };
-
-  const bugsOriginalCode = [
-    { line: 115, code: 'def process_checkout(request_data):' },
-    { line: 116, code: '    """Process API checkout order and validate payload"""' },
-    { line: 117, code: '    user_id = request_data.get("user_id")' },
-    { line: 118, code: '    order_amount = request_data.get("amount")' },
-    { line: 119, code: '    payment_method = request_data.get("payment_method")' },
-    { line: 120, code: '' },
-    { line: 121, code: '    # Issue: payment_method can be NoneType when missing from request' },
-    { line: 122, code: '    payment_token = payment_method.token  # UNSAFE ACCESS', isFailure: true },
-    { line: 123, code: '    ' },
-    { line: 124, code: '    logger.info(f"Processing order for user {user_id} with token {payment_token}")' },
-    { line: 125, code: '    return {"status": "success", "token": payment_token}' },
-  ];
-
-  const bugsProposedCode = [
-    { line: 115, code: 'def process_checkout(request_data):' },
-    { line: 116, code: '    """Process API checkout order and validate payload"""' },
-    { line: 117, code: '    user_id = request_data.get("user_id")' },
-    { line: 118, code: '    order_amount = request_data.get("amount")' },
-    { line: 119, code: '    payment_method = request_data.get("payment_method")' },
-    { line: 120, code: '' },
-    { line: 121, code: '    # FIXED: Added null safety verification' },
-    { line: 122, code: '    if not payment_method:', type: 'add' },
-    { line: 123, code: '        raise ValueError("Missing payment method payload")', type: 'add' },
-    { line: 124, code: '    payment_token = payment_method.token', type: 'add' },
-    { line: 125, code: '    ' },
-    { line: 126, code: '    logger.info(f"Processing order for user {user_id} with token {payment_token}")' },
-    { line: 127, code: '    return {"status": "success", "token": payment_token}' },
-  ];
-
-  const renderSyntaxHighlighted = (code) => {
-    return code
-      .replace(/(def|return|if|not|raise|import|from)/g, '<span style="color:#7C8CF8;font-weight:500;">$1</span>')
-      .replace(/(".*?"|'.*? me.*?'|'.*?')/g, '<span style="color:#3DD68C;">$1</span>')
+  const renderSyntaxHighlighted = (codeStr) => {
+    if (!codeStr) return '';
+    return codeStr
+      .replace(/(def|return|if|not|raise|import|from|try|except)/g, '<span style="color:#7C8CF8;font-weight:500;">$1</span>')
+      .replace(/(".*?"|'.*?')/g, '<span style="color:#3DD68C;">$1</span>')
       .replace(/(#.*)/g, '<span style="color:#8B8D93;font-style:italic;">$1</span>');
   };
+
+  // Extract snippet or raw code from backend context
+  const getCodeSnippet = () => {
+    if (incidentContext && incidentContext.code_snippets) {
+      const snip = incidentContext.code_snippets[selectedFile];
+      if (typeof snip === 'string') return snip;
+      if (snip && typeof snip === 'object') {
+        if (typeof snip.code === 'string') return snip.code;
+        if (Array.isArray(snip.lines)) return snip.lines.join('\n');
+        return JSON.stringify(snip, null, 2);
+      }
+      // If code_snippets has keys, grab first snippet code if selectedFile not found directly
+      const firstKey = Object.keys(incidentContext.code_snippets)[0];
+      if (firstKey) {
+        const firstSnip = incidentContext.code_snippets[firstKey];
+        if (typeof firstSnip === 'string') return firstSnip;
+        if (firstSnip && typeof firstSnip.code === 'string') return firstSnip.code;
+      }
+    }
+    // Fallback real bug sample if file selected matches bugs.py
+    return `def process_checkout(request_data):
+    """Process API checkout order and validate payload"""
+    user_id = request_data.get("user_id")
+    order_amount = request_data.get("amount")
+    payment_method = request_data.get("payment_method")
+
+    # Issue: payment_method can be NoneType when missing from request
+    payment_token = payment_method.token  # Line 122: UNSAFE ACCESS
+    
+    logger.info(f"Processing order for user {user_id} with token {payment_token}")
+    return {"status": "success", "token": payment_token}`;
+  };
+
+  const rawCode = getCodeSnippet();
+  const safeCodeStr = typeof rawCode === 'string' ? rawCode : String(rawCode || '');
+  const lines = safeCodeStr.split('\n');
 
   return (
     <div style={{
@@ -120,7 +111,7 @@ export default function EditorRegion({
                   fontFamily: 'var(--font-mono)'
                 }}
               >
-                {getIcon(tab.ext)}
+                <FileCode size={13} style={{ color: '#3572A5' }} />
                 <span>{tab.name}</span>
                 {tab.isAgentActive && <span className="agent-dot" style={{ width: '6px', height: '6px' }} />}
                 <X size={12} style={{ opacity: 0.6, cursor: 'pointer' }} />
@@ -129,21 +120,20 @@ export default function EditorRegion({
           })}
         </div>
 
-        {/* Diff Mode Toggle Switch */}
-        {(currentState === 'fix_proposed' || isDiffMode) && (
+        {incidentDiff && incidentDiff.present && (
           <button 
             onClick={() => setIsDiffMode(!isDiffMode)}
             className="btn-outline"
             style={{ padding: '3px 8px', fontSize: '11px' }}
           >
             <Columns size={12} />
-            <span>{isDiffMode ? 'Unified View' : 'Split View: Before / After'}</span>
+            <span>{isDiffMode ? 'Unified Code' : 'Split View: Before / After'}</span>
           </button>
         )}
       </div>
 
       {/* Read-Only Banner when agent is diagnosing */}
-      {currentState === 'diagnosing' && (
+      {isDiagnosing && (
         <div style={{
           backgroundColor: 'rgba(124, 140, 248, 0.15)',
           borderBottom: '1px solid rgba(124, 140, 248, 0.3)',
@@ -156,97 +146,67 @@ export default function EditorRegion({
           fontFamily: 'var(--font-mono)'
         }}>
           <Lock size={12} />
-          <span>Read-only — API Doctor is actively analyzing this file</span>
+          <span>Read-only — API Doctor agent is analyzing workspace code</span>
         </div>
       )}
 
       {/* Code Editor Content */}
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden', position: 'relative' }}>
-        {selectedFile === 'app/demo_api/bugs.py' ? (
-          (currentState === 'fix_proposed' || isDiffMode) ? (
-            /* SPLIT DIFF VIEW */
-            <div style={{ flex: 1, display: 'flex', width: '100%', height: '100%' }}>
-              {/* Original Column */}
-              <div style={{ flex: 1, borderRight: '1px solid var(--border-color)', overflowY: 'auto', padding: '8px 0' }}>
-                <div style={{ padding: '4px 12px', fontSize: '11px', color: 'var(--color-failure)', fontWeight: 600, borderBottom: '1px solid var(--border-color)', marginBottom: '8px', fontFamily: 'var(--font-mono)' }}>
-                  Original (bugs.py)
-                </div>
-                {bugsOriginalCode.map((row) => (
-                  <div 
-                    key={row.line}
-                    style={{
-                      display: 'flex',
-                      lineHeight: '20px',
-                      backgroundColor: row.isFailure ? 'var(--diff-remove-bg)' : 'transparent',
-                      color: row.isFailure ? 'var(--diff-remove-text)' : 'var(--text-primary)',
-                      fontFamily: 'var(--font-mono)',
-                      fontSize: '12px'
-                    }}
-                  >
-                    <div style={{ width: '45px', textAlign: 'right', paddingRight: '12px', color: 'var(--text-muted)', userSelect: 'none' }}>
-                      {row.line}
-                    </div>
-                    <div style={{ paddingLeft: '8px', flex: 1, whiteSpace: 'pre' }}
-                      dangerouslySetInnerHTML={{ __html: renderSyntaxHighlighted(row.code) }}
-                    />
-                  </div>
-                ))}
+        {isDiffMode && incidentDiff && incidentDiff.diff ? (
+          /* SPLIT / UNIFIED DIFF VIEW FROM BACKEND */
+          <div style={{ flex: 1, display: 'flex', width: '100%', height: '100%' }}>
+            <div style={{ flex: 1, borderRight: '1px solid var(--border-color)', overflowY: 'auto', padding: '12px', fontFamily: 'var(--font-mono)', fontSize: '12px' }}>
+              <div style={{ padding: '4px 12px', fontSize: '11px', color: 'var(--color-accent)', fontWeight: 600, borderBottom: '1px solid var(--border-color)', marginBottom: '8px' }}>
+                Backend Generated Patch ({incidentDiff.summary})
               </div>
-
-              {/* Proposed Column */}
-              <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0' }}>
-                <div style={{ padding: '4px 12px', fontSize: '11px', color: 'var(--color-success)', fontWeight: 600, borderBottom: '1px solid var(--border-color)', marginBottom: '8px', fontFamily: 'var(--font-mono)' }}>
-                  Proposed Fix (bugs.py)
-                </div>
-                {bugsProposedCode.map((row) => (
-                  <div 
-                    key={row.line}
-                    style={{
-                      display: 'flex',
-                      lineHeight: '20px',
-                      backgroundColor: row.type === 'add' ? 'var(--diff-add-bg)' : 'transparent',
-                      color: row.type === 'add' ? 'var(--diff-add-text)' : 'var(--text-primary)',
-                      fontFamily: 'var(--font-mono)',
-                      fontSize: '12px'
-                    }}
-                  >
-                    <div style={{ width: '45px', textAlign: 'right', paddingRight: '12px', color: 'var(--text-muted)', userSelect: 'none' }}>
-                      {row.line}
+              <pre style={{ whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>
+                {incidentDiff.diff.split('\n').map((line, idx) => {
+                  let bg = 'transparent';
+                  let color = 'var(--text-primary)';
+                  if (line.startsWith('+')) {
+                    bg = 'var(--diff-add-bg)';
+                    color = 'var(--diff-add-text)';
+                  } else if (line.startsWith('-')) {
+                    bg = 'var(--diff-remove-bg)';
+                    color = 'var(--diff-remove-text)';
+                  }
+                  return (
+                    <div key={idx} style={{ backgroundColor: bg, color: color, padding: '0 4px' }}>
+                      {line}
                     </div>
-                    <div style={{ paddingLeft: '8px', flex: 1, whiteSpace: 'pre' }}
-                      dangerouslySetInnerHTML={{ __html: renderSyntaxHighlighted(row.code) }}
-                    />
-                  </div>
-                ))}
-              </div>
+                  );
+                })}
+              </pre>
             </div>
-          ) : (
-            /* STANDARD CODE VIEW WITH ANCHORED FAILURE CALLOUT */
-            <div style={{ flex: 1, overflowY: 'auto', padding: '12px 0' }}>
-              {bugsOriginalCode.map((row) => (
-                <React.Fragment key={row.line}>
+          </div>
+        ) : (
+          /* STANDARD CODE VIEW WITH REAL STACK TRACE FAILURE CALLOUT */
+          <div style={{ flex: 1, overflowY: 'auto', padding: '12px 0' }}>
+            {lines.map((lineText, idx) => {
+              const lineNum = idx + 115;
+              const isFailureLine = lineText.includes('payment_method.token') || lineText.includes('UNSAFE');
+              return (
+                <React.Fragment key={idx}>
                   <div 
                     style={{
                       display: 'flex',
                       lineHeight: '22px',
-                      backgroundColor: row.isFailure && (currentState === 'diagnosing' || currentState === 'idle') 
-                        ? 'rgba(124, 140, 248, 0.15)' 
-                        : 'transparent',
-                      borderLeft: row.isFailure ? '3px solid var(--color-accent)' : '3px solid transparent',
+                      backgroundColor: isFailureLine ? 'rgba(124, 140, 248, 0.15)' : 'transparent',
+                      borderLeft: isFailureLine ? '3px solid var(--color-accent)' : '3px solid transparent',
                       fontFamily: 'var(--font-mono)',
                       fontSize: '12px'
                     }}
                   >
                     <div style={{ width: '50px', textAlign: 'right', paddingRight: '14px', color: 'var(--text-muted)', userSelect: 'none' }}>
-                      {row.line}
+                      {lineNum}
                     </div>
                     <div style={{ flex: 1, paddingLeft: '8px', whiteSpace: 'pre' }}
-                      dangerouslySetInnerHTML={{ __html: renderSyntaxHighlighted(row.code) }}
+                      dangerouslySetInnerHTML={{ __html: renderSyntaxHighlighted(lineText) }}
                     />
                   </div>
 
-                  {/* Inline Anchored Failure Callout Card */}
-                  {row.isFailure && (currentState === 'diagnosing' || currentState === 'idle') && (
+                  {/* Inline Failure Callout Card */}
+                  {isFailureLine && incidentContext && (
                     <div style={{
                       margin: '8px 16px 12px 55px',
                       maxWidth: '560px',
@@ -259,40 +219,17 @@ export default function EditorRegion({
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--color-accent)', fontWeight: 600, fontSize: '11px' }}>
                           <AlertTriangle size={14} />
-                          <span>SUSPECTED FAILURE — LINE 122</span>
+                          <span>SUSPECTED FAILURE DETECTED</span>
                         </div>
-                        <X size={12} style={{ color: 'var(--text-muted)', cursor: 'pointer' }} />
                       </div>
-                      <p style={{ fontSize: '12px', color: 'var(--text-primary)', marginBottom: '4px' }}>
-                        AttributeError: 'NoneType' object has no attribute 'token'
-                      </p>
-                      <p style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
-                        Line 122 attempts to dereference <code>payment_method</code> without checking if it is null when payload is empty.
+                      <p style={{ fontSize: '12px', color: 'var(--text-primary)', marginBottom: '4px', fontFamily: 'var(--font-mono)' }}>
+                        {incidentContext.stack_trace ? incidentContext.stack_trace.split('\n').pop() : "AttributeError: 'NoneType' object has no attribute 'token'"}
                       </p>
                     </div>
                   )}
                 </React.Fragment>
-              ))}
-            </div>
-          )
-        ) : (
-          /* README FILE */
-          <div style={{ flex: 1, padding: '24px', overflowY: 'auto', fontFamily: 'var(--font-ui)', color: 'var(--text-primary)' }}>
-            <h1 style={{ fontFamily: 'var(--font-heading)', fontSize: '20px', marginBottom: '12px', color: 'var(--color-accent)' }}>
-              API Doctor: Auto-Diagnostic Toolkit
-            </h1>
-            <p style={{ color: 'var(--text-muted)', marginBottom: '16px', lineHeight: 1.6 }}>
-              API Doctor is an autonomous debugging & repair agent operating directly inside your IDE environment.
-            </p>
-            <div style={{ backgroundColor: 'var(--surface-1)', border: '1px solid var(--border-color)', borderRadius: '6px', padding: '16px', marginBottom: '16px' }}>
-              <h3 style={{ fontSize: '13px', fontWeight: 600, marginBottom: '8px' }}>Key Capabilities</h3>
-              <ul style={{ paddingLeft: '20px', color: 'var(--text-muted)', fontSize: '12px', lineHeight: 1.8 }}>
-                <li>Live incident stack trace parsing</li>
-                <li>Automated line-level root cause isolation</li>
-                <li>Isolated sandbox test execution</li>
-                <li>Pull Request generation with human approval gates</li>
-              </ul>
-            </div>
+              );
+            })}
           </div>
         )}
 

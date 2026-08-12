@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import TopBar from './components/TopBar';
 import ActivityBar from './components/ActivityBar';
 import Explorer from './components/Explorer';
@@ -6,37 +6,154 @@ import EditorRegion from './components/EditorRegion';
 import APIDoctorPanel from './components/APIDoctorPanel';
 import BottomPanel from './components/BottomPanel';
 import CommandPalette from './components/CommandPalette';
-import StateToolbar from './components/StateToolbar';
+import { api } from './api';
 import './index.css';
 
 export default function App() {
-  // Global State
-  const [currentState, setCurrentState] = useState('idle'); // 'idle' | 'diagnosing' | 'fix_proposed' | 'verified_pr'
+  // Real Backend Data States
+  const [isBackendConnected, setIsBackendConnected] = useState(false);
+  const [incidentsList, setIncidentsList] = useState([]);
+  const [activeIncidentId, setActiveIncidentId] = useState(null);
+  
+  // Active Incident Detailed Payload Objects
+  const [activeIncident, setActiveIncident] = useState(null);
+  const [incidentContext, setIncidentContext] = useState(null);
+  const [incidentDiff, setIncidentDiff] = useState(null);
+  const [incidentSandbox, setIncidentSandbox] = useState(null);
+  const [incidentPR, setIncidentPR] = useState(null);
+  const [timelineEvents, setTimelineEvents] = useState([]);
+  const [isDiagnosing, setIsDiagnosing] = useState(false);
+
+  // Layout & Visibility
   const [selectedFile, setSelectedFile] = useState('app/demo_api/bugs.py');
   const [activeActivityTab, setActiveActivityTab] = useState('explorer');
   const [activeBottomTab, setActiveBottomTab] = useState('terminal');
-  
-  // Panel Visibility
   const [isExplorerOpen, setIsExplorerOpen] = useState(true);
   const [isDoctorOpen, setIsDoctorOpen] = useState(true);
   const [isBottomCollapsed, setIsBottomCollapsed] = useState(false);
   const [isDiffMode, setIsDiffMode] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
 
-  // Resizable Widths / Heights
+  // Resizable widths
   const [explorerWidth, setExplorerWidth] = useState(240);
   const [doctorWidth, setDoctorWidth] = useState(380);
   const [bottomHeight, setBottomHeight] = useState(220);
 
-  // File status mappings
-  const fileStatuses = {
-    'app/demo_api/bugs.py': currentState === 'diagnosing' ? 'reading' : (currentState === 'verified_pr' ? 'modified' : 'analyzed'),
-    'app/demo_api/checkout.py': 'analyzed',
-    'app/routes/payments.py': 'analyzed',
-    'requirements.txt': 'analyzed'
+  // Check Backend Health & Fetch Incident History on mount
+  const refreshBackendState = useCallback(async () => {
+    try {
+      const health = await api.getHealth();
+      setIsBackendConnected(health.status === 'ok');
+
+      const incidents = await api.listIncidents();
+      setIncidentsList(incidents || []);
+      
+      if (!activeIncidentId && incidents && incidents.length > 0) {
+        setActiveIncidentId(incidents[0].id);
+      }
+    } catch (err) {
+      setIsBackendConnected(false);
+    }
+  }, [activeIncidentId]);
+
+  useEffect(() => {
+    refreshBackendState();
+    const interval = setInterval(refreshBackendState, 5000);
+    return () => clearInterval(interval);
+  }, [refreshBackendState]);
+
+  // Fetch full details whenever activeIncidentId changes
+  const fetchIncidentDetails = useCallback(async (id) => {
+    if (!id) return;
+    try {
+      const [inc, ctx, diff, sb, pr] = await Promise.allSettled([
+        api.getIncident(id),
+        api.getIncidentContext(id),
+        api.getIncidentDiff(id),
+        api.getIncidentSandbox(id),
+        api.getIncidentPR(id)
+      ]);
+
+      if (inc.status === 'fulfilled') {
+        setActiveIncident(inc.value);
+        setIsDiagnosing(!inc.value.status?.includes('VERIFIED') && !inc.value.status?.includes('PR') && !inc.value.status?.includes('FAILED') && inc.value.status !== 'REPAIR_LIMIT_REACHED');
+      }
+      if (ctx.status === 'fulfilled') setIncidentContext(ctx.value);
+      if (diff.status === 'fulfilled') setIncidentDiff(diff.value);
+      if (sb.status === 'fulfilled') setIncidentSandbox(sb.value);
+      if (pr.status === 'fulfilled') setIncidentPR(pr.value);
+    } catch (err) {
+      console.error('Failed to fetch incident details:', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeIncidentId) {
+      fetchIncidentDetails(activeIncidentId);
+    }
+  }, [activeIncidentId, fetchIncidentDetails]);
+
+  // Subscribe to real-time SSE stream for active incident
+  useEffect(() => {
+    if (!activeIncidentId) return;
+    setTimelineEvents([]);
+
+    const unsubscribe = api.subscribeIncidentStream(
+      activeIncidentId,
+      (eventData) => {
+        if (eventData.step || eventData.message) {
+          setTimelineEvents(prev => [...prev, eventData]);
+        }
+        // Periodically refresh incident detail upon event
+        fetchIncidentDetails(activeIncidentId);
+      },
+      (err) => console.log('SSE Stream closed')
+    );
+
+    return () => unsubscribe();
+  }, [activeIncidentId, fetchIncidentDetails]);
+
+  // Workflow Handlers
+  const handleStartDiagnosis = async (scenario = 'null_pointer') => {
+    try {
+      setIsDiagnosing(true);
+      const res = await api.triggerScenario(scenario);
+      if (res && res.incident_id) {
+        setActiveIncidentId(res.incident_id);
+        await refreshBackendState();
+        fetchIncidentDetails(res.incident_id);
+      }
+    } catch (err) {
+      alert(`Failed to start diagnosis on backend: ${err.message}`);
+      setIsDiagnosing(false);
+    }
   };
 
-  // Drag handles resize logic
+  const handleStopDiagnosis = () => {
+    setIsDiagnosing(false);
+  };
+
+  const handleApproveFix = async (approved) => {
+    if (!activeIncidentId) return;
+    try {
+      await api.approveFix(activeIncidentId, approved);
+      await fetchIncidentDetails(activeIncidentId);
+    } catch (err) {
+      alert(`Failed to approve fix: ${err.message}`);
+    }
+  };
+
+  const handleCreatePR = async () => {
+    if (!activeIncidentId) return;
+    try {
+      await api.createPR(activeIncidentId);
+      await fetchIncidentDetails(activeIncidentId);
+    } catch (err) {
+      alert(`Failed to create PR: ${err.message}`);
+    }
+  };
+
+  // Drag handle resize logic
   const isDraggingExplorer = useRef(false);
   const isDraggingDoctor = useRef(false);
   const isDraggingBottom = useRef(false);
@@ -44,14 +161,11 @@ export default function App() {
   useEffect(() => {
     const handleMouseMove = (e) => {
       if (isDraggingExplorer.current) {
-        const newWidth = Math.min(Math.max(e.clientX - 48, 160), 450);
-        setExplorerWidth(newWidth);
+        setExplorerWidth(Math.min(Math.max(e.clientX - 48, 160), 450));
       } else if (isDraggingDoctor.current) {
-        const newWidth = Math.min(Math.max(window.innerWidth - e.clientX, 280), 550);
-        setDoctorWidth(newWidth);
+        setDoctorWidth(Math.min(Math.max(window.innerWidth - e.clientX, 280), 550));
       } else if (isDraggingBottom.current) {
-        const newHeight = Math.min(Math.max(window.innerHeight - e.clientY, 80), 500);
-        setBottomHeight(newHeight);
+        setBottomHeight(Math.min(Math.max(window.innerHeight - e.clientY, 80), 500));
       }
     };
 
@@ -72,19 +186,21 @@ export default function App() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', width: '100vw', height: '100vh', overflow: 'hidden' }}>
-      {/* Fixed 44px Top Bar */}
+      {/* Top Bar with real backend connection & scenario triggers */}
       <TopBar 
-        currentState={currentState} 
-        setCurrentState={setCurrentState} 
+        activeIncident={activeIncident}
+        onStartDiagnosis={handleStartDiagnosis}
+        onStopDiagnosis={handleStopDiagnosis}
+        isDiagnosing={isDiagnosing}
+        isBackendConnected={isBackendConnected}
       />
 
-      {/* Main Workspace Workspace Canvas */}
+      {/* Main Workspace Canvas */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', position: 'relative' }}>
         
-        {/* Upper Region (Activity Bar + Explorer + Editor + API Doctor Panel) */}
+        {/* Upper Region */}
         <div style={{ flex: 1, display: 'flex', overflow: 'hidden', width: '100%' }}>
           
-          {/* Left Activity Bar */}
           <ActivityBar 
             activeTab={activeActivityTab}
             setActiveTab={setActiveActivityTab}
@@ -92,54 +208,63 @@ export default function App() {
             setIsDoctorOpen={setIsDoctorOpen}
             isExplorerOpen={isExplorerOpen}
             setIsExplorerOpen={setIsExplorerOpen}
-            hasActiveIncident={currentState !== 'idle'}
+            hasActiveIncident={Boolean(activeIncident)}
           />
 
-          {/* Left Explorer Panel */}
           <Explorer 
             selectedFile={selectedFile}
             setSelectedFile={setSelectedFile}
-            fileStatuses={fileStatuses}
+            fileStatuses={{
+              [selectedFile]: isDiagnosing ? 'reading' : (incidentDiff?.present ? 'modified' : 'analyzed')
+            }}
             explorerWidth={explorerWidth}
             setExplorerWidth={setExplorerWidth}
             isExplorerOpen={isExplorerOpen}
           />
 
-          {/* Explorer Drag Handle */}
           {isExplorerOpen && (
             <div 
               className="resize-handle-col"
-              onMouseDown={(e) => {
+              onMouseDown={() => {
                 isDraggingExplorer.current = true;
                 document.body.style.cursor = 'col-resize';
               }}
             />
           )}
 
-          {/* Center Editor Region */}
           <EditorRegion 
             selectedFile={selectedFile}
             setSelectedFile={setSelectedFile}
-            currentState={currentState}
+            incidentContext={incidentContext}
+            incidentDiff={incidentDiff}
+            isDiagnosing={isDiagnosing}
             isDiffMode={isDiffMode}
             setIsDiffMode={setIsDiffMode}
           />
 
-          {/* API Doctor Drag Handle */}
           {isDoctorOpen && (
             <div 
               className="resize-handle-col"
-              onMouseDown={(e) => {
+              onMouseDown={() => {
                 isDraggingDoctor.current = true;
                 document.body.style.cursor = 'col-resize';
               }}
             />
           )}
 
-          {/* Right API Doctor Panel */}
           <APIDoctorPanel 
-            currentState={currentState}
-            setCurrentState={setCurrentState}
+            incidentsList={incidentsList}
+            activeIncident={activeIncident}
+            incidentContext={incidentContext}
+            incidentDiff={incidentDiff}
+            incidentSandbox={incidentSandbox}
+            incidentPR={incidentPR}
+            timelineEvents={timelineEvents}
+            isDiagnosing={isDiagnosing}
+            onStartDiagnosis={handleStartDiagnosis}
+            onApproveFix={handleApproveFix}
+            onCreatePR={handleCreatePR}
+            onSelectIncident={(id) => setActiveIncidentId(id)}
             doctorWidth={doctorWidth}
             isDoctorOpen={isDoctorOpen}
             setIsDoctorOpen={setIsDoctorOpen}
@@ -148,19 +273,21 @@ export default function App() {
           />
         </div>
 
-        {/* Bottom Panel Drag Handle */}
         {!isBottomCollapsed && (
           <div 
             className="resize-handle-row"
-            onMouseDown={(e) => {
+            onMouseDown={() => {
               isDraggingBottom.current = true;
               document.body.style.cursor = 'row-resize';
             }}
           />
         )}
 
-        {/* Bottom Resizable Panel */}
         <BottomPanel 
+          activeIncident={activeIncident}
+          incidentContext={incidentContext}
+          incidentDiff={incidentDiff}
+          incidentSandbox={incidentSandbox}
           activeBottomTab={activeBottomTab}
           setActiveBottomTab={setActiveBottomTab}
           bottomHeight={bottomHeight}
@@ -174,16 +301,9 @@ export default function App() {
       <CommandPalette 
         isOpen={isCommandPaletteOpen}
         onClose={(val) => setIsCommandPaletteOpen(typeof val === 'boolean' ? val : false)}
-        setCurrentState={setCurrentState}
+        setCurrentState={() => handleStartDiagnosis('null_pointer')}
         setIsDiffMode={setIsDiffMode}
         setActiveBottomTab={setActiveBottomTab}
-      />
-
-      {/* Floating State Simulator Toolbar */}
-      <StateToolbar 
-        currentState={currentState}
-        setCurrentState={setCurrentState}
-        onOpenCommandPalette={() => setIsCommandPaletteOpen(true)}
       />
     </div>
   );
