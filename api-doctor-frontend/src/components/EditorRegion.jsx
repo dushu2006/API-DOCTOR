@@ -19,18 +19,19 @@ export default function EditorRegion({
   setIsDiffMode,
   onApproveFix,
   highlightLine = null,
-  failureReason = ''
+  failureReason = '',
+  isProjectConnected = false
 }) {
   const lineRefs = useRef({});
   const editorContainerRef = useRef(null);
 
-  const openTabs = [
+  const openTabs = selectedFile ? [
     { 
-      path: selectedFile || 'README.md', 
-      name: selectedFile ? selectedFile.split('/').pop() : 'README.md', 
+      path: selectedFile, 
+      name: selectedFile.split('/').pop(), 
       isAgentActive: isDiagnosing 
     },
-  ];
+  ] : [];
 
   // Determine code to display: prioritize real fileContent from workspace,
   // then snippet from incidentContext.
@@ -51,7 +52,8 @@ export default function EditorRegion({
     }
   }
 
-  if (!rawCode) {
+  const showConnectEmpty = !isProjectConnected && !rawCode;
+  if (!rawCode && isProjectConnected) {
     rawCode = `# ${selectedFile || 'Project Workspace'}\n# Select a file from the explorer to view its contents.`;
   }
 
@@ -220,7 +222,16 @@ export default function EditorRegion({
         ) : (
           /* STANDARD CODE VIEW WITH REAL STACK TRACE FAILURE CALLOUT */
           <div ref={editorContainerRef} style={{ flex: 1, overflowY: 'auto', padding: '12px 0' }}>
-            {lines.map((line, idx) => {
+            {showConnectEmpty ? (
+              <div style={{ padding: '48px 24px', textAlign: 'center', color: 'var(--text-muted)' }}>
+                <div style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '8px' }}>
+                  Connect a GitHub repository
+                </div>
+                <div style={{ fontSize: '12px', lineHeight: 1.5 }}>
+                  Synchronize a real project to browse its source tree and start diagnosis.
+                </div>
+              </div>
+            ) : lines.map((line, idx) => {
               const lineNum = line.number;
               const lineText = line.text;
               const isFailureLine = errorLine !== null && lineNum === errorLine;

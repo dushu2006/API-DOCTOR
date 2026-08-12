@@ -57,6 +57,8 @@ class Settings(BaseSettings):
     RENDER_API_BASE_URL: str = "https://api.render.com/v1"
     RENDER_API_KEY: str = ""
     RENDER_SERVICE_ID: str = ""
+    # Optional workspace/owner id. When empty, resolved from GET /services/{id}.ownerId.
+    RENDER_OWNER_ID: str = ""
 
     # ------------------------------------------------------------------
     # AI behaviour

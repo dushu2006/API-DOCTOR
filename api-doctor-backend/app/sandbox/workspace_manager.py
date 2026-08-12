@@ -146,6 +146,7 @@ class WorkspaceManager:
         else:
             logger.info("Cloning repository %s/%s into %s", owner, repo, target_dir)
             cloned = False
+            last_error = ""
             try:
                 # Try branch clone
                 res = subprocess.run(
@@ -157,7 +158,8 @@ class WorkspaceManager:
                 if res.returncode == 0:
                     cloned = True
                 else:
-                    logger.warning("Branch clone failed: %s. Trying default clone.", res.stderr)
+                    last_error = (res.stderr or res.stdout or "branch clone failed").strip()
+                    logger.warning("Branch clone failed: %s. Trying default clone.", last_error)
                     res = subprocess.run(
                         ["git", "clone", "--depth", "50", clone_url, str(target_dir)],
                         capture_output=True,
@@ -173,13 +175,18 @@ class WorkspaceManager:
                             text=True,
                             timeout=15,
                         )
+                    else:
+                        last_error = (res.stderr or res.stdout or last_error or "git clone failed").strip()
             except Exception as exc:
                 logger.warning("Git clone failed for %s/%s: %s", owner, repo, exc)
+                last_error = str(exc)
 
-            if not cloned and not target_dir.is_dir():
-                # If clone failed (e.g. offline/mock in test environment or missing token),
-                # create the directory so workspace manager remains functional.
-                target_dir.mkdir(parents=True, exist_ok=True)
+            if not cloned:
+                if target_dir.exists() and not (target_dir / ".git").is_dir():
+                    shutil.rmtree(target_dir, ignore_errors=True)
+                raise RuntimeError(
+                    f"Failed to clone {owner}/{repo}@{branch}: {last_error or 'git clone failed'}"
+                )
 
         self.repo_root = target_dir
         return self.repo_root

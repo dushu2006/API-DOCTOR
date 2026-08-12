@@ -104,12 +104,12 @@ export default function App() {
       setBackendHealth(health);
       setIsBackendConnected(health.status === 'ok');
 
-      // Fetch current project
+      // Fetch current project — 404 means nothing is connected yet
       try {
         const proj = await api.getCurrentProject();
-        setCurrentProject(proj);
+        setCurrentProject(proj && proj.is_connected ? proj : null);
       } catch (e) {
-        console.warn('Could not fetch project:', e);
+        setCurrentProject(null);
       }
 
       // Fetch incidents
@@ -150,8 +150,12 @@ export default function App() {
   }, [selectedFile]);
 
   useEffect(() => {
-    if (currentProject) {
+    if (currentProject?.is_connected) {
       loadProjectFiles();
+    } else {
+      setProjectFiles({ files: [], tree: [] });
+      setSelectedFile('');
+      setFileContent('');
     }
   }, [currentProject, loadProjectFiles]);
 
@@ -188,6 +192,9 @@ export default function App() {
         const incData = inc.value;
         setActiveIncident(incData);
         setIsDiagnosing(ACTIVE_DIAGNOSIS_STATUSES.has(incData.status));
+        if (Array.isArray(incData.activity) && incData.activity.length > 0) {
+          setTimelineEvents(incData.activity);
+        }
 
         // Auto-navigate to implicated file and line
         const rc = incData.root_cause;
@@ -257,12 +264,7 @@ export default function App() {
       const res = await api.connectProject(connectForm);
       if (res && res.project) {
         setCurrentProject(res.project);
-        setConnectSteps(res.steps_completed || [
-          'github_connected',
-          'repository_verified',
-          'repository_synchronized',
-          'project_discovered'
-        ]);
+        setConnectSteps(res.steps_completed || []);
         setConnectProgress('done');
         await loadProjectFiles();
         setTimeout(() => {
@@ -309,18 +311,25 @@ export default function App() {
 
   // 8. Sync Render Logs Workflow
   const handleSyncRender = async () => {
+    if (!currentProject?.is_connected) {
+      setShowConnectModal(true);
+      return;
+    }
     try {
-      const res = await api.syncRenderLogs();
-      if (res.status === 'unconfigured') {
-        alert('Render integration is not configured. Set RENDER_API_KEY and RENDER_SERVICE_ID in .env or settings.');
+      const res = await api.syncRenderLogs(currentProject?.render_service_id);
+      if (res.status === 'error' || res.status === 'unconfigured') {
+        alert(res.message || 'Failed to retrieve Render logs.');
         return;
       }
       if (res.incidents_created && res.incidents_created.length > 0) {
         setActiveIncidentId(res.incidents_created[0]);
+        if (res.diagnosis_started) {
+          setIsDiagnosing(true);
+        }
         await refreshBackendState();
         fetchIncidentDetails(res.incidents_created[0]);
       } else {
-        alert(res.message || 'Render logs synced: no new errors detected.');
+        alert(res.message || 'Render logs retrieved; no errors detected.');
       }
     } catch (err) {
       alert(`Failed to sync Render logs: ${err.message}`);
@@ -329,6 +338,10 @@ export default function App() {
 
   // 9. Start/Stop Diagnosis Handlers
   const handleStartDiagnosis = async () => {
+    if (!currentProject?.is_connected) {
+      setShowConnectModal(true);
+      return;
+    }
     if (activeIncidentId) {
       try {
         setIsDiagnosing(true);
@@ -405,7 +418,7 @@ export default function App() {
     };
   }, []);
 
-  const isConnected = Boolean(currentProject?.is_connected || (currentProject?.github_owner && currentProject?.github_repo));
+  const isConnected = Boolean(currentProject?.is_connected);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', width: '100vw', height: '100vh', overflow: 'hidden' }}>
@@ -451,9 +464,10 @@ export default function App() {
             filesList={projectFiles.files}
             filesTree={projectFiles.tree}
             projectName={currentProject?.name || 'Workspace'}
-            onRefresh={loadProjectFiles}
+            onRefresh={isConnected ? loadProjectFiles : undefined}
             explorerWidth={explorerWidth}
             isExplorerOpen={isExplorerOpen}
+            isConnected={isConnected}
           />
 
           {isExplorerOpen && (
@@ -477,6 +491,7 @@ export default function App() {
             onApproveFix={handleApproveFix}
             highlightLine={highlightLine}
             failureReason={failureReason}
+            isProjectConnected={isConnected}
           />
 
           {isDoctorOpen && (
@@ -536,7 +551,7 @@ export default function App() {
       </div>
 
       {/* FIRST RUN / CONNECT REPOSITORY MODAL */}
-      {(showConnectModal || (!isConnected && !currentProject?.github_owner)) && (
+      {(showConnectModal || !isConnected) && (
         <div style={{
           position: 'fixed',
           top: 0,

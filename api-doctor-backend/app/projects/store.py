@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import threading
-from pathlib import Path
 from typing import Optional
 
 from app.core.config import settings
-from app.projects.models import Project, ProjectProfile
+from app.projects.models import Project
 
 
 class ProjectStore:
@@ -18,31 +17,21 @@ class ProjectStore:
         self._seed_default()
 
     def _seed_default(self) -> None:
-        owner = settings.GITHUB_OWNER
-        repo = settings.GITHUB_REPO
-        branch = settings.GITHUB_DEFAULT_BRANCH or "main"
-
-        is_connected = bool(owner and repo)
-        workspace_path = str(Path(settings.WORKSPACE_DIR) / owner / repo) if (owner and repo) else None
-
-        default_proj = Project(
+        """Seed an unconnected placeholder. Repositories are connected via POST /connect."""
+        self._projects["default"] = Project(
             id="default",
-            name=f"{owner}/{repo}" if (owner and repo) else "API Doctor",
-            github_owner=owner,
-            github_repo=repo,
-            github_branch=branch,
-            github_token=settings.GITHUB_TOKEN,
-            render_service_id=settings.RENDER_SERVICE_ID,
+            name="API Doctor",
+            github_owner="",
+            github_repo="",
+            github_branch="main",
+            github_token="",
+            render_service_id="",
             repo_root=settings.REPO_ROOT,
-            workspace_path=workspace_path,
-            is_connected=is_connected,
+            workspace_path=None,
+            is_connected=False,
+            profile=None,
         )
-
-        if is_connected and workspace_path and Path(workspace_path).is_dir():
-            from app.projects.discovery import discover_project
-            default_proj.profile = discover_project(workspace_path)
-
-        self._projects["default"] = default_proj
+        self._current_id = "default"
 
     def create(self, project: Project) -> Project:
         with self._lock:
@@ -72,6 +61,12 @@ class ProjectStore:
         with self._lock:
             self._projects[project.id] = project
         return project
+
+    def reset(self) -> None:
+        with self._lock:
+            self._projects.clear()
+            self._current_id = "default"
+        self._seed_default()
 
 
 project_store = ProjectStore()

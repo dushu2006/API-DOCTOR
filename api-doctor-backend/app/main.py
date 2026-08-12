@@ -25,73 +25,58 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from app.ai.base import selected_ai_provider
-    from app.github.client import GitHubClient, GitHubError
-    from app.projects.discovery import discover_project
-    from app.projects.models import Project
-    from app.projects.store import project_store
-    from app.sandbox.workspace_manager import WorkspaceManager
+    from app.github.client import GitHubClient
+    from app.render.client import RenderClient
 
     ai_provider = selected_ai_provider()
-    logger.info("API Doctor backend starting up (Mode: %s, AI provider: %s)", "DEMO" if settings.DEMO_MODE else "REAL PROJECT", ai_provider)
+    logger.info(
+        "API Doctor backend starting up (Mode: %s, AI provider: %s)",
+        "DEMO" if settings.DEMO_MODE else "REAL PROJECT",
+        ai_provider,
+    )
 
     if ai_provider == "mock":
         logger.info("Deterministic mock AI is active. Set AI_PROVIDER=nvidia and NVIDIA_API_KEY for NVIDIA NIM.")
     elif not settings.has_nvidia:
         logger.warning("NVIDIA_API_KEY is not set; requests requiring external NVIDIA models will fall back.")
 
-    # Validate Render configuration
-    if not settings.has_render:
-        logger.info("Render integration is not configured (RENDER_API_KEY / RENDER_SERVICE_ID missing).")
-    else:
-        logger.info("Render integration configured for service: %s", settings.RENDER_SERVICE_ID)
-
-    # Validate and synchronize GitHub repository at startup if configured
-    if settings.has_github:
-        logger.info("GitHub integration configured: %s/%s@%s", settings.GITHUB_OWNER, settings.GITHUB_REPO, settings.GITHUB_DEFAULT_BRANCH)
+    # Validate GitHub credentials only — never clone or synchronize a repository at startup.
+    if settings.GITHUB_TOKEN:
         try:
             gh_client = GitHubClient()
-            if settings.GITHUB_TOKEN:
-                await gh_client.verify_access()
-                logger.info("GitHub repository access verified successfully.")
-
-            # Synchronize repository into local working workspace
-            wm = WorkspaceManager()
-            ws_path = wm.sync_repository(
-                owner=settings.GITHUB_OWNER,
-                repo=settings.GITHUB_REPO,
-                branch=settings.GITHUB_DEFAULT_BRANCH,
-                token=settings.GITHUB_TOKEN,
-            )
-            logger.info("Repository synchronized to workspace: %s", ws_path)
-
-            # Discover project profile
-            profile = discover_project(ws_path)
-            logger.info(
-                "Project discovered: Language=%s, Framework=%s, PackageManager=%s, Entrypoint=%s",
-                profile.language, profile.framework, profile.package_manager, profile.entrypoint
-            )
-
-            # Update project store
-            proj = Project(
-                id="default",
-                name=f"{settings.GITHUB_OWNER}/{settings.GITHUB_REPO}",
-                github_owner=settings.GITHUB_OWNER,
-                github_repo=settings.GITHUB_REPO,
-                github_branch=settings.GITHUB_DEFAULT_BRANCH,
-                github_token=settings.GITHUB_TOKEN,
-                render_service_id=settings.RENDER_SERVICE_ID,
-                repo_root=str(ws_path),
-                workspace_path=str(ws_path),
-                is_connected=True,
-                profile=profile,
-            )
-            project_store.update(proj)
-            project_store.set_current("default")
+            info = await gh_client.verify_credentials()
+            logger.info("GitHub credentials validated (login=%s).", info.get("login"))
         except Exception as exc:
-            logger.warning("Could not complete initial GitHub sync at startup: %s", exc)
+            logger.warning("GitHub credential validation failed: %s", exc)
     else:
-        logger.info("No GitHub repository configured at startup. Connect a repository via the UI.")
+        logger.info("GitHub token not configured. Connect a repository via POST /api/projects/connect.")
 
+    if settings.GITHUB_OWNER or settings.GITHUB_REPO:
+        logger.info(
+            "GITHUB_OWNER/GITHUB_REPO are set (%s/%s) but will not be auto-synchronized. "
+            "Select a repository with POST /api/projects/connect.",
+            settings.GITHUB_OWNER,
+            settings.GITHUB_REPO,
+        )
+
+    # Validate Render integration (service access only — do not pull logs at startup).
+    if settings.RENDER_API_KEY and settings.RENDER_SERVICE_ID:
+        try:
+            render = RenderClient()
+            service = await render.get_service()
+            logger.info(
+                "Render integration validated for service %s (%s).",
+                service.get("id") or settings.RENDER_SERVICE_ID,
+                service.get("name") or "unnamed",
+            )
+        except Exception as exc:
+            logger.warning("Render integration validation failed: %s", exc)
+    elif settings.RENDER_API_KEY or settings.RENDER_SERVICE_ID:
+        logger.warning("Render integration is incomplete (need both RENDER_API_KEY and RENDER_SERVICE_ID).")
+    else:
+        logger.info("Render integration is not configured (RENDER_API_KEY / RENDER_SERVICE_ID missing).")
+
+    logger.info("Backend ready. Project connection APIs exposed at /api/projects/connect.")
     yield
     logger.info("API Doctor backend shutting down")
 
@@ -154,6 +139,9 @@ def _register_routes() -> None:
             docker_ok = True
         except Exception:
             docker_ok = False
+        from app.projects.store import project_store
+
+        current = project_store.get_current()
         return {
             "status": "ok",
             "demo_mode": settings.DEMO_MODE,
@@ -161,8 +149,9 @@ def _register_routes() -> None:
             "docker": docker_ok,
             "ai_provider": selected_ai_provider(),
             "ai_configured": settings.has_nvidia,
-            "github_configured": settings.has_github,
+            "github_configured": bool(settings.GITHUB_TOKEN),
             "render_configured": settings.has_render,
+            "project_connected": bool(current and current.is_connected),
         }
 
     @app.get("/api/tools")

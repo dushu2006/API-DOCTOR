@@ -18,6 +18,45 @@ import {
   Sparkles
 } from 'lucide-react';
 
+const STEP_LABELS = {
+  repository_connected: 'Repository connected',
+  github_connected: 'Repository connected',
+  repository_verified: 'Repository verified',
+  repository_synced: 'Project synchronized',
+  repository_synchronized: 'Project synchronized',
+  project_discovered: 'Project discovered',
+  logs_retrieved: 'Logs retrieved',
+  error_detected: 'Error detected',
+  stack_trace_parsed: 'Stack trace extracted',
+  relevant_source_identified: 'Relevant source retrieved',
+  file_read: 'Reading source file',
+  collecting_context: 'Retrieving relevant source',
+  investigation_started: 'Investigating root cause',
+  investigating: 'Investigating root cause',
+  root_cause_identified: 'Root cause identified',
+  fix_generated: 'Generating fix',
+  sandbox_started: 'Running sandbox',
+  tests_started: 'Running tests',
+  test_passed: 'Tests passed',
+  fix_verified: 'Fix verified',
+  branch_created: 'Repair branch created',
+  commit_created: 'Commit created',
+  pr_created: 'Pull request created',
+};
+
+function activityLabel(ev) {
+  const message = (ev?.message || '').trim();
+  if (message) return message;
+  const step = ev?.step || '';
+  if (STEP_LABELS[step]) {
+    if (step === 'fix_generated' && ev?.status === 'done') return 'Fix generated';
+    if (step === 'sandbox_started' && ev?.status === 'done') return 'Sandbox finished';
+    if (step === 'tests_started' && ev?.status === 'done') return 'Tests finished';
+    return STEP_LABELS[step];
+  }
+  return step ? step.replace(/_/g, ' ') : 'Processing investigation step';
+}
+
 export default function APIDoctorPanel({ 
   incidentsList = [],
   activeIncident,
@@ -205,8 +244,8 @@ export default function APIDoctorPanel({
                 <div style={{ position: 'absolute', left: '15px', top: '10px', bottom: '10px', width: '2px', backgroundColor: 'var(--border-color)', zIndex: 0 }} />
 
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', position: 'relative', zIndex: 1 }}>
-                  {timelineEvents && timelineEvents.length > 0 ? (
-                    timelineEvents.map((ev, index) => (
+                  {timelineEvents && timelineEvents.filter((ev) => ev && (ev.step || ev.message) && ev.type !== 'connected').length > 0 ? (
+                    timelineEvents.filter((ev) => ev && (ev.step || ev.message) && ev.type !== 'connected').map((ev, index) => (
                       <div key={index} style={{ display: 'flex', gap: '10px', alignItems: 'flex-start' }}>
                         {ev.status === 'running' ? (
                           <div style={{ width: '16px', height: '16px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--surface-1)' }}>

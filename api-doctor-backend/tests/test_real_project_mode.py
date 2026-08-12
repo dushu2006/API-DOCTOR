@@ -147,22 +147,87 @@ def test_log_ingestion_detects_http_errors():
     assert detections[0]["endpoint"] == "/api/v1/checkout"
 
 
-async def test_api_project_files_endpoint():
+async def test_api_project_files_requires_connection():
+    res = await _request("GET", "/api/projects/files/list")
+    assert res.status_code == 404
+
+
+async def test_api_current_project_requires_connection():
+    res = await _request("GET", "/api/projects/current")
+    assert res.status_code == 404
+
+
+async def test_api_project_files_endpoint(tmp_path):
+    from app.projects.discovery import discover_project
+    from app.projects.models import Project
+    from app.projects.store import project_store
+
+    (tmp_path / "requirements.txt").write_text("fastapi==0.110.0\n")
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "main.py").write_text("app = None\n")
+    project_store.update(
+        Project(
+            id="default",
+            name="acme/demo",
+            github_owner="acme",
+            github_repo="demo",
+            repo_root=str(tmp_path),
+            workspace_path=str(tmp_path),
+            is_connected=True,
+            profile=discover_project(tmp_path),
+        )
+    )
+    project_store.set_current("default")
+
     res = await _request("GET", "/api/projects/files/list")
     assert res.status_code == 200
     data = res.json()
     assert "files" in data
     assert "tree" in data
+    assert "requirements.txt" in data["files"]
 
 
-async def test_api_project_file_content_endpoint():
+async def test_api_project_file_content_endpoint(tmp_path):
+    from app.projects.models import Project
+    from app.projects.store import project_store
+
+    (tmp_path / "requirements.txt").write_text("fastapi==0.110.0\n")
+    project_store.update(
+        Project(
+            id="default",
+            name="acme/demo",
+            github_owner="acme",
+            github_repo="demo",
+            repo_root=str(tmp_path),
+            workspace_path=str(tmp_path),
+            is_connected=True,
+        )
+    )
+    project_store.set_current("default")
+
     res = await _request("GET", "/api/projects/file-content?path=requirements.txt")
     assert res.status_code == 200
     data = res.json()
     assert "fastapi" in data["content"]
 
 
-async def test_api_project_file_content_traversal_rejected():
+async def test_api_project_file_content_traversal_rejected(tmp_path):
+    from app.projects.models import Project
+    from app.projects.store import project_store
+
+    (tmp_path / "requirements.txt").write_text("fastapi==0.110.0\n")
+    project_store.update(
+        Project(
+            id="default",
+            name="acme/demo",
+            github_owner="acme",
+            github_repo="demo",
+            repo_root=str(tmp_path),
+            workspace_path=str(tmp_path),
+            is_connected=True,
+        )
+    )
+    project_store.set_current("default")
     res = await _request("GET", "/api/projects/file-content?path=../../../../etc/passwd")
     assert res.status_code == 404
 
@@ -181,11 +246,115 @@ async def test_api_ingest_incident_endpoint():
     assert data["status"] in ("RECEIVED", "DETECTED")
 
 
-async def test_api_sync_render_unconfigured():
+async def test_api_sync_render_unconfigured(monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "RENDER_API_KEY", "")
+    monkeypatch.setattr(settings, "RENDER_SERVICE_ID", "")
     res = await _request("POST", "/api/incidents/sync-render")
     assert res.status_code == 200
     data = res.json()
-    assert data["status"] in ("unconfigured", "ok")
+    assert data["status"] == "error"
+    assert data["error_type"] == "unconfigured"
+    assert data["incidents_created"] == []
+
+
+async def test_api_sync_render_success_creates_incident(httpx_mock, tmp_path):
+    import re
+
+    from app.projects.discovery import discover_project
+    from app.projects.models import Project
+    from app.projects.store import project_store
+
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "services").mkdir()
+    (tmp_path / "app" / "services" / "payment.py").write_text("def charge():\n    pass\n")
+    project_store.update(
+        Project(
+            id="default",
+            name="acme/demo",
+            github_owner="acme",
+            github_repo="demo",
+            render_service_id="srv_test",
+            repo_root=str(tmp_path),
+            workspace_path=str(tmp_path),
+            is_connected=True,
+            profile=discover_project(tmp_path),
+        )
+    )
+    project_store.set_current("default")
+
+    httpx_mock.add_response(
+        url=re.compile(r"^https://api\.render\.com/v1/services/srv_test$"),
+        method="GET",
+        json={"id": "srv_test", "name": "payments", "ownerId": "tea_owner"},
+    )
+    httpx_mock.add_response(
+        url=re.compile(r"^https://api\.render\.com/v1/logs(?:\?.*)?$"),
+        method="GET",
+        json={
+            "hasMore": False,
+            "nextStartTime": None,
+            "nextEndTime": None,
+            "logs": [
+                {"id": "1", "message": "Traceback (most recent call last):", "timestamp": "2026-08-12T00:00:00Z", "labels": []},
+                {"id": "2", "message": '  File "app/services/payment.py", line 4, in process_charge', "timestamp": "2026-08-12T00:00:01Z", "labels": []},
+                {"id": "3", "message": "    token = user.payment_method.token", "timestamp": "2026-08-12T00:00:02Z", "labels": []},
+                {"id": "4", "message": "AttributeError: 'NoneType' object has no attribute 'token'", "timestamp": "2026-08-12T00:00:03Z", "labels": []},
+            ],
+        },
+    )
+
+    res = await _request("POST", "/api/incidents/sync-render?auto_diagnose=false")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["status"] == "success"
+    assert data["logs_retrieved"] == 4
+    assert len(data["incidents_created"]) == 1
+    assert data["diagnosis_started"] is False
+    assert not any("/services/srv_test/logs" in str(r.url) for r in httpx_mock.get_requests())
+
+
+async def test_api_sync_render_404_is_error(httpx_mock):
+    import re
+
+    httpx_mock.add_response(
+        url=re.compile(r"^https://api\.render\.com/v1/services/srv_test$"),
+        method="GET",
+        status_code=404,
+        text="service missing",
+    )
+    res = await _request("POST", "/api/incidents/sync-render")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["status"] == "error"
+    assert data["error_type"] == "not_found"
+    assert data["incidents_created"] == []
+
+
+async def test_lifespan_does_not_sync_repository(monkeypatch):
+    from contextlib import asynccontextmanager
+
+    from app.main import lifespan, app as fastapi_app
+
+    called = {"sync": 0}
+
+    class _Boom:
+        def sync_repository(self, *args, **kwargs):
+            called["sync"] += 1
+            raise AssertionError("startup must not synchronize a repository")
+
+    monkeypatch.setattr("app.sandbox.workspace_manager.WorkspaceManager", _Boom)
+
+    async def _no_network(*args, **kwargs):
+        return {"login": "tester", "id": "srv", "name": "demo", "ownerId": "tea"}
+
+    monkeypatch.setattr("app.github.client.GitHubClient.verify_credentials", _no_network)
+    monkeypatch.setattr("app.render.client.RenderClient.get_service", _no_network)
+
+    async with lifespan(fastapi_app):
+        pass
+    assert called["sync"] == 0
 
 
 async def test_multilang_stack_trace_parser():
