@@ -33,7 +33,7 @@ REQUEST = {
 
 
 def _make_fix() -> FixProposal:
-    path = settings.REPO_ROOT + "/app/demo_api/router.py"
+    path = settings.INTERNAL_REPO_ROOT + "/app/demo_api/router.py"
     with open(path) as fh:
         original = fh.read()
     assert ORIGINAL_MARKER in original, "expected marker present in router.py"

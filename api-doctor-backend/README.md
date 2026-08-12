@@ -71,7 +71,7 @@ api-doctor-backend/
 cd api-doctor-backend
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env        # add your NVIDIA_API_KEY (and GitHub/Render when used)
+cp .env.example .env        # add your NVIDIA_API_KEY when using NVIDIA NIM
 ```
 
 ### 3. Run
@@ -180,8 +180,12 @@ fix is regenerated with sandbox feedback; after the limit the incident stops in
   `main` is never modified. Read PR status and GitHub Actions check runs.
 - **Render**: isolated behind `RenderClient` (service, deployments, logs). The
   orchestrator never calls the Render API directly.
-- **Project mapping** (`app/projects`): maps a project to its GitHub repo/branch
-  and Render service; in-memory for the MVP, DB-ready interface.
+- **Project mapping** (`app/projects`): stores each project's GitHub repo/branch
+  and Render service in the application database. GitHub and Render credentials
+  are project-scoped, encrypted at rest, and supplied explicitly to clients.
+- **Runtime log viewing**: `GET /api/incidents/render-logs?project_id=…` retrieves
+  sanitized Render entries for inspection without creating incidents. `sync-render`
+  retrieves the same entries and additionally runs failure detection.
 
 ---
 
@@ -204,6 +208,8 @@ fix is regenerated with sandbox feedback; after the limit the incident stops in
 | ------ | ------------------------------------- | -------------------------------- |
 | GET    | `/health`                             | liveness + config status         |
 | GET    | `/api/incidents`                      | list incidents                   |
+| GET    | `/api/incidents/render-logs`          | view sanitized Render entries    |
+| POST   | `/api/incidents/sync-render`          | fetch Render entries + detect    |
 | GET    | `/api/incidents/{id}`                 | incident detail                  |
 | POST   | `/api/incidents/trigger/{scenario}`   | detect + start a seeded failure  |
 | POST   | `/api/incidents/{id}/diagnose`        | start diagnosis                  |

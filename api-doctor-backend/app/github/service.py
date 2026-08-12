@@ -15,8 +15,9 @@ logger = logging.getLogger(__name__)
 
 
 class GitHubService:
-    def __init__(self, client: GitHubClient | None = None) -> None:
-        self.client = client or GitHubClient()
+    def __init__(self, client: GitHubClient) -> None:
+        """Use an explicitly configured, project-scoped GitHub client."""
+        self.client = client
 
     def _branch_name(self, incident_id: str) -> str:
         return f"api-doctor/fix/{incident_id}"

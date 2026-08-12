@@ -34,17 +34,20 @@ async def test_bug_scenarios_produce_detection(endpoint, method, payload):
     assert result.get("method") == method
     assert result.get("service") == "demo-api"
     assert result.get("timestamp")
-    assert "traceback" in result or result.get("stack_trace")
+    # Public HTTP responses deliberately omit server tracebacks. Production
+    # diagnosis gets details from connected provider logs instead.
+    assert result.get("stack_trace") == ""
+    assert result.get("error_message") == "Internal server error"
     assert result.get("request_snapshot", {}).get("path") == endpoint
 
 
 @pytest.mark.asyncio
-async def test_null_pointer_detection_has_real_traceback():
+async def test_null_pointer_detection_does_not_leak_traceback_to_http_clients():
     det = FailureDetector()
     result = await det.trigger_diagnosis("/api/v1/users/user_2/charge", "POST", {"amount": 100})
-    trace = result.get("stack_trace", "")
-    assert "AttributeError" in trace
-    assert "payment_method" in trace
+    assert result.get("status_code") == 500
+    assert result.get("stack_trace") == ""
+    assert result.get("error_message") == "Internal server error"
 
 
 @pytest.mark.asyncio

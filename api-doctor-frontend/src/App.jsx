@@ -56,6 +56,8 @@ export default function App() {
   const [incidentPR, setIncidentPR] = useState(null);
   const [timelineEvents, setTimelineEvents] = useState([]);
   const [isDiagnosing, setIsDiagnosing] = useState(false);
+  const [renderLogs, setRenderLogs] = useState([]);
+  const [renderLogsMeta, setRenderLogsMeta] = useState(null);
 
   const [showIngestModal, setShowIngestModal] = useState(false);
   const [ingestForm, setIngestForm] = useState({
@@ -106,6 +108,8 @@ export default function App() {
     setIncidentPR(null);
     setTimelineEvents([]);
     setIsDiagnosing(false);
+    setRenderLogs([]);
+    setRenderLogsMeta(null);
     setHighlightLine(null);
     setFailureReason('');
   }, []);
@@ -442,6 +446,33 @@ export default function App() {
     }
   };
 
+  const showRenderLogs = useCallback((payload) => {
+    const logs = Array.isArray(payload?.logs) ? payload.logs : [];
+    setRenderLogs(logs);
+    setRenderLogsMeta({
+      projectId: payload?.project_id || currentProject?.id || '',
+      serviceId: payload?.service_id || '',
+      serviceName: payload?.service_name || '',
+      retrieved: payload?.logs_retrieved ?? logs.length,
+      message: payload?.message || '',
+    });
+    setActiveBottomTab('logs');
+    setIsBottomCollapsed(false);
+  }, [currentProject?.id]);
+
+  const handleViewRenderLogs = async () => {
+    if (!currentProject?.id) {
+      setShowProjectSelector(true);
+      return;
+    }
+    try {
+      const payload = await api.getRenderLogs(currentProject.id);
+      showRenderLogs(payload);
+    } catch (err) {
+      alert(`Failed to retrieve Render logs: ${err.message}`);
+    }
+  };
+
   const handleSyncRender = async () => {
     if (!currentProject?.id) {
       setShowProjectSelector(true);
@@ -453,15 +484,14 @@ export default function App() {
         alert(res.message || 'Failed to retrieve logs.');
         return;
       }
+      // Sync returns the sanitized source entries as well as detector results, so
+      // users can inspect an all-healthy log window instead of seeing only "0 incidents".
+      showRenderLogs(res);
       if (res.incidents_created?.length > 0) {
         setActiveIncidentId(res.incidents_created[0]);
-        setActiveBottomTab('logs');
-        setIsBottomCollapsed(false);
         if (res.diagnosis_started) setIsDiagnosing(true);
         await refreshProjectData(currentProject.id);
         fetchIncidentDetails(res.incidents_created[0]);
-      } else {
-        alert(res.message || 'No production errors were found in the selected time range.');
       }
     } catch (err) {
       alert(`Failed to sync logs: ${err.message}`);
@@ -602,6 +632,7 @@ export default function App() {
         onStartDiagnosis={handleStartDiagnosis}
         onStopDiagnosis={handleStopDiagnosis}
         onSyncRender={handleSyncRender}
+        onViewRenderLogs={handleViewRenderLogs}
         onOpenIngestModal={() => setShowIngestModal(true)}
         onOpenProjectWizard={() => setShowProjectWizard(true)}
         onOpenProjectSelector={() => setShowProjectSelector(true)}
@@ -694,6 +725,9 @@ export default function App() {
           incidentContext={incidentContext}
           incidentDiff={incidentDiff}
           incidentSandbox={incidentSandbox}
+          renderLogs={renderLogs}
+          renderLogsMeta={renderLogsMeta}
+          onRefreshRenderLogs={currentLogProvider === 'render' ? handleViewRenderLogs : undefined}
           activeBottomTab={activeBottomTab}
           setActiveBottomTab={setActiveBottomTab}
           bottomHeight={bottomHeight}

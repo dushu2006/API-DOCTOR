@@ -20,6 +20,7 @@ export default function TopBar({
   onStartDiagnosis,
   onStopDiagnosis,
   onSyncRender,
+  onViewRenderLogs,
   onOpenIngestModal,
   onOpenProjectWizard,
   onOpenProjectSelector,
@@ -34,6 +35,7 @@ export default function TopBar({
 }) {
   const [showStopDialog, setShowStopDialog] = useState(false);
   const [isSyncingRender, setIsSyncingRender] = useState(false);
+  const [isLoadingRenderLogs, setIsLoadingRenderLogs] = useState(false);
   const [isProjectMenuOpen, setIsProjectMenuOpen] = useState(false);
 
   const currentBranch = currentProject?.default_branch || currentProject?.github_branch || '—';
@@ -57,6 +59,16 @@ export default function TopBar({
       await onSyncRender();
     } finally {
       setIsSyncingRender(false);
+    }
+  };
+
+  const handleViewRenderLogsClick = async () => {
+    if (!onViewRenderLogs) return;
+    setIsLoadingRenderLogs(true);
+    try {
+      await onViewRenderLogs();
+    } finally {
+      setIsLoadingRenderLogs(false);
     }
   };
 
@@ -162,9 +174,14 @@ export default function TopBar({
           )}
         </div>
 
-        <button onClick={handleSyncRenderClick} disabled={isSyncingRender || projectProvider !== 'render'} className="btn-outline" title="Retrieve runtime logs from the configured provider" style={{ padding: '4px 10px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+        <button onClick={handleViewRenderLogsClick} disabled={isLoadingRenderLogs || projectProvider !== 'render'} className="btn-outline" title="View the latest runtime logs without creating incidents" style={{ padding: '4px 10px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '6px' }}>
           <Server size={12} style={{ color: 'var(--color-accent)' }} />
-          <span>{isSyncingRender ? 'Syncing...' : 'Sync Render Logs'}</span>
+          <span>{isLoadingRenderLogs ? 'Loading logs...' : 'View Render Logs'}</span>
+        </button>
+
+        <button onClick={handleSyncRenderClick} disabled={isSyncingRender || projectProvider !== 'render'} className="btn-outline" title="Retrieve Render logs and detect incidents" style={{ padding: '4px 10px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <Server size={12} style={{ color: 'var(--color-accent)' }} />
+          <span>{isSyncingRender ? 'Syncing...' : 'Sync & Detect'}</span>
         </button>
 
         <button onClick={onOpenIngestModal} className="btn-outline" title="Paste production logs or stack trace" style={{ padding: '4px 10px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '6px' }}>

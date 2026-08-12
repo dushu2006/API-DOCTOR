@@ -5,6 +5,8 @@ Render log ingestion, and project file APIs.
 from __future__ import annotations
 
 import json
+import logging
+import re
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -21,10 +23,15 @@ from app.projects.store import project_store
 from app.sandbox.workspace_manager import WorkspaceManager
 
 
-async def _request(method: str, path: str, json_body: dict | None = None) -> httpx.Response:
+async def _request(
+    method: str,
+    path: str,
+    json_body: dict | None = None,
+    headers: dict[str, str] | None = None,
+) -> httpx.Response:
     transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        return await client.request(method, path, json=json_body)
+        return await client.request(method, path, json=json_body, headers=headers)
 
 
 def test_project_discovery_python_fastapi():
@@ -147,39 +154,26 @@ def test_log_ingestion_detects_http_errors():
     assert detections[0]["endpoint"] == "/api/v1/checkout"
 
 
-async def test_api_project_files_requires_connection():
-    res = await _request("GET", "/api/projects/files/list")
+async def test_api_project_files_requires_connection(auth_headers):
+    res = await _request("GET", "/api/projects/files/list", headers=auth_headers)
     assert res.status_code == 404
 
 
-async def test_api_current_project_requires_connection():
-    res = await _request("GET", "/api/projects/current")
+async def test_api_current_project_requires_connection(auth_headers):
+    res = await _request("GET", "/api/projects/current", headers=auth_headers)
     assert res.status_code == 404
 
 
-async def test_api_project_files_endpoint(tmp_path):
-    from app.projects.discovery import discover_project
-    from app.projects.models import Project
-    from app.projects.store import project_store
-
+async def test_api_project_files_endpoint(tmp_path, auth_headers, project_factory):
     (tmp_path / "requirements.txt").write_text("fastapi==0.110.0\n")
     (tmp_path / "app").mkdir()
     (tmp_path / "app" / "main.py").write_text("app = None\n")
-    project_store.update(
-        Project(
-            id="default",
-            name="acme/demo",
-            github_owner="acme",
-            github_repo="demo",
-            repo_root=str(tmp_path),
-            workspace_path=str(tmp_path),
-            is_connected=True,
-            profile=discover_project(tmp_path),
-        )
+    project_factory(
+        workspace_path=str(tmp_path),
+        profile=discover_project(tmp_path),
     )
-    project_store.set_current("default")
 
-    res = await _request("GET", "/api/projects/files/list")
+    res = await _request("GET", "/api/projects/files/list", headers=auth_headers)
     assert res.status_code == 200
     data = res.json()
     assert "files" in data
@@ -187,71 +181,50 @@ async def test_api_project_files_endpoint(tmp_path):
     assert "requirements.txt" in data["files"]
 
 
-async def test_api_project_file_content_endpoint(tmp_path):
-    from app.projects.models import Project
-    from app.projects.store import project_store
-
+async def test_api_project_file_content_endpoint(tmp_path, auth_headers, project_factory):
     (tmp_path / "requirements.txt").write_text("fastapi==0.110.0\n")
-    project_store.update(
-        Project(
-            id="default",
-            name="acme/demo",
-            github_owner="acme",
-            github_repo="demo",
-            repo_root=str(tmp_path),
-            workspace_path=str(tmp_path),
-            is_connected=True,
-        )
-    )
-    project_store.set_current("default")
+    project_factory(workspace_path=str(tmp_path))
 
-    res = await _request("GET", "/api/projects/file-content?path=requirements.txt")
+    res = await _request(
+        "GET",
+        "/api/projects/file-content?path=requirements.txt",
+        headers=auth_headers,
+    )
     assert res.status_code == 200
     data = res.json()
     assert "fastapi" in data["content"]
 
 
-async def test_api_project_file_content_traversal_rejected(tmp_path):
-    from app.projects.models import Project
-    from app.projects.store import project_store
-
+async def test_api_project_file_content_traversal_rejected(tmp_path, auth_headers, project_factory):
     (tmp_path / "requirements.txt").write_text("fastapi==0.110.0\n")
-    project_store.update(
-        Project(
-            id="default",
-            name="acme/demo",
-            github_owner="acme",
-            github_repo="demo",
-            repo_root=str(tmp_path),
-            workspace_path=str(tmp_path),
-            is_connected=True,
-        )
+    project_factory(workspace_path=str(tmp_path))
+
+    res = await _request(
+        "GET",
+        "/api/projects/file-content?path=../../../../etc/passwd",
+        headers=auth_headers,
     )
-    project_store.set_current("default")
-    res = await _request("GET", "/api/projects/file-content?path=../../../../etc/passwd")
     assert res.status_code == 404
 
 
-async def test_api_ingest_incident_endpoint():
+async def test_api_ingest_incident_endpoint(auth_headers):
     body = {
         "source": "manual",
         "log_text": "Traceback (most recent call last):\n  File \"app/test.py\", line 10, in foo\nValueError: invalid param\n",
         "message": "ValueError: invalid param",
         "auto_diagnose": False,
     }
-    res = await _request("POST", "/api/incidents/ingest", json_body=body)
+    res = await _request("POST", "/api/incidents/ingest", json_body=body, headers=auth_headers)
     assert res.status_code == 200
     data = res.json()
     assert "incident_id" in data
     assert data["status"] in ("RECEIVED", "DETECTED")
 
 
-async def test_api_sync_render_unconfigured(monkeypatch):
-    from app.core.config import settings
+async def test_api_sync_render_unconfigured(auth_headers, project_factory):
+    project_factory()
 
-    monkeypatch.setattr(settings, "RENDER_API_KEY", "")
-    monkeypatch.setattr(settings, "RENDER_SERVICE_ID", "")
-    res = await _request("POST", "/api/incidents/sync-render")
+    res = await _request("POST", "/api/incidents/sync-render", headers=auth_headers)
     assert res.status_code == 200
     data = res.json()
     assert data["status"] == "error"
@@ -259,30 +232,22 @@ async def test_api_sync_render_unconfigured(monkeypatch):
     assert data["incidents_created"] == []
 
 
-async def test_api_sync_render_success_creates_incident(httpx_mock, tmp_path):
-    import re
+def _configure_render(project_id: str = "default") -> None:
+    project_store.upsert_integration(
+        project_id=project_id,
+        provider="render",
+        configuration={"service_id": "srv_test", "service_name": "payments", "owner_id": "tea_owner"},
+        credentials={"api_key": "test-render-key"},
+    )
 
-    from app.projects.discovery import discover_project
-    from app.projects.models import Project
-    from app.projects.store import project_store
 
+async def test_api_sync_render_success_creates_incident(httpx_mock, tmp_path, auth_headers, project_factory, caplog):
+    caplog.set_level(logging.INFO, logger="app.incidents.router")
     (tmp_path / "app").mkdir()
     (tmp_path / "app" / "services").mkdir()
     (tmp_path / "app" / "services" / "payment.py").write_text("def charge():\n    pass\n")
-    project_store.update(
-        Project(
-            id="default",
-            name="acme/demo",
-            github_owner="acme",
-            github_repo="demo",
-            render_service_id="srv_test",
-            repo_root=str(tmp_path),
-            workspace_path=str(tmp_path),
-            is_connected=True,
-            profile=discover_project(tmp_path),
-        )
-    )
-    project_store.set_current("default")
+    project = project_factory(workspace_path=str(tmp_path), profile=discover_project(tmp_path))
+    _configure_render(project.id)
 
     httpx_mock.add_response(
         url=re.compile(r"^https://api\.render\.com/v1/services/srv_test$"),
@@ -305,26 +270,64 @@ async def test_api_sync_render_success_creates_incident(httpx_mock, tmp_path):
         },
     )
 
-    res = await _request("POST", "/api/incidents/sync-render?auto_diagnose=false")
+    res = await _request("POST", "/api/incidents/sync-render?auto_diagnose=false", headers=auth_headers)
     assert res.status_code == 200
     data = res.json()
     assert data["status"] == "success"
+    assert data["project_id"] == project.id
     assert data["logs_retrieved"] == 4
+    assert len(data["logs"]) == 4
     assert len(data["incidents_created"]) == 1
     assert data["diagnosis_started"] is False
+    assert "Sample Render log entries:" in caplog.text
+    assert "AttributeError: 'NoneType' object has no attribute 'token'" in caplog.text
     assert not any("/services/srv_test/logs" in str(r.url) for r in httpx_mock.get_requests())
 
 
-async def test_api_sync_render_404_is_error(httpx_mock):
-    import re
+async def test_api_render_logs_returns_sanitized_entries(httpx_mock, auth_headers, project_factory, monkeypatch):
+    # The raw viewer must not invoke detection or create incidents.
+    def should_not_detect(*args, **kwargs):
+        raise AssertionError("raw log viewer must not detect incidents")
 
+    monkeypatch.setattr("app.incidents.router.FailureDetector.detect_from_logs", should_not_detect)
+    project = project_factory()
+    _configure_render(project.id)
+    httpx_mock.add_response(
+        url=re.compile(r"^https://api\.render\.com/v1/services/srv_test$"),
+        method="GET",
+        json={"id": "srv_test", "name": "payments", "ownerId": "tea_owner"},
+    )
+    httpx_mock.add_response(
+        url=re.compile(r"^https://api\.render\.com/v1/logs(?:\?.*)?$"),
+        method="GET",
+        json={
+            "hasMore": False,
+            "logs": [
+                {"id": "1", "message": "[INFO] app started", "timestamp": "2026-08-12T00:00:00Z", "labels": []},
+                {"id": "2", "message": "token=ghp_1234567890abcdefghijkl", "timestamp": "2026-08-12T00:00:01Z", "labels": []},
+            ],
+        },
+    )
+
+    res = await _request("GET", f"/api/incidents/render-logs?project_id={project.id}", headers=auth_headers)
+    assert res.status_code == 200
+    data = res.json()
+    assert data["project_id"] == project.id
+    assert data["logs_retrieved"] == 2
+    assert data["logs"][0]["message"] == "[INFO] app started"
+    assert data["logs"][1]["message"] == "token=<SECRET_PRESENT>"
+
+
+async def test_api_sync_render_404_is_error(httpx_mock, auth_headers, project_factory):
+    project = project_factory()
+    _configure_render(project.id)
     httpx_mock.add_response(
         url=re.compile(r"^https://api\.render\.com/v1/services/srv_test$"),
         method="GET",
         status_code=404,
         text="service missing",
     )
-    res = await _request("POST", "/api/incidents/sync-render")
+    res = await _request("POST", "/api/incidents/sync-render", headers=auth_headers)
     assert res.status_code == 200
     data = res.json()
     assert data["status"] == "error"

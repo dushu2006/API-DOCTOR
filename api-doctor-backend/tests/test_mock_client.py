@@ -12,7 +12,7 @@ from app.sandbox.patch_utils import apply_patch
 
 
 def test_demo_diff_applies_to_repo(tmp_path: Path):
-    repo = Path(settings.REPO_ROOT)
+    repo = Path(settings.INTERNAL_REPO_ROOT)
     # Copy just the demo API files so we don't mutate the real tree.
     dest = tmp_path / "app" / "demo_api"
     dest.mkdir(parents=True)
@@ -39,7 +39,7 @@ async def test_mock_client_fix_proposal_validates_and_applies(tmp_path: Path):
     assert proposal.diff.startswith("--- ")
     assert proposal.summary != "mock"
 
-    repo = Path(settings.REPO_ROOT)
+    repo = Path(settings.INTERNAL_REPO_ROOT)
     dest = tmp_path / "app" / "demo_api"
     dest.mkdir(parents=True)
     for name in ("router.py", "bugs.py"):

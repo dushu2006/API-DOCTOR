@@ -7,11 +7,11 @@ import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from app.auth.dependencies import require_authenticated_user
-from app.auth.dependencies import require_authenticated_user
+from app.auth.schemas import UserResponse
 from app.core.config import settings
 from app.detector.failure_detector import FailureDetector
 from app.events.hub import event_hub
@@ -34,6 +34,7 @@ from app.integrations.factory import get_log_provider
 from app.orchestrator import orchestrator
 from app.projects.store import project_store
 from app.render.client import RenderError
+from app.security.sanitizer import redact_text, sanitize
 
 logger = logging.getLogger(__name__)
 
@@ -47,20 +48,83 @@ SCENARIOS = {
 }
 
 
-def _resolved_project_id(project_id: str | None = None) -> str | None:
+def _resolved_project_id(project_id: str | None = None, user_id: str | None = None) -> str | None:
     if project_id:
         return project_id
-    current = project_store.get_current()
+    current = project_store.get_current(user_id)
     return current.id if current else None
+
+
+def _require_project_for_user(user: UserResponse, project_id: str | None = None):
+    """Resolve the selected project and ensure it belongs to the caller."""
+    project = project_store.get(project_id, user.id) if project_id else project_store.get_current(user.id)
+    if not project:
+        raise HTTPException(404, "No project is configured.")
+    return project
+
+
+def _safe_render_logs(logs: Any) -> list[dict[str, Any]]:
+    """Sanitize provider output before it crosses the browser boundary."""
+    if not isinstance(logs, list):
+        return []
+    safe_logs = sanitize(logs)
+    return [entry for entry in safe_logs if isinstance(entry, dict)]
 
 
 # ---------------------------------------------------------------------------
 # Listing & retrieval
 # ---------------------------------------------------------------------------
 @router.get("", response_model=list[IncidentResponse])
-async def list_incidents(project_id: str | None = None) -> list[IncidentResponse]:
-    resolved = _resolved_project_id(project_id)
+async def list_incidents(
+    project_id: str | None = None,
+    user: UserResponse = Depends(require_authenticated_user),
+) -> list[IncidentResponse]:
+    if project_id:
+        _require_project_for_user(user, project_id)
+    resolved = _resolved_project_id(project_id, user.id)
     return [IncidentResponse.from_model(i) for i in incident_store.list_all(resolved)]
+
+
+@router.get("/render-logs")
+async def get_render_logs(
+    project_id: str | None = None,
+    limit: int = Query(default=200, ge=1, le=800),
+    user: UserResponse = Depends(require_authenticated_user),
+) -> dict[str, Any]:
+    """Retrieve sanitized Render log entries without running incident detection.
+
+    This endpoint exists separately from ``sync-render`` so a connected project
+    can inspect its runtime logs even when no failure is detected. It must stay
+    above ``/{incident_id}`` because FastAPI matches routes in declaration order.
+    """
+    project = _require_project_for_user(user, project_id)
+    render = project_store.resolve_render(project.id)
+    if not render.get("api_key") or not render.get("service_id"):
+        raise HTTPException(409, "Render integration is not configured for the selected project.")
+
+    provider = get_log_provider(project.id, "render")
+    try:
+        payload = await provider.get_logs(
+            service_id=render.get("service_id"),
+            owner_id=render.get("owner_id"),
+            limit=limit,
+        )
+    except RenderError as exc:
+        logger.warning("Render log retrieval failed for project %s: %s", project.id, exc)
+        raise HTTPException(502, f"Unable to retrieve Render logs: {exc}") from exc
+
+    logs = _safe_render_logs(payload.get("logs"))
+    return {
+        "status": payload.get("status") or "success",
+        "project_id": project.id,
+        "provider": payload.get("provider") or "render",
+        "logs": logs,
+        "logs_retrieved": len(logs),
+        "message": payload.get("message") or f"Retrieved {len(logs)} Render log entries.",
+        "service_id": payload.get("service_id"),
+        "service_name": payload.get("service_name"),
+        "owner_id": payload.get("owner_id"),
+    }
 
 
 @router.get("/{incident_id}", response_model=IncidentResponse)
@@ -179,6 +243,7 @@ def _render_error_payload(exc: RenderError, service_id: str | None = None) -> di
         "service_id": service_id,
         "incidents_created": [],
         "logs_retrieved": 0,
+        "logs": [],
     }
 
 
@@ -187,15 +252,18 @@ async def sync_render_logs(
     service_id: str | None = None,
     auto_diagnose: bool = True,
     project_id: str | None = None,
+    user: UserResponse = Depends(require_authenticated_user),
 ) -> dict[str, Any]:
-    project = project_store.get(project_id) if project_id else project_store.get_current()
-    if not project:
+    try:
+        project = _require_project_for_user(user, project_id)
+    except HTTPException:
         return {
             "status": "error",
             "message": "No project is configured.",
             "error_type": "unconfigured",
             "incidents_created": [],
             "logs_retrieved": 0,
+            "logs": [],
         }
 
     render = project_store.resolve_render(project.id)
@@ -208,6 +276,7 @@ async def sync_render_logs(
             "error_type": "unconfigured",
             "incidents_created": [],
             "logs_retrieved": 0,
+            "logs": [],
         }
     if not render.get("service_id"):
         return {
@@ -216,6 +285,7 @@ async def sync_render_logs(
             "error_type": "unconfigured",
             "incidents_created": [],
             "logs_retrieved": 0,
+            "logs": [],
         }
 
     provider = get_log_provider(project.id, "render")
@@ -230,16 +300,30 @@ async def sync_render_logs(
         return _render_error_payload(exc, render.get("service_id"))
 
     logs = payload.get("logs") or []
+    safe_logs = _safe_render_logs(logs)
     if not logs:
         return {
             "status": "success",
             "message": payload.get("message") or "No production errors were found in the selected time range.",
+            "project_id": project.id,
             "logs_retrieved": 0,
+            "logs": [],
             "incidents_created": [],
             "service_id": payload.get("service_id"),
             "owner_id": payload.get("owner_id"),
             "service_name": payload.get("service_name"),
         }
+
+    # Keep a small, redacted sample in the application logs while validating a
+    # provider's log format. This makes a zero-detection result auditable without
+    # sending potentially sensitive production text to the browser or logger.
+    sample_entries = [
+        redact_text(str(entry.get("message") or entry.get("text") or ""))[:200]
+        if isinstance(entry, dict)
+        else redact_text(str(entry))[:200]
+        for entry in logs[:10]
+    ]
+    logger.info("Sample Render log entries: %s", sample_entries)
 
     detector = FailureDetector(service=render.get("service_id") or "render")
     detections = detector.detect_from_logs(logs, service=render.get("service_id") or "render", source="render")
@@ -266,7 +350,9 @@ async def sync_render_logs(
     return {
         "status": "success",
         "message": f"Retrieved {len(logs)} Render log entries; {len(detections)} incident(s) detected.",
+        "project_id": project.id,
         "logs_retrieved": len(logs),
+        "logs": safe_logs,
         "incidents_detected": len(detections),
         "incidents_created": created_ids,
         "diagnosis_started": diagnosed,

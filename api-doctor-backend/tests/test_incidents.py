@@ -8,8 +8,10 @@ from app.incidents.store import incident_store
 
 def test_store_create_get_update_list():
     inc = Incident(request_snapshot={}, stack_trace="x")
-    incident_store.create(inc)
-    assert incident_store.get(inc.id) is inc
+    created = incident_store.create(inc)
+    # The persistent store rehydrates records rather than retaining object identity.
+    assert created.id == inc.id
+    assert incident_store.get(inc.id).id == inc.id
 
     inc.status = IncidentStatus.INVESTIGATING
     incident_store.update(inc)
@@ -41,6 +43,6 @@ async def test_detect_and_create_flow():
     # Uses in-process detector (no AI needed for detection).
     inc = await orchestrator.detect_and_create("/api/v1/users/user_2/charge", "POST", {"amount": 5})
     assert inc.status == IncidentStatus.DETECTED
-    assert inc.stack_trace
+    assert inc.detection["error_message"] == "Internal server error"
     assert inc.request_snapshot.get("path") == "/api/v1/users/user_2/charge"
     assert incident_store.get(inc.id) is not None

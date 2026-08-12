@@ -10,6 +10,8 @@ import {
   Copy,
   Search,
   Check,
+  RefreshCw,
+  Server,
   XCircle
 } from 'lucide-react';
 
@@ -18,6 +20,9 @@ export default function BottomPanel({
   incidentContext,
   incidentDiff,
   incidentSandbox,
+  renderLogs = [],
+  renderLogsMeta,
+  onRefreshRenderLogs,
   activeBottomTab, 
   setActiveBottomTab,
   bottomHeight = 220,
@@ -43,12 +48,27 @@ export default function BottomPanel({
     }
   };
 
-  const rawLogText = [
+  const renderLogText = Array.isArray(renderLogs)
+    ? renderLogs
+      .map((entry) => {
+        if (typeof entry === 'string') return entry;
+        if (!entry || typeof entry !== 'object') return '';
+        const message = entry.message || entry.text || '';
+        const timestamp = entry.timestamp ? `[${entry.timestamp}] ` : '';
+        const level = entry.level ? `[${String(entry.level).toUpperCase()}] ` : '';
+        return `${timestamp}${level}${message}`.trim();
+      })
+      .filter(Boolean)
+      .join('\n')
+    : '';
+  const isViewingRenderLogs = Boolean(renderLogText);
+  const incidentLogText = [
     activeIncident?.detection?.raw_logs,
     activeIncident?.detection?.stack_trace,
     incidentContext?.stack_trace,
     activeIncident?.error_message,
   ].find(value => typeof value === 'string' && value.trim()) || '';
+  const rawLogText = renderLogText || incidentLogText;
 
   const extractedTrace = incidentContext?.stack_trace || activeIncident?.detection?.stack_trace || '';
   const normalizedLogFilter = logFilter.trim().toLowerCase();
@@ -212,6 +232,17 @@ export default function BottomPanel({
                   style={{ background: 'none', border: 'none', color: 'var(--text-primary)', fontSize: '11px', outline: 'none' }}
                 />
               </div>
+              {onRefreshRenderLogs && (
+                <button type="button" onClick={onRefreshRenderLogs} className="btn-outline" style={{ padding: '2px 7px', fontSize: '10px' }} title="Fetch the latest Render log entries without creating incidents">
+                  <RefreshCw size={11} />
+                  <span>Refresh Render Logs</span>
+                </button>
+              )}
+              {renderLogsMeta?.serviceName && (
+                <span style={{ fontSize: '10px', padding: '3px 6px', borderRadius: '4px', backgroundColor: 'rgba(124, 140, 248, 0.12)', color: 'var(--color-accent)' }}>
+                  RENDER: {renderLogsMeta.serviceName}
+                </span>
+              )}
               {activeIncident?.detection?.source && (
                 <span style={{ fontSize: '10px', padding: '3px 6px', borderRadius: '4px', backgroundColor: 'rgba(124, 140, 248, 0.12)', color: 'var(--color-accent)' }}>
                   SOURCE: {String(activeIncident.detection.source).toUpperCase()}
@@ -233,11 +264,12 @@ export default function BottomPanel({
               <>
                 <div style={{ backgroundColor: 'var(--surface-2)', border: '1px solid var(--border-color)', borderRadius: '6px', overflow: 'hidden' }}>
                   <div style={{ padding: '8px 10px', borderBottom: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <span style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-primary)' }}>
-                      Captured runtime logs
+                    <span style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '5px' }}>
+                      {isViewingRenderLogs && <Server size={12} style={{ color: 'var(--color-accent)' }} />}
+                      {isViewingRenderLogs ? 'Render runtime logs' : 'Captured incident logs'}
                     </span>
                     <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>
-                      {filteredLogLines.length}/{rawLogText.split('\n').length} lines
+                      {filteredLogLines.length}/{rawLogText.split('\n').length} lines{isViewingRenderLogs && renderLogsMeta?.retrieved !== undefined ? ` · ${renderLogsMeta.retrieved} retrieved` : ''}
                     </span>
                   </div>
                   <pre style={{ whiteSpace: 'pre-wrap', color: 'var(--text-primary)', fontSize: '11px', margin: 0, padding: '10px', lineHeight: 1.6, maxHeight: '220px', overflowY: 'auto' }}>
@@ -266,8 +298,14 @@ export default function BottomPanel({
                 )}
               </>
             ) : (
-              <div style={{ color: 'var(--text-muted)' }}>
-                No logs captured for this incident yet. Use Sync Render Logs to extract them automatically, or paste logs with Ingest Log.
+              <div style={{ color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                <span>{renderLogsMeta?.message || 'No logs loaded yet. View Render Logs to inspect the connected service, or paste logs with Ingest Log.'}</span>
+                {onRefreshRenderLogs && (
+                  <button type="button" onClick={onRefreshRenderLogs} className="btn-outline" style={{ padding: '3px 8px', fontSize: '10px' }}>
+                    <Server size={11} />
+                    <span>View Render Logs</span>
+                  </button>
+                )}
               </div>
             )}
           </div>

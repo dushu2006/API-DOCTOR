@@ -154,6 +154,8 @@ async def test_cancel_diagnosis_sets_terminal_status(monkeypatch):
     await pipeline_started.wait()
     assert await orch.cancel_diagnosis(inc.id) is True
 
-    assert inc.status == IncidentStatus.CANCELLED
-    assert inc.status.is_terminal
-    assert inc.activity[-1].status == "cancelled"
+    persisted = incident_store.get(inc.id)
+    assert persisted is not None
+    assert persisted.status == IncidentStatus.CANCELLED
+    assert persisted.status.is_terminal
+    assert persisted.activity[-1].status == "cancelled"
