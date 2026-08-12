@@ -17,7 +17,10 @@ def _normalized_database_url() -> str:
         raw = url.replace("sqlite:///", "", 1)
         db_path = Path(raw)
         if not db_path.is_absolute():
-            db_path = Path(settings.REPOSITORY_ROOT) / db_path
+            # Resolve relative SQLite paths against the backend directory
+            # so the database file lives alongside the app code and is
+            # easy to find and inspect.
+            db_path = Path(settings.BACKEND_ROOT) / db_path
         db_path.parent.mkdir(parents=True, exist_ok=True)
         return f"sqlite:///{db_path}"
     return url
@@ -45,7 +48,50 @@ def session_scope():
         session.close()
 
 
+def _migrate_missing_columns() -> None:
+    """Add columns that exist in the SQLAlchemy model but not in the live table.
+
+    ``Base.metadata.create_all`` only creates *new* tables; it never alters
+    existing ones.  When new columns are added to a model after the table has
+    already been created, SQLite will raise ``OperationalError: no such column``
+    on every query that touches the new field.  This lightweight migration
+    inspects every mapped table and issues ``ALTER TABLE … ADD COLUMN`` for any
+    columns that are absent.
+    """
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    with engine.begin() as conn:
+        for table_name, table in Base.metadata.tables.items():
+            if not insp.has_table(table_name):
+                continue  # create_all will handle it
+
+            existing_cols = {col["name"] for col in insp.get_columns(table_name)}
+            for column in table.columns:
+                if column.name in existing_cols:
+                    continue
+                # Build a minimal DDL type string from the column's type
+                col_type = column.type.compile(dialect=engine.dialect)
+                nullable = "" if column.nullable else " NOT NULL"
+                default = ""
+                if column.default is not None and hasattr(column.default, "arg"):
+                    arg = column.default.arg
+                    if isinstance(arg, str):
+                        default = f" DEFAULT '{arg}'"
+                    elif isinstance(arg, bool):
+                        default = f" DEFAULT {1 if arg else 0}"
+                    elif isinstance(arg, (int, float)):
+                        default = f" DEFAULT {arg}"
+                # If column is nullable and has no default, we can safely omit defaults
+                if not default and not column.nullable:
+                    # Provide a sensible empty default for non-nullable text/string columns
+                    default = " DEFAULT ''"
+                ddl = f'ALTER TABLE "{table_name}" ADD COLUMN "{column.name}" {col_type}{nullable}{default}'
+                conn.execute(text(ddl))
+
+
 def init_db() -> None:
     from app.db import models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
+    _migrate_missing_columns()
