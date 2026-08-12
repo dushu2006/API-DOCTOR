@@ -72,6 +72,7 @@ class IncidentResponse(BaseModel):
     root_cause: Optional[dict[str, Any]] = None
     error_message: Optional[str] = None
     attempt_count: int = 0
+    activity: list[ProgressEvent] = Field(default_factory=list)
 
     @classmethod
     def from_model(cls, m: Incident) -> "IncidentResponse":
@@ -85,6 +86,7 @@ class IncidentResponse(BaseModel):
             root_cause=m.root_cause,
             error_message=m.error_message,
             attempt_count=m.attempt_count,
+            activity=m.activity,
         )
 
 

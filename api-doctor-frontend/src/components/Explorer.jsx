@@ -48,7 +48,8 @@ export default function Explorer({
   filesList = [],
   filesTree = null,
   projectName = 'Project Workspace',
-  onRefresh
+  onRefresh,
+  isConnected = false
 }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [openFolders, setOpenFolders] = useState({});
@@ -293,8 +294,8 @@ export default function Explorer({
         {fileTree.length > 0 ? (
           renderTree(fileTree)
         ) : (
-          <div style={{ padding: '20px 12px', fontSize: '11px', color: 'var(--text-muted)', textAlign: 'center' }}>
-            No repository files loaded yet.
+          <div style={{ padding: '20px 12px', fontSize: '11px', color: 'var(--text-muted)', textAlign: 'center', lineHeight: 1.5 }}>
+            {isConnected ? 'No repository files loaded yet.' : 'Connect a GitHub repository'}
           </div>
         )}
       </div>

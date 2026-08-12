@@ -11,6 +11,17 @@ from app.github.service import GitHubService
 from app.projects.models import Project
 
 
+async def test_verify_credentials(httpx_mock):
+    client = GitHubClient()
+    httpx_mock.add_response(
+        url="https://api.github.com/user", method="GET",
+        json={"login": "octocat", "id": 1, "name": "The Octocat"},
+    )
+    info = await client.verify_credentials()
+    assert info["verified"] is True
+    assert info["login"] == "octocat"
+
+
 async def test_get_repo(httpx_mock):
     client = GitHubClient()
     httpx_mock.add_response(

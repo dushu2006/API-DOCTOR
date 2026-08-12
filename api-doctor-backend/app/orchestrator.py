@@ -110,13 +110,13 @@ class Orchestrator:
             stack_trace=trace,
         )
         incident_store.create(incident)
-        incident.add_activity("logs_retrieved", "done", f"Ingested from {source}")
-        incident.add_activity("error_detected", "done", err_msg[:120])
+        incident.add_activity("logs_retrieved", "done", "Logs retrieved")
+        incident.add_activity("error_detected", "done", "Error detected")
         incident_store.update(incident)
 
         log_operation(logger, incident.id, "ingest", "ok", error=err_msg[:200])
-        await emit(incident.id, "logs_retrieved", "done", f"Ingested from {source}")
-        await emit(incident.id, "error_detected", "done", err_msg[:120])
+        await emit(incident.id, "logs_retrieved", "done", "Logs retrieved")
+        await emit(incident.id, "error_detected", "done", "Error detected")
         return incident
 
     def start_diagnosis(self, incident_id: str) -> bool:
@@ -209,11 +209,13 @@ class Orchestrator:
         try:
             await emit(inc.id, "pipeline", "running", "Starting diagnosis pipeline")
             if project and project.is_connected:
-                inc.add_activity("repository_synced", "done", f"{project.github_owner}/{project.github_repo}")
-                await emit(inc.id, "repository_synced", "done", f"{project.github_owner}/{project.github_repo}")
+                inc.add_activity("repository_connected", "done", "Repository connected")
+                await emit(inc.id, "repository_connected", "done", "Repository connected")
+                inc.add_activity("repository_synced", "done", "Project synchronized")
+                await emit(inc.id, "repository_synced", "done", "Project synchronized")
                 if profile:
-                    inc.add_activity("project_discovered", "done", f"{profile.language} / {profile.framework}")
-                    await emit(inc.id, "project_discovered", "done", f"{profile.language} / {profile.framework}")
+                    inc.add_activity("project_discovered", "done", "Project discovered")
+                    await emit(inc.id, "project_discovered", "done", "Project discovered")
 
             await self._collect_context(inc, profile)
             await self._investigate(inc, profile)
@@ -263,12 +265,12 @@ class Orchestrator:
             except TypeError:
                 context = self.context_builder.build(inc)
             inc.context = context
-            inc.add_activity("logs_retrieved", "done")
-            inc.add_activity("stack_trace_parsed", "done")
+            inc.add_activity("logs_retrieved", "done", "Logs retrieved")
+            inc.add_activity("stack_trace_parsed", "done", "Stack trace extracted")
             inc.add_activity("relevant_source_identified", "done", f"{len(context['affected_files'])} files")
             for f in context.get("affected_files", []):
-                inc.add_activity("file_read", "done", f)
-                await emit(inc.id, "file_read", "done", f)
+                inc.add_activity("file_read", "done", f"Reading {f}")
+                await emit(inc.id, "file_read", "done", f"Reading {f}")
             inc.set_activity("collecting_context", "done", f"{len(context['affected_files'])} files")
             log_operation(logger, inc.id, "collect_context", "ok", duration=time.perf_counter() - t0)
             await emit(inc.id, "stack_trace_parsed", "done", f"{len(context['affected_files'])} files")
@@ -289,8 +291,8 @@ class Orchestrator:
         inc.add_activity("investigation_started", "running")
         inc.add_activity("investigating", "running")
         incident_store.update(inc)
-        await emit(inc.id, "investigation_started", "running", "Analyzing root cause with investigator model")
-        await emit(inc.id, "investigating", "running", "Analyzing root cause with investigator model")
+        await emit(inc.id, "investigation_started", "running", "Investigating root cause")
+        await emit(inc.id, "investigating", "running", "Investigating root cause")
         t0 = time.perf_counter()
         try:
             analysis: RootCauseAnalysis = await self.root_cause_agent.analyze(inc.context or {})
@@ -308,11 +310,11 @@ class Orchestrator:
                 return
 
             inc.status = IncidentStatus.ROOT_CAUSE_FOUND
-            inc.add_activity("root_cause_identified", "done", analysis.classification)
-            inc.set_activity("investigating", "done", f"{analysis.classification} conf={analysis.confidence:.2f}")
+            inc.add_activity("root_cause_identified", "done", "Root cause identified")
+            inc.set_activity("investigating", "done", "Root cause identified")
             log_operation(logger, inc.id, "root_cause", "ok", duration=time.perf_counter() - t0, error=f"confidence={analysis.confidence:.2f}")
-            await emit(inc.id, "root_cause_identified", "done", f"{analysis.classification} conf={analysis.confidence:.2f}")
-            await emit(inc.id, "investigating", "done", f"{analysis.classification} conf={analysis.confidence:.2f}")
+            await emit(inc.id, "root_cause_identified", "done", "Root cause identified")
+            await emit(inc.id, "investigating", "done", "Root cause identified")
         except Exception as exc:
             inc.status = IncidentStatus.INVESTIGATION_FAILED
             inc.error_message = f"root cause analysis failed: {exc}"
@@ -331,7 +333,7 @@ class Orchestrator:
         inc.status = IncidentStatus.FIX_PLANNED
         inc.add_activity("fix_generated", "running")
         incident_store.update(inc)
-        await emit(inc.id, "fix_generated", "running", "Generating minimal verified patch")
+        await emit(inc.id, "fix_generated", "running", "Generating fix")
         t0 = time.perf_counter()
         files = self._full_files(inc)
         try:
@@ -369,8 +371,8 @@ class Orchestrator:
         inc.add_activity("sandbox_started", "running")
         inc.add_activity("tests_started", "running")
         incident_store.update(inc)
-        await emit(inc.id, "sandbox_started", "running", "Running isolated verification in sandbox")
-        await emit(inc.id, "tests_started", "running", "Executing test suite")
+        await emit(inc.id, "sandbox_started", "running", "Running sandbox")
+        await emit(inc.id, "tests_started", "running", "Running tests")
 
         attempt = 0
         result: SandboxResult | None = None

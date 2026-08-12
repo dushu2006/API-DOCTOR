@@ -31,8 +31,11 @@ export default function TopBar({
   const [showStopDialog, setShowStopDialog] = useState(false);
   const [isSyncingRender, setIsSyncingRender] = useState(false);
 
-  const projectName = currentProject?.name || (currentProject?.github_owner && currentProject?.github_repo ? `${currentProject.github_owner}/${currentProject.github_repo}` : 'API-DOCTOR');
-  const currentBranch = currentProject?.github_branch || 'main';
+  const isConnected = Boolean(currentProject?.is_connected);
+  const projectName = isConnected
+    ? (currentProject?.name || `${currentProject?.github_owner}/${currentProject?.github_repo}`)
+    : 'Connect a GitHub repository';
+  const currentBranch = isConnected ? (currentProject?.github_branch || 'main') : '—';
 
   const handleSyncRenderClick = async () => {
     if (!onSyncRender) return;

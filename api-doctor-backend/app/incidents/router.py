@@ -29,7 +29,15 @@ from app.incidents.schemas import (
 )
 from app.incidents.store import incident_store
 from app.orchestrator import orchestrator
-from app.render.client import RenderClient
+from app.projects.store import project_store
+from app.render.client import (
+    RenderAuthError,
+    RenderClient,
+    RenderError,
+    RenderNetworkError,
+    RenderNotFoundError,
+    RenderRateLimitError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -159,23 +167,84 @@ async def ingest_incident(req: IngestIncidentRequest) -> DiagnoseResponse:
     )
 
 
+def _render_error_payload(exc: RenderError, service_id: str | None = None) -> dict[str, Any]:
+    return {
+        "status": "error",
+        "message": str(exc),
+        "error_type": exc.error_type,
+        "http_status": exc.status_code,
+        "service_id": service_id,
+        "incidents_created": [],
+        "logs_retrieved": 0,
+    }
+
+
 @router.post("/sync-render")
 async def sync_render_logs(service_id: str | None = None, auto_diagnose: bool = True) -> dict[str, Any]:
-    """Retrieve runtime logs from Render service and detect incidents."""
-    client = RenderClient(service_id=service_id)
-    if not client.api_key or not client.service_id:
+    """Retrieve runtime logs from Render service and detect incidents.
+
+    Success and failure are explicit. Log-retrieval failures are never reported
+    as a successful sync.
+    """
+    project = project_store.get_current()
+    sid = (
+        service_id
+        or (project.render_service_id if project and project.is_connected else None)
+        or settings.RENDER_SERVICE_ID
+    )
+    client = RenderClient(service_id=sid)
+
+    if not client.api_key:
         return {
-            "status": "unconfigured",
-            "message": "Render integration is not configured.",
+            "status": "error",
+            "message": "Render integration is not configured: RENDER_API_KEY is missing.",
+            "error_type": "unconfigured",
             "incidents_created": [],
+            "logs_retrieved": 0,
+        }
+    if not client.service_id:
+        return {
+            "status": "error",
+            "message": (
+                "Render service is not configured. Provide service_id, set "
+                "RENDER_SERVICE_ID, or connect a project with a Render service."
+            ),
+            "error_type": "unconfigured",
+            "incidents_created": [],
+            "logs_retrieved": 0,
         }
 
-    logs = await client.get_logs(limit=200)
+    try:
+        fetch = await client.fetch_runtime_logs(limit=200)
+    except RenderAuthError as exc:
+        logger.warning("Render log retrieval auth error: %s", exc)
+        return _render_error_payload(exc, client.service_id)
+    except RenderNotFoundError as exc:
+        logger.warning("Render log retrieval not found: %s", exc)
+        return _render_error_payload(exc, client.service_id)
+    except RenderRateLimitError as exc:
+        logger.warning("Render log retrieval rate-limited: %s", exc)
+        return _render_error_payload(exc, client.service_id)
+    except RenderNetworkError as exc:
+        logger.warning("Render log retrieval network failure: %s", exc)
+        return _render_error_payload(exc, client.service_id)
+    except RenderError as exc:
+        logger.warning("Render log retrieval failed: %s", exc)
+        return _render_error_payload(exc, client.service_id)
+
+    logs = fetch.logs
+    project_id = project.id if project and project.is_connected else "default"
+    project_ready = bool(project and project.is_connected)
+
     if not logs:
         return {
-            "status": "ok",
-            "message": "No logs retrieved from Render service.",
+            "status": "success",
+            "message": fetch.message or "Render logs retrieved successfully; no log entries found.",
+            "logs_retrieved": 0,
             "incidents_created": [],
+            "service_id": fetch.service_id,
+            "owner_id": fetch.owner_id,
+            "service_name": fetch.service_name,
         }
 
     detector = FailureDetector(service=client.service_id)
@@ -192,15 +261,29 @@ async def sync_render_logs(service_id: str | None = None, auto_diagnose: bool = 
             method=det.get("method", "GET"),
             status_code=det.get("status_code", 500),
             service_id=client.service_id,
+            project_id=project_id,
         )
         created_ids.append(inc.id)
-        if auto_diagnose and len(created_ids) == 1:
-            orchestrator.start_diagnosis(inc.id)
+
+    # Never start AI diagnosis against the API Doctor repo itself.
+    diagnosed = False
+    if auto_diagnose and created_ids and project_ready:
+        diagnosed = bool(orchestrator.start_diagnosis(created_ids[0]))
+    elif auto_diagnose and created_ids and not project_ready:
+        logger.info("Skipping auto-diagnosis: no GitHub project is connected.")
 
     return {
-        "status": "ok",
-        "message": f"Processed Render logs: {len(detections)} incident(s) detected.",
+        "status": "success",
+        "message": (
+            f"Retrieved {len(logs)} Render log entries; {len(detections)} incident(s) detected."
+        ),
+        "logs_retrieved": len(logs),
+        "incidents_detected": len(detections),
         "incidents_created": created_ids,
+        "diagnosis_started": diagnosed,
+        "service_id": fetch.service_id,
+        "owner_id": fetch.owner_id,
+        "service_name": fetch.service_name,
     }
 
 

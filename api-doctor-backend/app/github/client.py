@@ -77,6 +77,20 @@ class GitHubClient:
             "default_branch": self.default_branch,
         }
 
+    async def verify_credentials(self) -> dict[str, Any]:
+        """Validate the configured token against GET /user. Does not clone a repo."""
+        if not self.token:
+            raise GitHubError("GITHUB_TOKEN is not configured")
+        data = await self._request("GET", "/user")
+        if not isinstance(data, dict):
+            raise GitHubError("GitHub /user returned an unexpected payload")
+        return {
+            "verified": True,
+            "login": data.get("login"),
+            "id": data.get("id"),
+            "name": data.get("name"),
+        }
+
     async def verify_access(self) -> dict[str, Any]:
         """Verify repository access and retrieve repository metadata."""
         if not self.owner or not self.repo:
