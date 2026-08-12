@@ -74,7 +74,7 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Sandbox
     # ------------------------------------------------------------------
-    SANDBOX_MODE: str = "docker"  # "docker" | "local"
+    SANDBOX_MODE: str = "local"  # "docker" | "local"
     SANDBOX_BASE_IMAGE: str = "python:3.11-slim"
     SANDBOX_TIMEOUT_SECONDS: int = 120
     SANDBOX_MEMORY_LIMIT: str = "512m"

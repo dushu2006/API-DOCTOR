@@ -330,7 +330,7 @@ def test_fix_resolves_crash():
             resp = await client.request("{method}", "{path}", json={body_src})
         return resp.status_code
     import asyncio
-    status = asyncio.get_event_loop().run_until_complete(run())
+    status = asyncio.run(run())
     assert status < 500, f"expected crash resolved, got status {{status}}"
 """
         script = (
