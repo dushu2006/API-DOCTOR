@@ -348,3 +348,18 @@ select:focus {
 .animate-fade-in {
   animation: fadeInUp 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
+
+/* Monaco failure-line decorations (API Doctor) */
+.doctor-failure-line {
+  background: rgba(240, 169, 58, 0.12);
+  border-left: 3px solid var(--color-accent);
+}
+.doctor-failure-glyph {
+  background-color: var(--color-accent);
+  border-radius: 50%;
+  margin-left: 4px;
+  width: 6px !important;
+  height: 6px !important;
+  position: relative;
+  top: 7px;
+}

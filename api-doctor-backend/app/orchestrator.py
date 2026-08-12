@@ -15,8 +15,12 @@ Guarantees:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import shutil
+import subprocess
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -30,10 +34,19 @@ from app.events.hub import emit
 from app.incidents.models import Incident, IncidentStatus
 from app.incidents.store import incident_store
 from app.projects.store import project_store
+from app.sandbox.patch_utils import PatchError, apply_patch, resolve_diff_paths, validate_diff
 from app.sandbox.sandbox_runner import SandboxResult, SandboxRunner
 from app.security.sanitizer import redact_text, sanitize
 
 logger = logging.getLogger(__name__)
+
+
+def _apply_backups_root() -> Path:
+    return Path(settings.DATA_DIR) / "apply_backups"
+
+
+def _utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class Orchestrator:
@@ -44,6 +57,8 @@ class Orchestrator:
         self.fix_agent = FixAgent()
         self.sandbox_runner = SandboxRunner()
         self._pipeline_tasks: dict[str, asyncio.Task[Incident | None]] = {}
+        # incident_id -> Keep-Changes application state (backup location, files)
+        self._workspace_apply: dict[str, dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
     # Entry points
@@ -246,14 +261,13 @@ class Orchestrator:
         t_start = time.perf_counter()
         try:
             await emit(inc.id, "pipeline", "running", "Starting diagnosis pipeline")
-            if project and project.is_connected:
-                inc.add_activity("repository_connected", "done", "Repository connected")
-                await emit(inc.id, "repository_connected", "done", "Repository connected")
-                inc.add_activity("repository_synced", "done", "Project synchronized")
-                await emit(inc.id, "repository_synced", "done", "Project synchronized")
-                if profile:
-                    inc.add_activity("project_discovered", "done", "Project discovered")
-                    await emit(inc.id, "project_discovered", "done", "Project discovered")
+
+            # Every timeline step below corresponds to a real operation. The
+            # repository state is actually inspected (git branch/commit/dirty
+            # state) and the project profile is re-detected from disk instead
+            # of echoing canned success messages.
+            profile = await self._verify_repository(inc, project, workspace_path, profile)
+            self.sandbox_runner.set_repo_root(workspace_path, profile)
 
             resuming_approved_fix = self._should_resume_approved_fix(inc)
 
@@ -335,42 +349,101 @@ class Orchestrator:
 
     # ------------------------------------------------------------------
     async def _collect_context(self, inc: Incident, profile: Any = None) -> None:
+        """Two-phase context collection driven by real operations.
+
+        Phase 1 (before approval): parse the stack trace and identify relevant
+        file paths — no file contents are read yet.
+        Phase 2 (after approval): read each approved file from disk one by one
+        (emitting a live event per real read), then assemble the full context.
+        """
         inc.status = IncidentStatus.COLLECTING_CONTEXT
         inc.add_activity("collecting_context", "running")
         incident_store.update(inc)
-        await emit(inc.id, "collecting_context", "running", "Parsing stack trace and retrieving relevant code")
+        await emit(inc.id, "collecting_context", "running", "Parsing stack trace and identifying relevant files")
         t0 = time.perf_counter()
         try:
-            try:
-                context = self.context_builder.build(inc, project_profile=profile)
-            except TypeError:
-                context = self.context_builder.build(inc)
-            inc.context = context
-            inc.add_activity("logs_retrieved", "done", "Logs retrieved")
-            inc.add_activity("stack_trace_parsed", "done", "Stack trace extracted")
-            inc.add_activity("relevant_source_identified", "done", f"{len(context['affected_files'])} files")
-            
-            # Pause for file read approval unless the user already approved.
-            affected_files = context.get("affected_files", [])
-            if affected_files and not self._has_activity(inc, "file_read_approval", "done"):
-                file_list = "\n".join(f"  - {f}" for f in affected_files)
-                inc.add_activity("files_to_read", "pending", f"{len(affected_files)} files identified for reading")
-                inc.add_activity("file_read_approval", "pending", f"Files to read:\n{file_list}")
-                inc.set_activity("collecting_context", "running", "Waiting for file read approval")
-                inc.status = IncidentStatus.AWAITING_FILE_READ_APPROVAL
+            if not inc.context or not inc.context.get("_complete"):
+                # Phase 1a — actually parse the stack trace.
+                parsed = await asyncio.to_thread(self.context_builder.parse_trace, inc)
+                trace_detail = (
+                    f"{len(parsed.frames)} frame(s)"
+                    + (f" · {parsed.exception_type}" if parsed.exception_type else "")
+                )
+                inc.add_activity("stack_trace_parsed", "done", trace_detail)
                 incident_store.update(inc)
-                await emit(inc.id, "file_read_approval", "pending", f"Approval needed: {len(affected_files)} files")
-                await emit(inc.id, "pipeline", "paused", "Waiting for file read approval")
-                return
+                await emit(inc.id, "stack_trace_parsed", "done", trace_detail)
 
-            for f in affected_files:
-                inc.add_activity("file_read", "done", f"Reading {f}")
-                await emit(inc.id, "file_read", "done", f"Reading {f}")
-            inc.set_activity("collecting_context", "done", f"{len(context['affected_files'])} files")
+                # Phase 1b — identify relevant files (paths only, no reads).
+                identified = await asyncio.to_thread(
+                    self.context_builder.identify_files, inc, profile
+                )
+                inc.add_activity(
+                    "relevant_source_identified", "done", f"{len(identified)} file(s) identified"
+                )
+                incident_store.update(inc)
+                await emit(
+                    inc.id,
+                    "relevant_source_identified",
+                    "done",
+                    f"{len(identified)} relevant file(s) identified",
+                )
+
+                # Carry the identification result on the incident so the pause
+                # point can show the file list without having read anything.
+                inc.context = {
+                    "incident_id": inc.id,
+                    "stack_trace": (inc.stack_trace or "")[-4000:],
+                    "affected_files": identified,
+                    "code_snippets": {},
+                }
+                incident_store.update(inc)
+
+                # Pause for file read approval unless the user already approved.
+                if identified and not self._has_activity(inc, "file_read_approval", "done"):
+                    file_list = "\n".join(f"  - {f}" for f in identified)
+                    inc.add_activity(
+                        "files_to_read", "pending", f"{len(identified)} files identified for reading"
+                    )
+                    inc.add_activity("file_read_approval", "pending", f"Files to read:\n{file_list}")
+                    inc.set_activity("collecting_context", "running", "Waiting for file read approval")
+                    inc.status = IncidentStatus.AWAITING_FILE_READ_APPROVAL
+                    incident_store.update(inc)
+                    await emit(
+                        inc.id, "file_read_approval", "pending", f"Approval needed: {len(identified)} files"
+                    )
+                    await emit(inc.id, "pipeline", "paused", "Waiting for file read approval")
+                    return
+
+                # Phase 2 — actually read every file, one at a time. Each event
+                # is emitted only after the real read completes.
+                affected_files = list(inc.context.get("affected_files", []))
+                for rel in affected_files:
+                    inc.add_activity("file_read", "running", f"Reading {rel}")
+                    incident_store.update(inc)
+                    await emit(inc.id, "file_read", "running", f"Reading {rel}")
+                    read_info = await asyncio.to_thread(self._read_workspace_file, rel)
+                    inc.set_activity("file_read", "done", f"Reading {rel}")
+                    incident_store.update(inc)
+                    detail = f"Reading {rel}"
+                    if read_info:
+                        detail = f"Read {rel} · {read_info['lines']} lines"
+                    await emit(inc.id, "file_read", "done", detail)
+
+                # Assemble the full context bundle for the investigator.
+                try:
+                    context = self.context_builder.build(inc, project_profile=profile)
+                except TypeError:
+                    context = self.context_builder.build(inc)
+                if not context.get("affected_files"):
+                    context["affected_files"] = affected_files
+                context["_complete"] = True
+                inc.context = context
+                incident_store.update(inc)
+
+            affected_count = len((inc.context or {}).get("affected_files", []))
+            inc.set_activity("collecting_context", "done", f"{affected_count} files")
             log_operation(logger, inc.id, "collect_context", "ok", duration=time.perf_counter() - t0)
-            await emit(inc.id, "stack_trace_parsed", "done", f"{len(context['affected_files'])} files")
-            await emit(inc.id, "relevant_source_identified", "done", f"{len(context['affected_files'])} files")
-            await emit(inc.id, "collecting_context", "done", f"{len(context['affected_files'])} files")
+            await emit(inc.id, "collecting_context", "done", f"{affected_count} relevant file(s) in context")
         except Exception as exc:
             inc.status = IncidentStatus.INVESTIGATION_FAILED
             inc.error_message = f"context build failed: {exc}"
@@ -381,12 +454,95 @@ class Orchestrator:
         finally:
             incident_store.update(inc)
 
+    def _read_workspace_file(self, rel: str) -> dict[str, Any] | None:
+        """Really read one workspace file from disk (used for live progress)."""
+        full = self.context_builder.repo_root / rel
+        try:
+            if not full.is_file():
+                return None
+            text = full.read_text(encoding="utf-8", errors="replace")
+            return {"lines": text.count("\n") + (1 if text and not text.endswith("\n") else 0), "bytes": len(text.encode("utf-8"))}
+        except Exception:
+            return None
+
+    async def _verify_repository(
+        self, inc: Incident, project: Any, workspace_path: str, profile: Any
+    ) -> Any:
+        """Actually inspect the workspace repository and emit real results."""
+        await emit(inc.id, "repository_check", "running", "Verifying repository workspace")
+        inc.add_activity("repository_check", "running", "Verifying repository workspace")
+        incident_store.update(inc)
+
+        ws = Path(workspace_path)
+        branch, sha, dirty = await asyncio.to_thread(self._inspect_git_workspace, ws)
+
+        repo_label = ws.name
+        if project is not None:
+            owner = getattr(project, "github_owner", "") or ""
+            repo = getattr(project, "github_repo", "") or ""
+            if owner and repo:
+                repo_label = f"{owner}/{repo}"
+
+        if branch and sha:
+            detail = f"{repo_label} @ {branch} · {sha}"
+        else:
+            detail = f"{repo_label} · local workspace"
+        inc.set_activity("repository_check", "done", detail)
+        inc.add_activity("repository_connected", "done", detail)
+        incident_store.update(inc)
+        await emit(inc.id, "repository_connected", "done", detail)
+
+        if branch:
+            sync_detail = f"workspace clean @ {sha}" if dirty == 0 else f"{dirty} uncommitted change(s) in workspace"
+        else:
+            sync_detail = "workspace directory present"
+        inc.add_activity("repository_synced", "done", sync_detail)
+        incident_store.update(inc)
+        await emit(inc.id, "repository_synced", "done", sync_detail)
+
+        # Re-detect the project type from the actual files on disk.
+        from app.projects.discovery import discover_project
+
+        detected = await asyncio.to_thread(discover_project, ws)
+        if detected is not None:
+            lang = getattr(detected, "language", None) or "unknown"
+            fw = getattr(detected, "framework", None) or ""
+            disc = f"{lang} · {fw}" if fw else str(lang)
+            inc.add_activity("project_discovered", "done", disc)
+            incident_store.update(inc)
+            await emit(inc.id, "project_discovered", "done", disc)
+            if profile is None:
+                profile = detected
+        return profile
+
+    @staticmethod
+    def _inspect_git_workspace(ws: Path) -> tuple[str, str, int]:
+        """Return (branch, short sha, dirty file count) for a workspace."""
+        if not (ws / ".git").is_dir():
+            return "", "", 0
+
+        def _git(*args: str) -> str:
+            try:
+                res = subprocess.run(
+                    ["git", "-C", str(ws), *args],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                return res.stdout.strip() if res.returncode == 0 else ""
+            except Exception:
+                return ""
+
+        branch = _git("rev-parse", "--abbrev-ref", "HEAD") or "HEAD"
+        sha = _git("rev-parse", "--short", "HEAD")
+        status = _git("status", "--porcelain")
+        dirty = len([ln for ln in status.splitlines() if ln.strip()]) if status else 0
+        return branch, sha, dirty
+
     async def _investigate(self, inc: Incident, profile: Any = None) -> None:
         inc.status = IncidentStatus.INVESTIGATING
-        inc.add_activity("investigation_started", "running")
         inc.add_activity("investigating", "running")
         incident_store.update(inc)
-        await emit(inc.id, "investigation_started", "running", "Investigating root cause")
         await emit(inc.id, "investigating", "running", "Investigating root cause")
         t0 = time.perf_counter()
         try:
@@ -476,18 +632,36 @@ class Orchestrator:
             RootCauseAnalysis.model_validate(inc.root_cause)
             if inc.root_cause else None
         )
+
+        # When the user chose "Keep Changes", the patch has already been
+        # applied to the real workspace. Verification must then run against the
+        # pre-apply snapshot so the failure can still be reproduced.
+        apply_state = self._load_apply_state(inc.id)
+        if apply_state:
+            backup_root = Path(apply_state["backup"])
+            if backup_root.is_dir():
+                self.sandbox_runner.set_repo_root(backup_root, profile)
+            proposal_data = dict(proposal_data)
+            proposal_data["diff"] = apply_state.get("resolved_diff") or proposal_data["diff"]
+            proposal = FixProposal.model_validate(proposal_data)
+
         files = self._full_files(inc)
 
         inc.status = IncidentStatus.SANDBOX_TESTING
         inc.add_activity("sandbox_started", "running")
         inc.add_activity("tests_started", "running")
         incident_store.update(inc)
-        await emit(inc.id, "sandbox_started", "running", "Running sandbox")
+        await emit(inc.id, "sandbox_started", "running", "Running sandbox verification on isolated copy")
         await emit(inc.id, "tests_started", "running", "Running tests")
+
+        # With changes already applied to the workspace we run a single
+        # verification pass — regenerating a different fix would desynchronize
+        # the workspace from what the user approved.
+        max_attempts = 1 if apply_state else max(1, settings.MAX_REPAIR_ATTEMPTS)
 
         attempt = 0
         result: SandboxResult | None = None
-        while attempt < max(1, settings.MAX_REPAIR_ATTEMPTS):
+        while attempt < max_attempts:
             attempt += 1
             inc.attempt_count = attempt
             inc.set_activity("sandbox_started", "running", f"attempt {attempt}")
@@ -515,7 +689,7 @@ class Orchestrator:
 
             if result.passed:
                 break
-            if attempt < settings.MAX_REPAIR_ATTEMPTS:
+            if attempt < max_attempts:
                 inc.set_activity("fix_generated", "running", f"attempt {attempt} failed — regenerating")
                 incident_store.update(inc)
                 await emit(inc.id, "fix_generated", "running", f"Attempt {attempt} failed, retrying")
@@ -542,12 +716,38 @@ class Orchestrator:
             await emit(inc.id, "sandbox_started", "done", "Verification passed")
             await emit(inc.id, "fix_verified", "done", "Fix verified")
         else:
-            inc.status = IncidentStatus.REPAIR_LIMIT_REACHED if attempt >= settings.MAX_REPAIR_ATTEMPTS else IncidentStatus.VERIFICATION_FAILED
+            inc.status = IncidentStatus.REPAIR_LIMIT_REACHED if attempt >= max_attempts else IncidentStatus.VERIFICATION_FAILED
             inc.error_message = result.error if result else "verification failed"
             inc.set_activity("sandbox_started", "failed", inc.error_message[:200])
             inc.set_activity("tests_started", "failed", inc.error_message[:200])
             inc.add_activity("fix_verified", "failed", inc.error_message[:200])
             await emit(inc.id, "fix_verified", "failed", inc.error_message[:500])
+
+        # Finalize the Keep-Changes workspace application based on the result.
+        if apply_state:
+            if result and result.passed:
+                self._discard_apply_backup(inc.id)
+                inc.add_activity(
+                    "workspace_updated",
+                    "done",
+                    f"Verified fix kept in workspace: {', '.join(apply_state.get('files', []))}",
+                )
+                await emit(inc.id, "workspace_updated", "done", "Verified changes kept in workspace")
+            else:
+                await self._restore_workspace_files(inc.id)
+                if inc.fix_proposal:
+                    inc.fix_proposal.pop("applied_files", None)
+                    inc.fix_proposal.pop("applied_at", None)
+                inc.add_activity(
+                    "changes_rolled_back", "done", "Workspace restored to original state after failed verification"
+                )
+                await emit(
+                    inc.id,
+                    "changes_rolled_back",
+                    "done",
+                    f"Verification failed — workspace restored ({(inc.error_message or '')[:120]})",
+                )
+
         incident_store.update(inc)
 
         # PR Gate
@@ -558,6 +758,233 @@ class Orchestrator:
                 inc.error_message = f"PR creation failed: {exc}"
                 incident_store.update(inc)
                 await emit(inc.id, "pr_created", "failed", str(exc)[:500])
+
+    # ------------------------------------------------------------------
+    # Keep Changes — real patch application to the project workspace
+    # ------------------------------------------------------------------
+    def _resolve_project_workspace(self, inc: Incident) -> tuple[Any, Path | None]:
+        project = project_store.get(inc.project_id) or project_store.get_current()
+        if not project or not project.workspace_path:
+            return project, None
+        ws = Path(project.workspace_path)
+        if not ws.is_dir():
+            return project, None
+        return project, ws
+
+    async def stage_workspace_apply(self, incident_id: str) -> dict[str, Any]:
+        """Apply the proposed patch to the REAL project workspace.
+
+        Called when the user chooses "Keep Changes". A pre-apply snapshot is
+        kept so sandbox verification can still reproduce the original failure
+        and so the workspace can be rolled back if verification fails.
+        """
+        inc = incident_store.get(incident_id)
+        if not inc:
+            return {"applied": False, "reason": "incident not found"}
+        proposal = inc.fix_proposal or {}
+        diff = (proposal.get("resolved_diff") or proposal.get("diff") or "").strip()
+        if not diff:
+            return {"applied": False, "reason": "no fix proposal to apply"}
+
+        # Idempotent: already applied earlier.
+        if proposal.get("applied_files") and self._load_apply_state(incident_id):
+            return {"applied": True, "files": proposal["applied_files"]}
+
+        project, ws = self._resolve_project_workspace(inc)
+        if ws is None:
+            return {"applied": False, "reason": "Project workspace is not synchronized."}
+        if ws.resolve() == Path(settings.INTERNAL_REPO_ROOT).resolve():
+            # Never modify API Doctor's own source tree in demo mode.
+            return {"applied": False, "reason": "demo workspace is read-only"}
+
+        def _do() -> dict[str, Any]:
+            from app.sandbox.patch_utils import _parse_unified_diff, _strip_prefix
+            from app.sandbox.workspace_manager import _IGNORE_PATTERNS
+
+            try:
+                resolved, mapping = resolve_diff_paths(diff, ws)
+                validate_diff(resolved, allowed_roots=[str(ws)])
+                file_patches = _parse_unified_diff(resolved)
+            except PatchError as exc:
+                return {"applied": False, "reason": f"Invalid patch: {exc}"}
+
+            # Refuse to touch anything unless every original file exists in the
+            # workspace — this is the guard behind "Original file not found".
+            for patch in file_patches:
+                if patch["old_path"] == "/dev/null":
+                    continue  # new file, no original needed
+                rel_old = _strip_prefix(patch["old_path"])
+                if not (ws / rel_old).is_file():
+                    return {
+                        "applied": False,
+                        "reason": f"Original file not found in workspace: {rel_old}",
+                    }
+
+            backup_root = _apply_backups_root() / incident_id
+            backup = backup_root / "workspace"
+            try:
+                if backup_root.exists():
+                    shutil.rmtree(backup_root, ignore_errors=True)
+                backup_root.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(ws, backup, ignore=_IGNORE_PATTERNS, dirs_exist_ok=True)
+            except Exception as exc:  # noqa: BLE001
+                return {"applied": False, "reason": f"Could not create safety backup: {exc}"}
+
+            try:
+                affected = apply_patch(resolved, ws)
+            except PatchError as exc:
+                shutil.rmtree(backup_root, ignore_errors=True)
+                message = str(exc)
+                if "mismatch" in message:
+                    message = (
+                        "File changed since diagnosis — patch refused for safety. "
+                        "Re-run the diagnosis to generate a fresh patch."
+                    )
+                return {"applied": False, "reason": message}
+
+            state = {
+                "backup": str(backup),
+                "files": affected,
+                "resolved_diff": resolved,
+                "mapping": mapping,
+                "workspace": str(ws),
+            }
+            try:
+                (backup_root / "state.json").write_text(json.dumps(state), encoding="utf-8")
+            except Exception:
+                logger.warning("Could not persist apply state for %s", incident_id)
+            self._workspace_apply[incident_id] = state
+            return {"applied": True, "files": affected, "mapping": mapping}
+
+        outcome = await asyncio.to_thread(_do)
+        if outcome.get("applied"):
+            files = outcome.get("files", [])
+            if inc.fix_proposal is not None:
+                inc.fix_proposal["applied_files"] = files
+                inc.fix_proposal["applied_at"] = _utc_iso()
+                if outcome.get("mapping"):
+                    inc.fix_proposal["path_mapping"] = outcome["mapping"]
+                # Sandbox + PR creation should use the resolved diff.
+                try:
+                    resolved_diff, _ = resolve_diff_paths(diff, ws)
+                    inc.fix_proposal["resolved_diff"] = resolved_diff
+                except PatchError:
+                    pass
+            inc.add_activity("changes_applied", "done", f"Applied to {', '.join(files)}")
+            incident_store.update(inc)
+            await emit(inc.id, "changes_applied", "done", f"Changes applied to workspace: {', '.join(files)}")
+            log_operation(logger, incident_id, "apply_fix", "ok")
+        else:
+            inc.add_activity("changes_applied", "failed", outcome.get("reason", "apply failed")[:200])
+            incident_store.update(inc)
+            await emit(inc.id, "changes_applied", "failed", outcome.get("reason", "apply failed")[:300])
+            log_operation(logger, incident_id, "apply_fix", "failed", error=outcome.get("reason"))
+        return outcome
+
+    def _load_apply_state(self, incident_id: str) -> dict[str, Any] | None:
+        state = self._workspace_apply.get(incident_id)
+        if state and Path(state.get("backup", "")).is_dir():
+            return state
+        state_file = _apply_backups_root() / incident_id / "state.json"
+        if state_file.is_file():
+            try:
+                loaded = json.loads(state_file.read_text(encoding="utf-8"))
+                if Path(loaded.get("backup", "")).is_dir():
+                    self._workspace_apply[incident_id] = loaded
+                    return loaded
+            except Exception:
+                return None
+        return None
+
+    def _discard_apply_backup(self, incident_id: str) -> None:
+        self._workspace_apply.pop(incident_id, None)
+        shutil.rmtree(_apply_backups_root() / incident_id, ignore_errors=True)
+
+    async def _restore_workspace_files(self, incident_id: str) -> None:
+        """Restore the workspace files from the pre-apply snapshot."""
+        state = self._load_apply_state(incident_id)
+        if not state:
+            return
+
+        def _do() -> None:
+            backup = Path(state["backup"])
+            ws = Path(state.get("workspace") or "")
+            if not ws.is_dir():
+                return
+            for rel in state.get("files", []):
+                src = backup / rel
+                dst = ws / rel
+                try:
+                    if src.is_file():
+                        dst.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(src, dst)
+                    elif dst.exists():
+                        # The patch created this file — remove it to restore.
+                        dst.unlink(missing_ok=True)
+                except Exception:
+                    logger.warning("Rollback could not restore %s", rel)
+
+        await asyncio.to_thread(_do)
+        self._discard_apply_backup(incident_id)
+
+    async def commit_changes(self, incident_id: str) -> dict[str, Any]:
+        """Create a real git commit in the project workspace for applied changes."""
+        inc = incident_store.get(incident_id)
+        if not inc:
+            raise ValueError(f"incident not found: {incident_id}")
+        proposal = inc.fix_proposal or {}
+        files = proposal.get("applied_files") or []
+        if not files:
+            raise ValueError("No applied changes to commit. Use Keep Changes first.")
+
+        project, ws = self._resolve_project_workspace(inc)
+        if ws is None:
+            raise ValueError("Project workspace is not synchronized.")
+        if not (ws / ".git").is_dir():
+            raise ValueError("Project workspace is not a git repository.")
+
+        summary = proposal.get("summary") or "automated repair"
+        message = f"fix: {summary}\n\napi-doctor incident {incident_id}"
+
+        def _git(*args: str) -> subprocess.CompletedProcess:
+            return subprocess.run(
+                ["git", "-C", str(ws), *args], capture_output=True, text=True, timeout=30
+            )
+
+        def _do() -> dict[str, Any]:
+            # Ensure a commit identity exists in this clone.
+            if not _git("config", "user.email").stdout.strip():
+                _git("config", "user.email", "api-doctor@users.noreply.github.com")
+            if not _git("config", "user.name").stdout.strip():
+                _git("config", "user.name", "API Doctor")
+
+            add = _git("add", "--", *files)
+            if add.returncode != 0:
+                raise RuntimeError(f"git add failed: {(add.stderr or '').strip()[:300]}")
+            staged = _git("diff", "--cached", "--name-only").stdout.strip()
+            if not staged:
+                raise RuntimeError(
+                    "Nothing to commit — the workspace already matches the fix or changes were reverted."
+                )
+            commit = _git("commit", "-m", message)
+            if commit.returncode != 0:
+                raise RuntimeError(f"git commit failed: {(commit.stderr or '').strip()[:300]}")
+            sha = _git("rev-parse", "HEAD").stdout.strip()
+            return {"sha": sha, "files": staged.splitlines()}
+
+        try:
+            outcome = await asyncio.to_thread(_do)
+        except Exception as exc:  # noqa: BLE001
+            inc.add_activity("local_commit", "failed", str(exc)[:200])
+            incident_store.update(inc)
+            await emit(inc.id, "local_commit", "failed", str(exc)[:300])
+            raise
+
+        proposal["commit_sha"] = outcome["sha"]
+        inc.add_activity("local_commit", "done", outcome["sha"][:12])
+        incident_store.update(inc)
+        await emit(inc.id, "local_commit", "done", f"Committed {outcome['sha'][:12]} in workspace")
+        return {"sha": outcome["sha"], "message": message, "files": outcome["files"]}
 
     # ------------------------------------------------------------------
     # Resume from approval pause points
@@ -655,8 +1082,12 @@ class Orchestrator:
         )
         service = GitHubService(gh_client)
 
-        diff = inc.fix_proposal["diff"]
+        diff = inc.fix_proposal.get("resolved_diff") or inc.fix_proposal["diff"]
         changes = self._changes_from_diff(diff)
+        if not changes:
+            raise ValueError(
+                "Could not derive file changes from the proposed diff — the workspace layout may have changed."
+            )
         summary = inc.fix_proposal.get("summary") or "Fix"
         title = f"fix(api-doctor): {summary}"
         body = self._pr_body(inc)

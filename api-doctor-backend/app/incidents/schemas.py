@@ -73,9 +73,12 @@ class IncidentResponse(BaseModel):
     error_message: Optional[str] = None
     attempt_count: int = 0
     activity: list[ProgressEvent] = Field(default_factory=list)
+    applied_files: list[str] = Field(default_factory=list)
+    commit_sha: Optional[str] = None
 
     @classmethod
     def from_model(cls, m: Incident) -> "IncidentResponse":
+        proposal = m.fix_proposal or {}
         return cls(
             id=m.id,
             project_id=m.project_id,
@@ -87,6 +90,8 @@ class IncidentResponse(BaseModel):
             error_message=m.error_message,
             attempt_count=m.attempt_count,
             activity=m.activity,
+            applied_files=proposal.get("applied_files") or [],
+            commit_sha=proposal.get("commit_sha"),
         )
 
 
@@ -116,6 +121,13 @@ class ContextResponse(BaseModel):
     git_log: str = ""
 
 
+class DiffFilePreview(BaseModel):
+    path: str
+    original: str = ""
+    proposed: str = ""
+    error: Optional[str] = None
+
+
 class DiffResponse(BaseModel):
     incident_id: str
     present: bool
@@ -124,6 +136,9 @@ class DiffResponse(BaseModel):
     files_changed: list[str] = Field(default_factory=list)
     risk: Optional[str] = None
     reason: Optional[str] = None
+    applied: bool = False
+    applied_files: list[str] = Field(default_factory=list)
+    files: list[DiffFilePreview] = Field(default_factory=list)
 
 
 class SandboxResponse(BaseModel):

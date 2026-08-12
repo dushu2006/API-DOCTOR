@@ -101,6 +101,71 @@ class ContextBuilder:
         self.repo_root = Path(repo_root).resolve()
         self.retriever.set_repo_root(self.repo_root)
 
+    def identify_files(self, incident: Incident, project_profile: Any = None) -> list[str]:
+        """Identify relevant file paths WITHOUT reading their contents.
+
+        This powers the honest two-phase workflow: first the agent names the
+        files it wants to read (and the user approves), then the files are
+        actually read one by one. Falls back to locating the project's primary
+        entrypoint modules when the stack trace names no resolvable files.
+        """
+        parsed = parse_stack_trace(incident.stack_trace, self.repo_root)
+        project_frames = [f for f in parsed.frames if _is_project_frame(f)]
+        frames = project_frames if project_frames else parsed.frames
+
+        files: list[str] = []
+        for frame in frames:
+            rel = frame.relative_path or self.retriever._to_relative(frame.file)
+            if not rel:
+                continue
+            path = self.repo_root / rel
+            if not path.is_file() or self.retriever._ignored(rel):
+                cand = self.retriever._find_by_name(Path(rel).name)
+                if cand:
+                    rel = self.retriever._to_relative(str(cand)) or rel
+            if not (self.repo_root / rel).is_file() or self.retriever._ignored(rel):
+                continue
+            if rel not in files:
+                files.append(rel)
+            if len(files) >= settings.MAX_CONTEXT_FILES:
+                return files
+
+        if not files:
+            files = self._identify_entrypoints(project_profile)
+        return files[: settings.MAX_CONTEXT_FILES]
+
+    def _identify_entrypoints(self, project_profile: Any = None) -> list[str]:
+        """Locate primary application modules when no trace frames resolve."""
+        candidates: list[str] = []
+        entrypoint = getattr(project_profile, "entrypoint", None)
+        if entrypoint:
+            candidates.append(str(entrypoint))
+        candidates.extend(
+            [
+                "app/main.py",
+                "main.py",
+                "src/main.py",
+                "server.py",
+                "app.py",
+                "src/index.js",
+                "src/index.ts",
+                "index.js",
+                "src/App.jsx",
+                "src/App.tsx",
+            ]
+        )
+        found: list[str] = []
+        for rel in candidates:
+            if (self.repo_root / rel).is_file() and rel not in found:
+                found.append(rel)
+            if len(found) >= 3:
+                break
+        return found
+
+    def parse_trace(self, incident: Incident) -> Any:
+        """Parse the incident stack trace (exposed for live progress events)."""
+        return parse_stack_trace(incident.stack_trace, self.repo_root)
+
     def build(self, incident: Incident, project_profile: Any = None) -> dict:
         parsed = parse_stack_trace(incident.stack_trace, self.repo_root)
 
