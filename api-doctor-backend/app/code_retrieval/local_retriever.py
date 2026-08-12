@@ -31,7 +31,7 @@ class CodeSnippet(dict):
 
 class LocalRetriever:
     def __init__(self, repo_root: Path | str | None = None) -> None:
-        self.repo_root = Path(repo_root or settings.REPO_ROOT).resolve()
+        self.repo_root = Path(repo_root or settings.INTERNAL_REPO_ROOT).resolve()
 
     def set_repo_root(self, repo_root: Path | str) -> None:
         self.repo_root = Path(repo_root).resolve()

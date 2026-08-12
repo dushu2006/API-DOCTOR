@@ -65,7 +65,7 @@ def build_demo_null_pointer_diff(repo_root: str | Path | None = None) -> str:
     if repo_root is None:
         from app.core.config import settings
 
-        root = Path(settings.REPO_ROOT)
+        root = Path(settings.INTERNAL_REPO_ROOT)
     else:
         root = Path(repo_root)
 

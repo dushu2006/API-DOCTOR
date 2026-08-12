@@ -6,6 +6,8 @@ python-dotenv==1.0.1
 httpx==0.28.1
 tenacity==8.2.3
 docker==7.0.0
+SQLAlchemy==2.0.43
+cryptography==45.0.6
 pytest==9.0.1
 pytest-asyncio==1.4.0
 pytest-httpx==0.36.2

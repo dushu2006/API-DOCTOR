@@ -10,7 +10,7 @@ from app.core.config import settings
 from app.sandbox.patch_utils import apply_patch, validate_diff
 from app.tools.registry import Tool, tool_registry
 
-_ROOT = Path(settings.REPO_ROOT).resolve()
+_ROOT = Path(settings.INTERNAL_REPO_ROOT).resolve()
 
 
 def _safe_rel(path: str) -> Path:
@@ -98,10 +98,15 @@ async def _get_deployment_status(project_id: str = "default") -> dict:
     from app.render.client import RenderClient
 
     project = project_store.get(project_id)
-    if not project or not project.render_service_id:
+    render = project_store.resolve_render(project_id)
+    if not project or not render.get("service_id"):
         return {"present": False, "note": "no Render service mapped for project"}
-    client = RenderClient(service_id=project.render_service_id)
-    return await client.get_deployment_status(service_id=project.render_service_id)
+    client = RenderClient(
+        api_key=render.get("api_key", ""),
+        service_id=render.get("service_id", ""),
+        owner_id=render.get("owner_id", ""),
+    )
+    return await client.get_deployment_status(service_id=render.get("service_id"))
 
 
 async def _run_test(incident_id: str) -> dict:

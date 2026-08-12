@@ -57,7 +57,7 @@ class SandboxRunner:
         repo_root: Path | str | None = None,
         project_profile: ProjectProfile | None = None,
     ) -> None:
-        self.repo_root = Path(repo_root or settings.REPO_ROOT).resolve()
+        self.repo_root = Path(repo_root or settings.INTERNAL_REPO_ROOT).resolve()
         self.project_profile = project_profile
         self.workspace_mgr = WorkspaceManager(self.repo_root)
         self.mode = settings.SANDBOX_MODE.lower()

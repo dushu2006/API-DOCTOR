@@ -31,6 +31,7 @@ from app.incidents.models import Incident, IncidentStatus
 from app.incidents.store import incident_store
 from app.projects.store import project_store
 from app.sandbox.sandbox_runner import SandboxResult, SandboxRunner
+from app.security.sanitizer import redact_text, sanitize
 
 logger = logging.getLogger(__name__)
 
@@ -85,20 +86,26 @@ class Orchestrator:
         request_snapshot: dict | None = None,
     ) -> Incident:
         """Create an incident from external log ingestion (Render, CI, manual)."""
-        trace = stack_trace or raw_logs or message
-        err_msg = message or (trace.splitlines()[-1] if trace else "Incident detected from logs")
+        safe_raw_logs = redact_text(raw_logs or "")
+        safe_trace = redact_text(stack_trace or safe_raw_logs or message)
+        safe_message = redact_text(
+            message or (safe_trace.splitlines()[-1] if safe_trace else "Incident detected from logs")
+        )
+        safe_request_snapshot = sanitize(
+            request_snapshot or {"method": method, "path": endpoint}
+        )
 
         detection = {
             "error": True,
             "status_code": status_code,
-            "error_message": err_msg,
-            "stack_trace": trace,
+            "error_message": safe_message,
+            "stack_trace": safe_trace,
             "endpoint": endpoint,
             "method": method,
             "service": service_id or "production",
             "source": source,
-            "raw_logs": raw_logs,
-            "request_snapshot": request_snapshot or {"method": method, "path": endpoint},
+            "raw_logs": safe_raw_logs,
+            "request_snapshot": safe_request_snapshot,
             "response_snapshot": {},
         }
 
@@ -106,15 +113,15 @@ class Orchestrator:
             project_id=project_id,
             status=IncidentStatus.RECEIVED,
             detection=detection,
-            request_snapshot=request_snapshot or {"method": method, "path": endpoint},
-            stack_trace=trace,
+            request_snapshot=safe_request_snapshot,
+            stack_trace=safe_trace,
         )
         incident_store.create(incident)
         incident.add_activity("logs_retrieved", "done", "Logs retrieved")
         incident.add_activity("error_detected", "done", "Error detected")
         incident_store.update(incident)
 
-        log_operation(logger, incident.id, "ingest", "ok", error=err_msg[:200])
+        log_operation(logger, incident.id, "ingest", "ok", error=safe_message[:200])
         await emit(incident.id, "logs_retrieved", "done", "Logs retrieved")
         await emit(incident.id, "error_detected", "done", "Error detected")
         return incident
@@ -199,7 +206,12 @@ class Orchestrator:
 
         # Determine the project and workspace
         project = project_store.get(inc.project_id) or project_store.get_current()
-        workspace_path = project.workspace_path if (project and project.workspace_path and Path(project.workspace_path).is_dir()) else settings.REPO_ROOT
+        if project and project.workspace_path and Path(project.workspace_path).is_dir():
+            workspace_path = project.workspace_path
+        elif settings.DEMO_MODE:
+            workspace_path = settings.INTERNAL_REPO_ROOT
+        else:
+            raise RuntimeError("No synchronized workspace is available for the selected project.")
         profile = project.profile if project else None
 
         self.context_builder.set_repo_root(workspace_path)
@@ -481,12 +493,13 @@ class Orchestrator:
                 raise ValueError("Cannot create PR: fix has not passed sandbox verification gates.")
 
         project = project_store.get(inc.project_id) or project_store.get_current()
-        token = project.github_token if project else settings.GITHUB_TOKEN
-        owner = project.github_owner if project else settings.GITHUB_OWNER
-        repo = project.github_repo if project else settings.GITHUB_REPO
-        branch = project.github_branch if project else settings.GITHUB_DEFAULT_BRANCH
-
-        gh_client = GitHubClient(token=token, owner=owner, repo=repo, default_branch=branch)
+        github = project_store.resolve_github(project.id if project else None)
+        gh_client = GitHubClient(
+            token=github.get("token", ""),
+            owner=github.get("owner", ""),
+            repo=github.get("repo", ""),
+            default_branch=github.get("branch", "main"),
+        )
         service = GitHubService(gh_client)
 
         diff = inc.fix_proposal["diff"]
@@ -527,12 +540,13 @@ class Orchestrator:
             return {"present": False, "error": "incident not found"}
 
         project = project_store.get(inc.project_id) or project_store.get_current()
-        token = project.github_token if project else settings.GITHUB_TOKEN
-        owner = project.github_owner if project else settings.GITHUB_OWNER
-        repo = project.github_repo if project else settings.GITHUB_REPO
-        branch = project.github_branch if project else settings.GITHUB_DEFAULT_BRANCH
-
-        gh_client = GitHubClient(token=token, owner=owner, repo=repo, default_branch=branch)
+        github = project_store.resolve_github(project.id if project else None)
+        gh_client = GitHubClient(
+            token=github.get("token", ""),
+            owner=github.get("owner", ""),
+            repo=github.get("repo", ""),
+            default_branch=github.get("branch", "main"),
+        )
         service = GitHubService(gh_client)
         return await service.pr_status(incident_id, inc.pr_info)
 

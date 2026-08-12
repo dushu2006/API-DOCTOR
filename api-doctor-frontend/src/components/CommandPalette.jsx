@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Search, Stethoscope, Columns, Terminal, GitBranch, Play, X } from 'lucide-react';
+import { Search, Stethoscope, Columns, Terminal, Play, X } from 'lucide-react';
 
 export default function CommandPalette({ isOpen, onClose, setCurrentState, setIsDiffMode, setActiveBottomTab }) {
   const [query, setQuery] = useState('');
