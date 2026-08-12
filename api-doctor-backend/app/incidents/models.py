@@ -28,6 +28,10 @@ class IncidentStatus(str, Enum):
     REQUIRES_HUMAN_REVIEW = "REQUIRES_HUMAN_REVIEW"
     CANCELLED = "CANCELLED"
 
+    # Interactive workflow pause points (user approval required)
+    AWAITING_FILE_READ_APPROVAL = "AWAITING_FILE_READ_APPROVAL"
+    AWAITING_FIX_APPROVAL = "AWAITING_FIX_APPROVAL"
+
     # Backward compatibility aliases
     DETECTED = "DETECTED"
     COLLECTING_CONTEXT = "COLLECTING_CONTEXT"
@@ -53,6 +57,14 @@ class IncidentStatus(str, Enum):
             IncidentStatus.VERIFICATION_FAILED,
             IncidentStatus.REPAIR_LIMIT_REACHED,
             IncidentStatus.AWAITING_REVIEW,
+        }
+
+    @property
+    def is_paused(self) -> bool:
+        """Status is paused waiting for user approval."""
+        return self in {
+            IncidentStatus.AWAITING_FILE_READ_APPROVAL,
+            IncidentStatus.AWAITING_FIX_APPROVAL,
         }
 
     @property

@@ -28,6 +28,9 @@ const ACTIVE_DIAGNOSIS_STATUSES = new Set([
   'SANDBOX_TESTING',
   'TESTING',
   'VERIFYING',
+  // Interactive workflow pause points (still active, waiting for user)
+  'AWAITING_FILE_READ_APPROVAL',
+  'AWAITING_FIX_APPROVAL',
 ]);
 
 export default function App() {
@@ -492,6 +495,14 @@ export default function App() {
         if (res.diagnosis_started) setIsDiagnosing(true);
         await refreshProjectData(currentProject.id);
         fetchIncidentDetails(res.incidents_created[0]);
+      } else if (!res.incidents_created?.length) {
+        // No incidents detected - surface this clearly to the user
+        alert(
+          `Synced ${res.logs_retrieved ?? 0} log entries but found no ` +
+          `new incidents. Check the Logs tab, or use "Ingest & Start ` +
+          `Diagnosis" to manually diagnose a specific error.`
+        );
+        return;
       }
     } catch (err) {
       alert(`Failed to sync logs: ${err.message}`);
@@ -582,6 +593,26 @@ export default function App() {
       await fetchIncidentDetails(activeIncidentId);
     } catch (err) {
       alert(`Failed to record approval: ${err.message}`);
+    }
+  };
+
+  const handleApproveFileRead = async (approved) => {
+    if (!activeIncidentId) return;
+    try {
+      await api.approveFileRead(activeIncidentId, approved);
+      await fetchIncidentDetails(activeIncidentId);
+    } catch (err) {
+      alert(`Failed to record file read approval: ${err.message}`);
+    }
+  };
+
+  const handleApproveFixProposal = async (approved) => {
+    if (!activeIncidentId) return;
+    try {
+      await api.approveFixProposal(activeIncidentId, approved);
+      await fetchIncidentDetails(activeIncidentId);
+    } catch (err) {
+      alert(`Failed to record fix approval: ${err.message}`);
     }
   };
 
@@ -704,6 +735,8 @@ export default function App() {
             timelineEvents={timelineEvents}
             isDiagnosing={isDiagnosing}
             onApproveFix={handleApproveFix}
+            onApproveFileRead={handleApproveFileRead}
+            onApproveFixProposal={handleApproveFixProposal}
             onCreatePR={handleCreatePR}
             onSelectIncident={(id) => setActiveIncidentId(id)}
             onSyncRender={handleSyncRender}

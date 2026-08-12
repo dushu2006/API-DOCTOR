@@ -164,6 +164,14 @@ export const api = {
     method: 'POST',
     body: JSON.stringify({ approved })
   }),
+  approveFileRead: (id, approved = true) => request(`/api/incidents/${id}/approve-file-read`, {
+    method: 'POST',
+    body: JSON.stringify({ approved })
+  }),
+  approveFixProposal: (id, approved = true) => request(`/api/incidents/${id}/approve-fix`, {
+    method: 'POST',
+    body: JSON.stringify({ approved })
+  }),
   createPR: (id) => request(`/api/incidents/${id}/create-pr`, {
     method: 'POST',
     body: JSON.stringify({ approved: true })
