@@ -1,8 +1,5 @@
-"""A simple local AI client used as a fallback for development/testing.
+"""Deterministic local AI mock client for development/testing."""
 
-Returns deterministic, minimal responses suitable for pipeline execution
-without external API access.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -37,8 +34,6 @@ _BUGS_NEW = (
     "        token = user.payment_method.token\n"
 )
 
-# Static last-resort hunk. Line 121 is the crashing token access in bugs.py.
-# Even if the header drifts, patch_utils relocates hunks by content.
 _STATIC_BUGS_DIFF = """--- a/app/demo_api/bugs.py
 +++ b/app/demo_api/bugs.py
 @@ -121,1 +121,4 @@
@@ -66,11 +61,7 @@ def _unified(rel: str, original: str, fixed: str) -> str:
 
 
 def build_demo_null_pointer_diff(repo_root: str | Path | None = None) -> str:
-    """Build a unified diff that applies cleanly to the current demo API.
-
-    Prefers the router-level 400 (same fix the e2e/sandbox tests use). Falls
-    back to a guard inside ``charge_user`` if the router marker is missing.
-    """
+    """Build a unified diff that applies cleanly to the current demo API."""
     if repo_root is None:
         from app.core.config import settings
 
@@ -113,7 +104,7 @@ def _extract_first_json_object(text: str, start_at: int = 0) -> dict[str, Any] |
 
 
 def _schema_defaults(schema: dict[str, Any]) -> dict[str, Any]:
-    """Fill a JSON-schema-shaped response with deterministic demo values."""
+    """Fill a JSON-schema-shaped response with deterministic values."""
     props = schema.get("properties", {}) or {}
     required = schema.get("required", []) or []
     out: dict[str, Any] = {}
@@ -121,13 +112,24 @@ def _schema_defaults(schema: dict[str, Any]) -> dict[str, Any]:
     known: dict[str, Any] = {
         "confidence": 0.95,
         "root_cause": "Null pointer dereference: payment_method is None",
-        "category": "bug",
+        "classification": "CODE_BUG",
+        "category": "CODE_BUG",
         "affected_files": [_BUGS_REL, _ROUTER_REL],
+        "affected_lines": [121],
         "affected_functions": ["charge_user", "charge"],
+        "evidence": ["AttributeError on line 121"],
+        "recommended_action": "Check for null before dereferencing token",
         "safe_to_repair": True,
         "risk": "low",
         "summary": "Gracefully handle missing payment method",
         "files_changed": [_ROUTER_REL],
+        "files": [
+            {
+                "path": _ROUTER_REL,
+                "patch": build_demo_null_pointer_diff(),
+                "reason": "Add check before charge",
+            }
+        ],
         "reason": "user.payment_method can be None; accessing .token crashes with AttributeError",
         "diff": build_demo_null_pointer_diff(),
     }
@@ -166,9 +168,6 @@ class MockAIClient(AIClient):
         response_format: dict | None = None,
         stream: bool = False,
     ) -> dict[str, Any]:
-        # If the prompt includes a JSON schema instruction, synthesize a
-        # minimal valid response matching the required fields. Otherwise
-        # return a generic mocked JSON.
         joined = "\n".join(m.get("content", "") for m in messages)
         logger.info("MockAIClient received messages preview: %s", joined[:500])
 
@@ -178,29 +177,23 @@ class MockAIClient(AIClient):
         if idx != -1:
             schema = _extract_first_json_object(joined, idx)
 
-        # If we didn't find the explicit marker, attempt to extract any
-        # JSON object in the prompt as a fallback (useful when formatting
-        # differs slightly).
         if schema is None:
             schema = _extract_first_json_object(joined)
 
         if schema and isinstance(schema, dict) and schema.get("properties"):
-            logger.info(
-                "MockAIClient detected schema with properties: %s required: %s",
-                list(schema.get("properties", {}).keys())[:10],
-                schema.get("required", [])[:10],
-            )
             content = json.dumps(_schema_defaults(schema))
         else:
-            # Provide a default RootCauseAnalysis-like object so downstream
-            # validators have a high-confidence response in sandbox mode.
             content = json.dumps(
                 {
                     "root_cause": "Null pointer dereference: payment_method is None",
-                    "category": "bug",
+                    "classification": "CODE_BUG",
+                    "category": "CODE_BUG",
                     "confidence": 0.95,
                     "affected_files": [_BUGS_REL, _ROUTER_REL],
+                    "affected_lines": [121],
                     "affected_functions": ["charge_user", "charge"],
+                    "evidence": ["AttributeError on line 121"],
+                    "recommended_action": "Check for null before dereferencing token",
                     "safe_to_repair": True,
                     "reason": "payment_method may be None when charging user",
                     "summary": "Gracefully handle missing payment method",
@@ -210,7 +203,7 @@ class MockAIClient(AIClient):
                 }
             )
 
-        await asyncio.sleep(0)  # keep it async
+        await asyncio.sleep(0)
         return {
             "choices": [{"message": {"role": "assistant", "content": content}}],
             "usage": {},
@@ -218,7 +211,6 @@ class MockAIClient(AIClient):
         }
 
     async def embed(self, model: str, texts: list[str]) -> list[list[float]]:
-        # Return zero-vector embeddings of length 8 for simplicity.
         return [[0.0] * 8 for _ in texts]
 
     async def check_health(self) -> bool:

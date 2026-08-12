@@ -8,27 +8,11 @@ import {
   Folder,
   FolderOpen,
   Search,
-  CheckCircle2
+  CheckCircle2,
+  RefreshCw
 } from 'lucide-react';
 
-const BASE_FILE_PATHS = [
-  'app/main.py',
-  'app/orchestrator.py',
-  'app/agent/fix_agent.py',
-  'app/agent/llm_client.py',
-  'app/agent/root_cause_agent.py',
-  'app/demo_api/bugs.py',
-  'app/demo_api/models.py',
-  'app/demo_api/router.py',
-  'app/incidents/models.py',
-  'app/incidents/router.py',
-  'app/incidents/store.py',
-  '.env.example',
-  'README.md',
-  'requirements.txt'
-];
-
-function buildFileTree(paths) {
+function buildFileTreeFromPaths(paths) {
   const root = [];
   for (const path of paths) {
     const parts = path.split('/').filter(Boolean);
@@ -58,36 +42,55 @@ function buildFileTree(paths) {
 export default function Explorer({ 
   selectedFile, 
   setSelectedFile, 
-  fileStatuses,
-  explorerWidth,
-  isExplorerOpen
+  fileStatuses = {},
+  explorerWidth = 240,
+  isExplorerOpen = true,
+  filesList = [],
+  filesTree = null,
+  projectName = 'Project Workspace',
+  onRefresh
 }) {
   const [searchQuery, setSearchQuery] = useState('');
-  const [openFolders, setOpenFolders] = useState({
-    app: true,
-    'app/agent': true,
-    'app/demo_api': true,
-    'app/incidents': true
-  });
+  const [openFolders, setOpenFolders] = useState({});
   const [contextMenu, setContextMenu] = useState(null);
-  const fileTree = useMemo(
-    () => buildFileTree(Array.from(new Set([
-      ...BASE_FILE_PATHS,
+
+  const fileTree = useMemo(() => {
+    if (filesTree && filesTree.length > 0) {
+      return filesTree;
+    }
+    const combinedPaths = Array.from(new Set([
+      ...filesList,
       ...Object.keys(fileStatuses || {}),
       ...(selectedFile ? [selectedFile] : [])
-    ]))),
-    [fileStatuses, selectedFile]
-  );
+    ]));
+    return buildFileTreeFromPaths(combinedPaths);
+  }, [filesTree, filesList, fileStatuses, selectedFile]);
 
   if (!isExplorerOpen) return null;
 
   const toggleFolder = (folderKey) => {
-    setOpenFolders(prev => ({ ...prev, [folderKey]: !prev[folderKey] }));
+    setOpenFolders(prev => ({
+      ...prev,
+      [folderKey]: prev[folderKey] === undefined ? false : !prev[folderKey]
+    }));
+  };
+
+  const isFolderOpen = (key) => {
+    if (openFolders[key] !== undefined) return openFolders[key];
+    // Default top-level folders open
+    return !key.includes('/') || key.split('/').length <= 2;
   };
 
   const getFileIcon = (ext) => {
-    switch (ext) {
+    switch (ext?.toLowerCase()) {
       case 'py': return <FileCode size={14} style={{ color: '#3572A5' }} />;
+      case 'js':
+      case 'jsx': return <FileCode size={14} style={{ color: '#F7DF1E' }} />;
+      case 'ts':
+      case 'tsx': return <FileCode size={14} style={{ color: '#3178C6' }} />;
+      case 'go': return <FileCode size={14} style={{ color: '#00ADD8' }} />;
+      case 'rs': return <FileCode size={14} style={{ color: '#DEA584' }} />;
+      case 'json': return <FileText size={14} style={{ color: '#CBCB41' }} />;
       case 'env': return <FileLock size={14} style={{ color: '#E8A23D' }} />;
       case 'md': return <FileText size={14} style={{ color: '#7C8CF8' }} />;
       default: return <FileText size={14} style={{ color: 'var(--text-muted)' }} />;
@@ -137,21 +140,23 @@ export default function Explorer({
   const matchesSearch = (item) => {
     if (!searchQuery) return true;
     if (item.type === 'file') {
-      return item.path.toLowerCase().includes(searchQuery.toLowerCase());
+      return (item.path || item.name).toLowerCase().includes(searchQuery.toLowerCase());
     }
-    return item.children.some(matchesSearch);
+    return item.children ? item.children.some(matchesSearch) : false;
   };
 
   const renderTree = (items, depth = 0) => {
     return items.map((item) => {
       if (!matchesSearch(item)) return null;
 
-      if (item.type === 'folder') {
-        const isOpen = searchQuery ? true : openFolders[item.key];
+      const itemKey = item.key || item.path || item.name;
+
+      if (item.type === 'folder' || item.children) {
+        const isOpen = searchQuery ? true : isFolderOpen(itemKey);
         return (
-          <div key={item.key}>
+          <div key={itemKey}>
             <div
-              onClick={() => toggleFolder(item.key)}
+              onClick={() => toggleFolder(itemKey)}
               style={{
                 display: 'flex',
                 alignItems: 'center',
@@ -168,20 +173,22 @@ export default function Explorer({
               {isOpen ? <FolderOpen size={14} style={{ color: '#7C8CF8' }} /> : <Folder size={14} style={{ color: 'var(--text-muted)' }} />}
               <span>{item.name}</span>
             </div>
-            {isOpen && renderTree(item.children, depth + 1)}
+            {isOpen && item.children && renderTree(item.children, depth + 1)}
           </div>
         );
       } else {
-        const isSelected = selectedFile === item.path;
+        const filePath = item.path || item.name;
+        const isSelected = selectedFile === filePath;
+        const ext = item.ext || (filePath.includes('.') ? filePath.split('.').pop() : '');
         return (
           <div
-            key={item.path}
-            onClick={() => setSelectedFile(item.path)}
+            key={filePath}
+            onClick={() => setSelectedFile(filePath)}
             onContextMenu={(e) => handleContextMenu(e, item)}
             style={{
               display: 'flex',
               alignItems: 'center',
-              justify: 'space-between',
+              justifyContent: 'space-between',
               paddingLeft: `${depth * 14 + 12}px`,
               paddingRight: '12px',
               height: '26px',
@@ -194,11 +201,11 @@ export default function Explorer({
             }}
             className="hover-bg"
           >
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-              {getFileIcon(item.ext)}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {getFileIcon(ext)}
               <span>{item.name}</span>
             </div>
-            {renderStatusSuffix(item.path)}
+            {renderStatusSuffix(filePath)}
           </div>
         );
       }
@@ -225,7 +232,7 @@ export default function Explorer({
         padding: '0 12px',
         display: 'flex',
         alignItems: 'center',
-        justify: 'space-between',
+        justifyContent: 'space-between',
         borderBottom: '1px solid var(--border-color)'
       }}>
         <span style={{ 
@@ -233,13 +240,22 @@ export default function Explorer({
           fontWeight: 700, 
           letterSpacing: '0.08em', 
           color: 'var(--text-muted)',
-          fontFamily: 'var(--font-heading)' 
+          fontFamily: 'var(--font-heading)',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap'
         }}>
-          EXPLORER
+          {projectName.toUpperCase()}
         </span>
-        <span style={{ fontSize: '10px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
-          retrieved context
-        </span>
+        {onRefresh && (
+          <button 
+            onClick={onRefresh}
+            title="Refresh repository files"
+            style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', display: 'flex', alignItems: 'center' }}
+          >
+            <RefreshCw size={12} />
+          </button>
+        )}
       </div>
 
       {/* Search Input */}
@@ -256,7 +272,7 @@ export default function Explorer({
           <Search size={13} style={{ color: 'var(--text-muted)' }} />
           <input 
             type="text"
-            placeholder="Search files..."
+            placeholder="Search repository files..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             style={{
@@ -274,7 +290,13 @@ export default function Explorer({
 
       {/* Tree Content */}
       <div style={{ flex: 1, overflowY: 'auto', paddingTop: '4px' }}>
-        {renderTree(fileTree)}
+        {fileTree.length > 0 ? (
+          renderTree(fileTree)
+        ) : (
+          <div style={{ padding: '20px 12px', fontSize: '11px', color: 'var(--text-muted)', textAlign: 'center' }}>
+            No repository files loaded yet.
+          </div>
+        )}
       </div>
 
       {/* Right Click Context Menu */}
@@ -292,10 +314,10 @@ export default function Explorer({
           width: '150px',
           fontSize: '12px'
         }}>
-          <div style={{ padding: '6px 12px', cursor: 'pointer' }} onClick={() => setSelectedFile(contextMenu.file.path)}>Open</div>
+          <div style={{ padding: '6px 12px', cursor: 'pointer' }} onClick={() => setSelectedFile(contextMenu.file.path || contextMenu.file.name)}>Open</div>
           <div
             style={{ padding: '6px 12px', cursor: 'pointer' }}
-            onClick={() => navigator.clipboard.writeText(contextMenu.file.path)}
+            onClick={() => navigator.clipboard.writeText(contextMenu.file.path || contextMenu.file.name)}
           >
             Copy Path
           </div>

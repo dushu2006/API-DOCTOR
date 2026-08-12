@@ -16,6 +16,7 @@ os.environ.setdefault("SANDBOX_MODE", "local")
 os.environ.setdefault("REPO_ROOT", _REPO_ROOT)
 os.environ.setdefault("MAX_REPAIR_ATTEMPTS", "2")
 os.environ.setdefault("AUTO_CREATE_PR", "false")
+os.environ.setdefault("DEMO_MODE", "true")
 
 # GitHub/Render client tests use these (mocked over HTTP).
 os.environ.setdefault("GITHUB_TOKEN", "test-token")

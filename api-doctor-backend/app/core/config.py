@@ -23,6 +23,13 @@ class Settings(BaseSettings):
     )
 
     # ------------------------------------------------------------------
+    # Operational Mode
+    # ------------------------------------------------------------------
+    # DEMO_MODE=false is default (REAL PROJECT MODE).
+    # Only when DEMO_MODE=true may the demo_api patient be mounted / used.
+    DEMO_MODE: bool = False
+
+    # ------------------------------------------------------------------
     # NVIDIA NIM (initial AI provider)
     # ------------------------------------------------------------------
     NVIDIA_API_KEY: str = ""
@@ -106,11 +113,12 @@ class Settings(BaseSettings):
     MIN_ROOT_CAUSE_CONFIDENCE: float = 0.6
 
     # ------------------------------------------------------------------
-    # Repository / environment
+    # Repository / Workspace
     # ------------------------------------------------------------------
     REPO_ROOT: str = str(Path(__file__).resolve().parent.parent.parent)
-    # The "patient" demo API (used by the detector). When empty we call the
-    # in-process FastAPI app directly, which makes the demo self-contained.
+    WORKSPACE_DIR: str = str(Path(__file__).resolve().parent.parent.parent / "workspace")
+
+    # The "patient" demo API (used by the detector in demo mode).
     DEMO_API_BASE_URL: str = ""
 
     # ------------------------------------------------------------------
@@ -124,11 +132,11 @@ class Settings(BaseSettings):
 
     @property
     def has_github(self) -> bool:
-        return bool(self.GITHUB_TOKEN)
+        return bool(self.GITHUB_OWNER and self.GITHUB_REPO)
 
     @property
     def has_render(self) -> bool:
-        return bool(self.RENDER_API_KEY)
+        return bool(self.RENDER_API_KEY and self.RENDER_SERVICE_ID)
 
     def secret_scan_patterns(self) -> list[str]:
         """High-value secret names for sanitisation (case-insensitive)."""

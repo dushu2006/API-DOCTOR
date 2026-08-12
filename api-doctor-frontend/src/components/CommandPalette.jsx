@@ -22,11 +22,11 @@ export default function CommandPalette({ isOpen, onClose, setCurrentState, setIs
   if (!isOpen) return null;
 
   const actions = [
-    { id: 'diagnose', label: 'Start API Doctor Diagnosis', icon: Stethoscope, run: () => { setCurrentState('diagnosing'); onClose(); } },
-    { id: 'diff', label: 'Toggle Diff Split View', icon: Columns, run: () => { setIsDiffMode(true); onClose(); } },
-    { id: 'terminal', label: 'Open Terminal Panel', icon: Terminal, run: () => { setActiveBottomTab('terminal'); onClose(); } },
-    { id: 'tests', label: 'Run Regression Test Suite', icon: Play, run: () => { setActiveBottomTab('tests'); onClose(); } },
-    { id: 'branch', label: 'Switch Git Branch...', icon: GitBranch, run: () => { onClose(); } }
+    { id: 'diagnose', label: 'Start API Doctor Diagnosis', icon: Stethoscope, run: () => { if (setCurrentState) setCurrentState(); onClose(); } },
+    { id: 'diff', label: 'Toggle Diff Split View', icon: Columns, run: () => { if (setIsDiffMode) setIsDiffMode(prev => !prev); onClose(); } },
+    { id: 'terminal', label: 'Open Terminal Panel', icon: Terminal, run: () => { if (setActiveBottomTab) setActiveBottomTab('terminal'); onClose(); } },
+    { id: 'tests', label: 'View Sandbox Test Results', icon: Play, run: () => { if (setActiveBottomTab) setActiveBottomTab('tests'); onClose(); } },
+    { id: 'logs', label: 'View Runtime Exception Logs', icon: Terminal, run: () => { if (setActiveBottomTab) setActiveBottomTab('logs'); onClose(); } },
   ];
 
   const filtered = actions.filter(a => a.label.toLowerCase().includes(query.toLowerCase()));
@@ -43,7 +43,7 @@ export default function CommandPalette({ isOpen, onClose, setCurrentState, setIs
       zIndex: 1000,
       display: 'flex',
       alignItems: 'flex-start',
-      justify: 'center',
+      justifyContent: 'center',
       paddingTop: '80px'
     }} onClick={onClose}>
       <div 

@@ -20,7 +20,7 @@ export default function BottomPanel({
   incidentSandbox,
   activeBottomTab, 
   setActiveBottomTab,
-  bottomHeight,
+  bottomHeight = 220,
   isBottomCollapsed,
   setIsBottomCollapsed
 }) {
@@ -51,7 +51,7 @@ export default function BottomPanel({
         borderTop: '1px solid var(--border-color)',
         display: 'flex',
         alignItems: 'center',
-        justify: 'space-between',
+        justifyContent: 'space-between',
         padding: '0 12px',
         userSelect: 'none'
       }}>
@@ -90,7 +90,7 @@ export default function BottomPanel({
         borderBottom: '1px solid var(--border-color)',
         display: 'flex',
         alignItems: 'center',
-        justify: 'space-between',
+        justifyContent: 'space-between',
         padding: '0 12px'
       }}>
         <div style={{ display: 'flex', height: '100%' }}>
@@ -146,14 +146,15 @@ export default function BottomPanel({
         {/* Terminal Tab */}
         {activeBottomTab === 'terminal' && (
           <div style={{ color: 'var(--text-primary)', lineHeight: 1.6 }}>
-            <div style={{ color: 'var(--text-muted)' }}>$ python -m uvicorn app.main:app --port 8000</div>
-            <div>INFO:     Started server process [8000]</div>
-            <div>INFO:     Waiting for application startup.</div>
-            <div>INFO:     Application startup complete.</div>
-            <div>INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)</div>
-            {activeIncident && (
-              <div style={{ color: 'var(--color-warning)' }}>
-                INFO:     API Doctor handling active incident {activeIncident.id} ({activeIncident.status})
+            <div style={{ color: 'var(--text-muted)' }}>[WORKSPACE] API Doctor Diagnostic Environment</div>
+            <div>[STATUS] Connected to backend service.</div>
+            {activeIncident ? (
+              <div style={{ color: 'var(--color-accent)', marginTop: '4px' }}>
+                [ACTIVE] Incident #{activeIncident.id.slice(0, 8)} ({activeIncident.status})
+              </div>
+            ) : (
+              <div style={{ color: 'var(--text-muted)', marginTop: '4px' }}>
+                [READY] Select an incident or ingest production logs to begin diagnosis.
               </div>
             )}
           </div>
@@ -164,16 +165,16 @@ export default function BottomPanel({
           <div style={{ color: 'var(--text-primary)', lineHeight: 1.6 }}>
             {activeIncident ? (
               <>
-                <div>[{new Date(activeIncident.created_at).toLocaleTimeString()}] [INFO] Incident #{activeIncident.id.slice(0, 8)} detected on endpoint {activeIncident.detection?.endpoint}</div>
+                <div>[{new Date(activeIncident.created_at).toLocaleTimeString()}] [INFO] Incident #{activeIncident.id.slice(0, 8)} ({activeIncident.detection?.source || 'production'})</div>
                 <div>[{new Date(activeIncident.updated_at).toLocaleTimeString()}] [STATUS] Current stage: {activeIncident.status}</div>
                 {incidentContext?.stack_trace && (
                   <div style={{ color: 'var(--color-failure)', marginTop: '4px' }}>
-                    [STACK TRACE] {incidentContext.stack_trace.split('\n')[0]}
+                    [ERROR] {incidentContext.stack_trace.split('\n')[0]}
                   </div>
                 )}
               </>
             ) : (
-              <div style={{ color: 'var(--text-muted)' }}>No backend output log for active incident.</div>
+              <div style={{ color: 'var(--text-muted)' }}>No active incident output.</div>
             )}
           </div>
         )}
@@ -186,7 +187,7 @@ export default function BottomPanel({
                 <Search size={12} style={{ color: 'var(--text-muted)' }} />
                 <input 
                   type="text" 
-                  placeholder="Filter backend logs..."
+                  placeholder="Filter runtime logs..."
                   value={logFilter}
                   onChange={e => setLogFilter(e.target.value)}
                   style={{ background: 'none', border: 'none', color: 'var(--text-primary)', fontSize: '11px', outline: 'none' }}
@@ -199,7 +200,7 @@ export default function BottomPanel({
                 {incidentContext.stack_trace}
               </pre>
             ) : (
-              <div style={{ color: 'var(--text-muted)' }}>No runtime exception logs captured.</div>
+              <div style={{ color: 'var(--text-muted)' }}>No exception logs captured for this incident.</div>
             )}
           </div>
         )}
@@ -235,10 +236,10 @@ export default function BottomPanel({
                   {incidentDiff.diff.split('\n').map((line, idx) => {
                     let bg = 'transparent';
                     let color = 'var(--text-primary)';
-                    if (line.startsWith('+')) {
+                    if (line.startsWith('+') && !line.startsWith('+++')) {
                       bg = 'var(--diff-add-bg)';
                       color = 'var(--diff-add-text)';
-                    } else if (line.startsWith('-')) {
+                    } else if (line.startsWith('-') && !line.startsWith('---')) {
                       bg = 'var(--diff-remove-bg)';
                       color = 'var(--diff-remove-text)';
                     }

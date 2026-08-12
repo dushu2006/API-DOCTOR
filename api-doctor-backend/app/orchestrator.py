@@ -1,19 +1,15 @@
 """Central workflow engine.
 
-Drives: detect -> create incident -> collect context -> retrieve relevant code
+Drives: detect/ingest -> create incident -> collect context -> retrieve relevant code
 -> root cause analysis -> fix generation -> sandbox (reproduce/patch/tests/
-verify) -> GitHub PR. It contains no provider-specific implementation details —
-it composes the service/client classes.
+verify) -> GitHub PR.
 
 Guarantees:
-    * never modifies production directly,
+    * operates on isolated copies of real GitHub repositories,
+    * never modifies main directly,
     * never auto-merges,
     * bounded repair attempts,
     * secrets are never sent to the LLM or exposed to the frontend.
-
-Latency / streaming improvements:
-- Emits progress events to the SSE hub so dashboard shows live "working..."
-- Uses trimmed context (project-relevant frames only) for faster AI calls
 """
 
 from __future__ import annotations
@@ -21,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from pathlib import Path
 from typing import Any
 
 from app.agent.fix_agent import FixAgent, FixProposal
@@ -32,6 +29,7 @@ from app.detector.failure_detector import FailureDetector
 from app.events.hub import emit
 from app.incidents.models import Incident, IncidentStatus
 from app.incidents.store import incident_store
+from app.projects.store import project_store
 from app.sandbox.sandbox_runner import SandboxResult, SandboxRunner
 
 logger = logging.getLogger(__name__)
@@ -44,10 +42,6 @@ class Orchestrator:
         self.root_cause_agent = RootCauseAgent()
         self.fix_agent = FixAgent()
         self.sandbox_runner = SandboxRunner()
-        # The registry closes the small gap between accepting a diagnosis
-        # request and the background coroutine advancing the incident status.
-        # Without it, two requests in the same event-loop tick can launch two
-        # pipelines that mutate the same Incident instance concurrently.
         self._pipeline_tasks: dict[str, asyncio.Task[Incident | None]] = {}
 
     # ------------------------------------------------------------------
@@ -76,12 +70,57 @@ class Orchestrator:
         await emit(incident.id, "error_detected", "done", f"{method} {endpoint}")
         return incident
 
-    def start_diagnosis(self, incident_id: str) -> bool:
-        """Start one background pipeline for an incident.
+    async def ingest_incident(
+        self,
+        *,
+        source: str = "manual",
+        raw_logs: str = "",
+        stack_trace: str = "",
+        message: str = "",
+        endpoint: str = "",
+        method: str = "GET",
+        status_code: int = 500,
+        service_id: str = "",
+        project_id: str = "default",
+        request_snapshot: dict | None = None,
+    ) -> Incident:
+        """Create an incident from external log ingestion (Render, CI, manual)."""
+        trace = stack_trace or raw_logs or message
+        err_msg = message or (trace.splitlines()[-1] if trace else "Incident detected from logs")
 
-        Returns ``False`` when a pipeline is already active or the incident is
-        in a completed state. Failed and cancelled incidents may be retried.
-        """
+        detection = {
+            "error": True,
+            "status_code": status_code,
+            "error_message": err_msg,
+            "stack_trace": trace,
+            "endpoint": endpoint,
+            "method": method,
+            "service": service_id or "production",
+            "source": source,
+            "raw_logs": raw_logs,
+            "request_snapshot": request_snapshot or {"method": method, "path": endpoint},
+            "response_snapshot": {},
+        }
+
+        incident = Incident(
+            project_id=project_id,
+            status=IncidentStatus.RECEIVED,
+            detection=detection,
+            request_snapshot=request_snapshot or {"method": method, "path": endpoint},
+            stack_trace=trace,
+        )
+        incident_store.create(incident)
+        incident.add_activity("logs_retrieved", "done", f"Ingested from {source}")
+        incident.add_activity("error_detected", "done", err_msg[:120])
+        incident_store.update(incident)
+
+        log_operation(logger, incident.id, "ingest", "ok", error=err_msg[:200])
+        await emit(incident.id, "logs_retrieved", "done", f"Ingested from {source}")
+        await emit(incident.id, "error_detected", "done", err_msg[:120])
+        return incident
+
+    def start_diagnosis(self, incident_id: str) -> bool:
+        """Start one background pipeline for an incident."""
         inc = incident_store.get(incident_id)
         if not inc:
             return False
@@ -91,7 +130,11 @@ class Orchestrator:
             return False
 
         retryable_states = {
+            IncidentStatus.RECEIVED,
             IncidentStatus.DETECTED,
+            IncidentStatus.FAILED,
+            IncidentStatus.REQUIRES_HUMAN_REVIEW,
+            IncidentStatus.PR_READY,
             IncidentStatus.INVESTIGATION_FAILED,
             IncidentStatus.FIX_GENERATION_FAILED,
             IncidentStatus.VERIFICATION_FAILED,
@@ -121,9 +164,6 @@ class Orchestrator:
         except asyncio.CancelledError:
             logger.info("Diagnosis pipeline cancelled for incident %s", incident_id)
         except Exception:
-            # ``run_pipeline`` normally records its own errors. This protects
-            # against an exception outside that boundary and consumes the task
-            # result so asyncio does not emit an unhandled-task warning.
             logger.exception("Unhandled diagnosis task failure for %s", incident_id)
 
     async def cancel_diagnosis(self, incident_id: str) -> bool:
@@ -157,22 +197,41 @@ class Orchestrator:
             logger.error("Incident %s not found", incident_id)
             return None
 
+        # Determine the project and workspace
+        project = project_store.get(inc.project_id) or project_store.get_current()
+        workspace_path = project.workspace_path if (project and project.workspace_path and Path(project.workspace_path).is_dir()) else settings.REPO_ROOT
+        profile = project.profile if project else None
+
+        self.context_builder.set_repo_root(workspace_path)
+        self.sandbox_runner.set_repo_root(workspace_path, profile)
+
         t_start = time.perf_counter()
         try:
             await emit(inc.id, "pipeline", "running", "Starting diagnosis pipeline")
-            await self._collect_context(inc)
-            await self._investigate(inc)
+            if project and project.is_connected:
+                inc.add_activity("repository_synced", "done", f"{project.github_owner}/{project.github_repo}")
+                await emit(inc.id, "repository_synced", "done", f"{project.github_owner}/{project.github_repo}")
+                if profile:
+                    inc.add_activity("project_discovered", "done", f"{profile.language} / {profile.framework}")
+                    await emit(inc.id, "project_discovered", "done", f"{profile.language} / {profile.framework}")
+
+            await self._collect_context(inc, profile)
+            await self._investigate(inc, profile)
             if inc.status in (
+                IncidentStatus.FAILED,
                 IncidentStatus.INVESTIGATION_FAILED,
                 IncidentStatus.FIX_GENERATION_FAILED,
+                IncidentStatus.REQUIRES_HUMAN_REVIEW,
             ):
                 await emit(inc.id, "pipeline", "failed", inc.error_message or "investigation failed")
                 return inc
-            await self._sandbox_and_verify(inc)
+
+            await self._sandbox_and_verify(inc, profile)
             await emit(inc.id, "pipeline", "done", f"status={inc.status}")
         except Exception as exc:  # noqa: BLE001
             inc.error_message = f"{type(exc).__name__}: {exc}"
             if inc.status not in (
+                IncidentStatus.FAILED,
                 IncidentStatus.INVESTIGATION_FAILED,
                 IncidentStatus.FIX_GENERATION_FAILED,
                 IncidentStatus.VERIFICATION_FAILED,
@@ -192,20 +251,28 @@ class Orchestrator:
         return inc
 
     # ------------------------------------------------------------------
-    async def _collect_context(self, inc: Incident) -> None:
+    async def _collect_context(self, inc: Incident, profile: Any = None) -> None:
         inc.status = IncidentStatus.COLLECTING_CONTEXT
         inc.add_activity("collecting_context", "running")
         incident_store.update(inc)
-        await emit(inc.id, "collecting_context", "running", "Parsing stack trace and retrieving code")
+        await emit(inc.id, "collecting_context", "running", "Parsing stack trace and retrieving relevant code")
         t0 = time.perf_counter()
         try:
-            context = self.context_builder.build(inc)
+            try:
+                context = self.context_builder.build(inc, project_profile=profile)
+            except TypeError:
+                context = self.context_builder.build(inc)
             inc.context = context
             inc.add_activity("logs_retrieved", "done")
             inc.add_activity("stack_trace_parsed", "done")
             inc.add_activity("relevant_source_identified", "done", f"{len(context['affected_files'])} files")
+            for f in context.get("affected_files", []):
+                inc.add_activity("file_read", "done", f)
+                await emit(inc.id, "file_read", "done", f)
             inc.set_activity("collecting_context", "done", f"{len(context['affected_files'])} files")
             log_operation(logger, inc.id, "collect_context", "ok", duration=time.perf_counter() - t0)
+            await emit(inc.id, "stack_trace_parsed", "done", f"{len(context['affected_files'])} files")
+            await emit(inc.id, "relevant_source_identified", "done", f"{len(context['affected_files'])} files")
             await emit(inc.id, "collecting_context", "done", f"{len(context['affected_files'])} files")
         except Exception as exc:
             inc.status = IncidentStatus.INVESTIGATION_FAILED
@@ -217,11 +284,13 @@ class Orchestrator:
         finally:
             incident_store.update(inc)
 
-    async def _investigate(self, inc: Incident) -> None:
+    async def _investigate(self, inc: Incident, profile: Any = None) -> None:
         inc.status = IncidentStatus.INVESTIGATING
+        inc.add_activity("investigation_started", "running")
         inc.add_activity("investigating", "running")
         incident_store.update(inc)
-        await emit(inc.id, "investigating", "running", "Analyzing root cause with LLM")
+        await emit(inc.id, "investigation_started", "running", "Analyzing root cause with investigator model")
+        await emit(inc.id, "investigating", "running", "Analyzing root cause with investigator model")
         t0 = time.perf_counter()
         try:
             analysis: RootCauseAnalysis = await self.root_cause_agent.analyze(inc.context or {})
@@ -237,11 +306,13 @@ class Orchestrator:
                 log_operation(logger, inc.id, "root_cause", "failed", duration=time.perf_counter() - t0, error=inc.error_message)
                 await emit(inc.id, "investigating", "failed", inc.error_message)
                 return
+
             inc.status = IncidentStatus.ROOT_CAUSE_FOUND
-            inc.add_activity("root_cause_identified", "done", analysis.category)
-            inc.set_activity("investigating", "done", f"{analysis.category} conf={analysis.confidence:.2f}")
+            inc.add_activity("root_cause_identified", "done", analysis.classification)
+            inc.set_activity("investigating", "done", f"{analysis.classification} conf={analysis.confidence:.2f}")
             log_operation(logger, inc.id, "root_cause", "ok", duration=time.perf_counter() - t0, error=f"confidence={analysis.confidence:.2f}")
-            await emit(inc.id, "investigating", "done", f"{analysis.category} conf={analysis.confidence:.2f}")
+            await emit(inc.id, "root_cause_identified", "done", f"{analysis.classification} conf={analysis.confidence:.2f}")
+            await emit(inc.id, "investigating", "done", f"{analysis.classification} conf={analysis.confidence:.2f}")
         except Exception as exc:
             inc.status = IncidentStatus.INVESTIGATION_FAILED
             inc.error_message = f"root cause analysis failed: {exc}"
@@ -253,20 +324,23 @@ class Orchestrator:
         finally:
             incident_store.update(inc)
 
-        if inc.status == IncidentStatus.INVESTIGATION_FAILED:
+        if inc.status in (IncidentStatus.FAILED, IncidentStatus.REQUIRES_HUMAN_REVIEW, IncidentStatus.INVESTIGATION_FAILED):
             return
 
-        # Fix generation.
+        # Fix generation
         inc.status = IncidentStatus.FIX_PLANNED
         inc.add_activity("fix_generated", "running")
         incident_store.update(inc)
-        await emit(inc.id, "fix_generated", "running", "Generating minimal patch")
+        await emit(inc.id, "fix_generated", "running", "Generating minimal verified patch")
         t0 = time.perf_counter()
         files = self._full_files(inc)
         try:
-            proposal: FixProposal = await self.fix_agent.generate_fix(
-                analysis, files
-            )
+            try:
+                proposal: FixProposal = await self.fix_agent.generate_fix(
+                    analysis, files, project_profile=profile
+                )
+            except TypeError:
+                proposal = await self.fix_agent.generate_fix(analysis, files)
             inc.fix_proposal = proposal.model_dump()
             inc.set_activity("fix_generated", "done", proposal.summary)
             log_operation(logger, inc.id, "fix_generation", "ok", duration=time.perf_counter() - t0)
@@ -280,7 +354,7 @@ class Orchestrator:
         finally:
             incident_store.update(inc)
 
-    async def _sandbox_and_verify(self, inc: Incident) -> None:
+    async def _sandbox_and_verify(self, inc: Incident, profile: Any = None) -> None:
         proposal_data = inc.fix_proposal
         if not proposal_data:
             return
@@ -293,8 +367,10 @@ class Orchestrator:
 
         inc.status = IncidentStatus.SANDBOX_TESTING
         inc.add_activity("sandbox_started", "running")
+        inc.add_activity("tests_started", "running")
         incident_store.update(inc)
-        await emit(inc.id, "sandbox_started", "running", "Running verification in sandbox")
+        await emit(inc.id, "sandbox_started", "running", "Running isolated verification in sandbox")
+        await emit(inc.id, "tests_started", "running", "Executing test suite")
 
         attempt = 0
         result: SandboxResult | None = None
@@ -306,8 +382,6 @@ class Orchestrator:
             await emit(inc.id, "sandbox_started", "running", f"attempt {attempt}")
             t0 = time.perf_counter()
             try:
-                # run_verification performs blocking subprocess calls — run it
-                # on a worker thread so the status endpoint stays responsive.
                 result = await asyncio.to_thread(
                     self.sandbox_runner.run_verification, proposal, inc.request_snapshot
                 )
@@ -319,6 +393,7 @@ class Orchestrator:
                 incident_store.update(inc)
                 await emit(inc.id, "sandbox_started", "failed", str(exc)[:500])
                 return
+
             log_operation(
                 logger, inc.id, "sandbox_attempt", "ok" if result.passed else "failed",
                 duration=time.perf_counter() - t0,
@@ -328,14 +403,13 @@ class Orchestrator:
             if result.passed:
                 break
             if attempt < settings.MAX_REPAIR_ATTEMPTS:
-                # Regenerate the fix with the failure feedback.
                 inc.set_activity("fix_generated", "running", f"attempt {attempt} failed — regenerating")
                 incident_store.update(inc)
                 await emit(inc.id, "fix_generated", "running", f"Attempt {attempt} failed, retrying")
                 try:
                     if analysis:
                         proposal = await self.fix_agent.generate_fix(
-                            analysis, files, feedback=result.logs[-3000:] or result.error
+                            analysis, files, project_profile=profile, feedback=result.logs[-3000:] or result.error
                         )
                         inc.fix_proposal = proposal.model_dump()
                 except Exception:
@@ -346,33 +420,37 @@ class Orchestrator:
         if result and result.passed:
             inc.status = IncidentStatus.FIX_VERIFIED
             inc.set_activity("sandbox_started", "done")
+            inc.set_activity("tests_started", "done", "tests passed")
+            inc.add_activity("test_passed", "done", "all sandbox steps passed")
             for step in result.steps:
                 inc.add_activity(step.name, "done" if step.passed else "failed", _summarize_step(step))
             inc.add_activity("fix_verified", "done")
+            await emit(inc.id, "test_passed", "done", "Sandbox tests passed")
             await emit(inc.id, "sandbox_started", "done", "Verification passed")
             await emit(inc.id, "fix_verified", "done", "Fix verified")
         else:
             inc.status = IncidentStatus.REPAIR_LIMIT_REACHED if attempt >= settings.MAX_REPAIR_ATTEMPTS else IncidentStatus.VERIFICATION_FAILED
             inc.error_message = result.error if result else "verification failed"
             inc.set_activity("sandbox_started", "failed", inc.error_message[:200])
+            inc.set_activity("tests_started", "failed", inc.error_message[:200])
             inc.add_activity("fix_verified", "failed", inc.error_message[:200])
             await emit(inc.id, "fix_verified", "failed", inc.error_message[:500])
         incident_store.update(inc)
 
-        # Auto-create PR only if configured.
+        # PR Gate
         if inc.status == IncidentStatus.FIX_VERIFIED and settings.AUTO_CREATE_PR:
             try:
                 await self.create_pull_request(inc.id)
             except Exception as exc:  # noqa: BLE001
                 inc.error_message = f"PR creation failed: {exc}"
                 incident_store.update(inc)
-                await emit(inc.id, "pull_request_created", "failed", str(exc)[:500])
+                await emit(inc.id, "pr_created", "failed", str(exc)[:500])
 
     # ------------------------------------------------------------------
     # GitHub PR
     # ------------------------------------------------------------------
     def _full_files(self, inc: Incident) -> dict[str, str]:
-        """Read full content of affected files for the fix agent."""
+        """Read full content of affected files from workspace."""
         files: dict[str, str] = {}
         affected = (inc.root_cause or {}).get("affected_files") or []
         for rel in affected:
@@ -380,7 +458,6 @@ class Orchestrator:
             if full.is_file():
                 files[rel] = full.read_text(encoding="utf-8", errors="replace")
         if not files and inc.context and inc.context.get("code_snippets"):
-            # Fall back to snippet content (trimmed) so the agent still has input.
             for rel, data in inc.context["code_snippets"].items():
                 if isinstance(data, dict):
                     files[rel] = data.get("content", "")[:4000]
@@ -389,7 +466,6 @@ class Orchestrator:
     async def create_pull_request(self, incident_id: str) -> dict[str, Any]:
         from app.github.client import GitHubClient
         from app.github.service import GitHubService
-        from app.projects.store import project_store
 
         inc = incident_store.get(incident_id)
         if not inc:
@@ -397,14 +473,29 @@ class Orchestrator:
         if not inc.fix_proposal or inc.fix_proposal.get("diff") is None:
             raise ValueError("incident has no verified fix to open a PR for")
 
-        project = project_store.get(inc.project_id)
-        service = GitHubService(GitHubClient())
+        # Check Repair Gate: must be verified
+        if inc.status not in (IncidentStatus.FIX_VERIFIED, IncidentStatus.PR_READY):
+            if not (inc.sandbox_result and inc.sandbox_result.get("passed")):
+                raise ValueError("Cannot create PR: fix has not passed sandbox verification gates.")
+
+        project = project_store.get(inc.project_id) or project_store.get_current()
+        token = project.github_token if project else settings.GITHUB_TOKEN
+        owner = project.github_owner if project else settings.GITHUB_OWNER
+        repo = project.github_repo if project else settings.GITHUB_REPO
+        branch = project.github_branch if project else settings.GITHUB_DEFAULT_BRANCH
+
+        gh_client = GitHubClient(token=token, owner=owner, repo=repo, default_branch=branch)
+        service = GitHubService(gh_client)
 
         diff = inc.fix_proposal["diff"]
         changes = self._changes_from_diff(diff)
         summary = inc.fix_proposal.get("summary") or "Fix"
         title = f"fix(api-doctor): {summary}"
         body = self._pr_body(inc)
+
+        branch_name = f"api-doctor/fix/{incident_id}"
+        await emit(inc.id, "branch_created", "done", branch_name)
+        inc.add_activity("branch_created", "done", branch_name)
 
         pr_info = await service.repair(
             incident_id=incident_id,
@@ -414,11 +505,15 @@ class Orchestrator:
             body=body,
             project=project,
         )
+
+        await emit(inc.id, "commit_created", "done", pr_info.get("head_sha", ""))
+        inc.add_activity("commit_created", "done", pr_info.get("head_sha", ""))
+
         inc.pr_info = pr_info
         inc.status = IncidentStatus.PR_CREATED
-        inc.add_activity("pull_request_created", "done", pr_info.get("pr_url") or "")
+        inc.add_activity("pr_created", "done", pr_info.get("pr_url") or "")
         incident_store.update(inc)
-        await emit(inc.id, "pull_request_created", "done", pr_info.get("pr_url") or "")
+        await emit(inc.id, "pr_created", "done", pr_info.get("pr_url") or "")
         return pr_info
 
     async def pr_status(self, incident_id: str) -> dict[str, Any]:
@@ -428,19 +523,22 @@ class Orchestrator:
         inc = incident_store.get(incident_id)
         if not inc:
             return {"present": False, "error": "incident not found"}
-        service = GitHubService(GitHubClient())
+
+        project = project_store.get(inc.project_id) or project_store.get_current()
+        token = project.github_token if project else settings.GITHUB_TOKEN
+        owner = project.github_owner if project else settings.GITHUB_OWNER
+        repo = project.github_repo if project else settings.GITHUB_REPO
+        branch = project.github_branch if project else settings.GITHUB_DEFAULT_BRANCH
+
+        gh_client = GitHubClient(token=token, owner=owner, repo=repo, default_branch=branch)
+        service = GitHubService(gh_client)
         return await service.pr_status(incident_id, inc.pr_info)
 
     def _changes_from_diff(self, diff: str) -> list[dict[str, str]]:
-        """Split a multi-file unified diff into per-file {path, content} changes.
-
-        Applies the diff to a throwaway workspace copy and reads back the
-        resulting file contents (accurate even for new files).
-        """
         from app.sandbox.workspace_manager import WorkspaceManager
         from app.sandbox.patch_utils import apply_patch
 
-        wm = WorkspaceManager()
+        wm = WorkspaceManager(repo_root=self.sandbox_runner.repo_root)
         ws = wm.create_workspace()
         try:
             affected = apply_patch(diff, ws)
@@ -459,7 +557,7 @@ class Orchestrator:
         lines = [
             f"## API Doctor — Incident `{inc.id}`",
             "",
-            f"**Category:** {rc.get('category')}",
+            f"**Classification:** {rc.get('classification') or rc.get('category')}",
             f"**Confidence:** {rc.get('confidence')}",
             "",
             "### Root cause",
@@ -471,23 +569,18 @@ class Orchestrator:
             "### Risk",
             str(fix.get("risk") or "low"),
             "",
-            "> Generated automatically. Please review before merging.",
+            "> Verified by API Doctor Sandbox. Please review before merging.",
         ]
         return "\n".join(lines)
 
 
 def _summarize_step(step: Any) -> str:
-    """Produce a short, human-friendly summary for a sandbox step's activity
-    message. Strips parent JSON log lines so consumers don't see raw
-    ``SANDBOX_MODE=local ...`` noise mixed into the step detail."""
     name = getattr(step, "name", "")
     passed = bool(getattr(step, "passed", False))
     detail = (getattr(step, "detail", "") or "").strip()
     if not detail:
         return "ok" if passed else "failed"
 
-    # Drop structured JSON log lines (one per line) coming from sandboxed
-    # subprocess stdout/stderr — they start with '{' and contain "timestamp".
     cleaned_lines: list[str] = []
     for line in detail.splitlines():
         s = line.strip()
@@ -496,23 +589,20 @@ def _summarize_step(step: Any) -> str:
         cleaned_lines.append(line)
     cleaned = "\n".join(cleaned_lines).strip()
 
-    # For steps that print known markers, pick the human-readable tail.
     if name == "reproduce_failure":
-        # Keep just the exception type/message line if present.
         for line in reversed(cleaned_lines):
             s = line.strip()
             if s.startswith("AttributeError") or s.startswith("TypeError") or s.startswith("ValueError") or s.startswith("Error"):
                 return s[:200]
-        # Fall back to status/body/ok tail.
         tail = _tail_markers(cleaned, ("STATUS", "BODY", "OK"))
-        return tail[:200] if tail else ("reproduced 5xx" if passed else "did not reproduce failure")
+        return tail[:200] if tail else ("reproduced failure" if passed else "did not reproduce failure")
     if name == "apply_patch":
         return cleaned[:200] or ("patch applied" if passed else "patch failed")
     if name in ("run_tests", "verify_fix"):
         tail = _tail_markers(cleaned, ("TEST_STATUS", "TEST_BODY", "TEST_OK", "STATUS", "BODY", "OK"))
         return tail[:200] if tail else ("passed" if passed else "failed")
     if name == "run_build":
-        return cleaned[:200] or ("compileall ok" if passed else "build failed")
+        return cleaned[:200] or ("syntax check ok" if passed else "build failed")
     if name == "health_check":
         for line in cleaned_lines:
             if line.strip().startswith("HEALTH"):
@@ -522,7 +612,6 @@ def _summarize_step(step: Any) -> str:
 
 
 def _tail_markers(text: str, markers: tuple[str, ...]) -> str:
-    """Return a compact string made of the last line matching each marker."""
     lines = [l for l in text.splitlines() if l.strip()]
     picked: list[str] = []
     seen: set[str] = set()
@@ -534,5 +623,4 @@ def _tail_markers(text: str, markers: tuple[str, ...]) -> str:
     return " | ".join(picked)
 
 
-# Singleton for import convenience / background task wiring.
 orchestrator = Orchestrator()

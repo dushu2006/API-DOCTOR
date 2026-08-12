@@ -1,4 +1,4 @@
-"""API request/response schemas."""
+"""API request/response schemas for incident ingestion and workflow."""
 
 from __future__ import annotations
 
@@ -13,17 +13,29 @@ from app.incidents.models import Incident, IncidentStatus, ProgressEvent
 # Requests
 # ---------------------------------------------------------------------------
 class DiagnoseRequest(BaseModel):
-    """Manually kick off diagnosis for a detected incident.
-
-    Either ``incident_id`` refers to an existing incident, or raw detection
-    fields are supplied to create one.
-    """
+    """Manually kick off diagnosis for a detected incident."""
 
     project_id: str = "default"
     endpoint: Optional[str] = None
     method: str = "GET"
     payload: Optional[dict[str, Any]] = None
     headers: Optional[dict[str, str]] = None
+
+
+class IngestIncidentRequest(BaseModel):
+    """Ingest a real production failure/log into an Incident."""
+
+    source: str = Field(default="manual", description="render | github_actions | manual | log")
+    service_id: Optional[str] = None
+    log_text: Optional[str] = None
+    message: Optional[str] = None
+    stack_trace: Optional[str] = None
+    raw_logs: Optional[str] = None
+    endpoint: Optional[str] = None
+    method: Optional[str] = "GET"
+    status_code: Optional[int] = 500
+    project_id: str = "default"
+    auto_diagnose: bool = True
 
 
 class TriggerRequest(BaseModel):
@@ -47,7 +59,7 @@ class CreatePRRequest(BaseModel):
 class DiagnoseResponse(BaseModel):
     incident_id: str
     status: IncidentStatus
-    message: str = "Diagnosis started. Poll the status endpoint for updates."
+    message: str = "Diagnosis started. Poll the status endpoint or subscribe to stream for updates."
 
 
 class IncidentResponse(BaseModel):

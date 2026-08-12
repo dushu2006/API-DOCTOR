@@ -26,20 +26,25 @@ class GitHubClient:
         self,
         base_url: str | None = None,
         token: str | None = None,
+        owner: str | None = None,
+        repo: str | None = None,
+        default_branch: str | None = None,
     ) -> None:
         self.base_url = (base_url or settings.GITHUB_API_BASE_URL).rstrip("/")
         self.token = token if token is not None else settings.GITHUB_TOKEN
-        self.owner = settings.GITHUB_OWNER
-        self.repo = settings.GITHUB_REPO
-        self.default_branch = settings.GITHUB_DEFAULT_BRANCH
+        self.owner = owner or settings.GITHUB_OWNER
+        self.repo = repo or settings.GITHUB_REPO
+        self.default_branch = default_branch or settings.GITHUB_DEFAULT_BRANCH
 
     @property
     def _headers(self) -> dict[str, str]:
-        return {
+        headers = {
             "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {self.token}",
             "X-GitHub-Api-Version": "2022-11-28",
         }
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        return headers
 
     async def _request(self, method: str, path: str, **kwargs) -> dict | list:
         if not self.token:
@@ -51,13 +56,44 @@ class GitHubClient:
             raise GitHubError(
                 f"GitHub API {method} {path} -> {resp.status_code}: {resp.text[:400]}"
             )
+        if not resp.content:
+            return {}
         return resp.json()
 
     def _repo_path(self, *parts: str) -> str:
         seg = "/".join(parts).strip("/")
-        return f"/repos/{self.owner}/{self.repo}/{seg}"
+        return f"/repos/{self.owner}/{self.repo}/{seg}" if seg else f"/repos/{self.owner}/{self.repo}"
 
     # ------------------------------------------------------------------
+    # Verification & Metadata
+    # ------------------------------------------------------------------
+    def validate_config(self) -> dict[str, Any]:
+        """Validate if GitHub configuration variables are present."""
+        return {
+            "configured": bool(self.owner and self.repo),
+            "owner": self.owner,
+            "repo": self.repo,
+            "has_token": bool(self.token),
+            "default_branch": self.default_branch,
+        }
+
+    async def verify_access(self) -> dict[str, Any]:
+        """Verify repository access and retrieve repository metadata."""
+        if not self.owner or not self.repo:
+            raise GitHubError("GITHUB_OWNER and GITHUB_REPO must be set")
+        data = await self.get_repo()
+        return {
+            "verified": True,
+            "owner": self.owner,
+            "repo": self.repo,
+            "default_branch": data.get("default_branch") or self.default_branch,
+            "name": data.get("name"),
+            "full_name": data.get("full_name"),
+            "description": data.get("description"),
+            "private": data.get("private", False),
+            "html_url": data.get("html_url"),
+        }
+
     async def get_repo(self) -> dict:
         return await self._request("GET", self._repo_path())  # type: ignore[return-value]
 
@@ -80,7 +116,7 @@ class GitHubClient:
         base_branch = base_branch or self.default_branch
         sha = await self.get_branch_sha(base_branch)
         payload = {"ref": f"refs/heads/{branch}", "sha": sha}
-        await self._request("POST", "/repos/" + self.owner + "/" + self.repo + "/git/refs", json=payload)
+        await self._request("POST", f"/repos/{self.owner}/{self.repo}/git/refs", json=payload)
         return branch
 
     async def create_commit(
@@ -92,7 +128,7 @@ class GitHubClient:
         Returns the new commit sha.
         """
         base_sha = await self.get_branch_sha(branch)
-        repo = self.owner + "/" + self.repo
+        repo = f"{self.owner}/{self.repo}"
 
         blobs = {}
         for change in changes:

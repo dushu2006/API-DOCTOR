@@ -3,32 +3,38 @@ import {
   Stethoscope, 
   ChevronRight, 
   ChevronDown, 
-  CheckCircle2,
-  XCircle,
-  Clock,
-  GitPullRequest,
-  ExternalLink,
-  ShieldCheck,
+  CheckCircle2, 
+  XCircle, 
+  Clock, 
+  GitPullRequest, 
+  ExternalLink, 
+  ShieldCheck, 
   Check, 
-  ArrowUpRight,
-  ChevronUp
+  ArrowUpRight, 
+  ChevronUp,
+  Server,
+  FileText,
+  AlertOctagon,
+  Sparkles
 } from 'lucide-react';
 
 export default function APIDoctorPanel({ 
-  incidentsList,
+  incidentsList = [],
   activeIncident,
   incidentContext,
   incidentDiff,
   incidentSandbox,
   incidentPR,
-  timelineEvents,
+  timelineEvents = [],
   isDiagnosing,
   onStartDiagnosis,
   onApproveFix,
   onCreatePR,
   onSelectIncident,
-  doctorWidth, 
-  isDoctorOpen, 
+  onSyncRender,
+  onOpenIngestModal,
+  doctorWidth = 380, 
+  isDoctorOpen = true, 
   setIsDoctorOpen,
   setSelectedFile,
   setIsDiffMode
@@ -36,6 +42,7 @@ export default function APIDoctorPanel({
   const [expandedFiles, setExpandedFiles] = useState(true);
   const [expandedFileDetails, setExpandedFileDetails] = useState({});
   const [historyOpen, setHistoryOpen] = useState(true);
+
   const rootCause = activeIncident?.root_cause;
   const confidence = Number.isFinite(Number(rootCause?.confidence))
     ? Math.min(1, Math.max(0, Number(rootCause.confidence)))
@@ -46,6 +53,11 @@ export default function APIDoctorPanel({
 
   const toggleFileDetail = (path) => {
     setExpandedFileDetails(prev => ({ ...prev, [path]: !prev[path] }));
+  };
+
+  const getClassification = () => {
+    if (!rootCause) return null;
+    return rootCause.classification || rootCause.category || 'CODE_BUG';
   };
 
   return (
@@ -65,7 +77,7 @@ export default function APIDoctorPanel({
         padding: '0 12px',
         display: 'flex',
         alignItems: 'center',
-        justify: 'space-between',
+        justifyContent: 'space-between',
         borderBottom: '1px solid var(--border-color)'
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -111,7 +123,7 @@ export default function APIDoctorPanel({
               border: '1px solid var(--border-color)',
               display: 'flex',
               alignItems: 'center',
-              justify: 'center',
+              justifyContent: 'center',
               margin: '0 auto 16px auto',
               color: 'var(--color-accent)'
             }}>
@@ -120,17 +132,27 @@ export default function APIDoctorPanel({
             <h3 style={{ fontSize: '14px', fontWeight: 600, marginBottom: '6px', color: 'var(--text-primary)' }}>
               Ready to diagnose your project.
             </h3>
-            <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '20px' }}>
-              No active incident selected. Trigger an automated run to test backend APIs.
+            <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '20px', lineHeight: 1.5 }}>
+              Retrieve real Render logs or ingest production errors to begin automated investigation.
             </p>
-            <button 
-              onClick={() => onStartDiagnosis('null_pointer')}
-              className="btn-primary"
-              style={{ width: '100%', justifyContent: 'center', padding: '8px 16px' }}
-            >
-              <Stethoscope size={14} />
-              <span>Start Diagnosis (null_pointer)</span>
-            </button>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              <button 
+                onClick={onSyncRender}
+                className="btn-primary"
+                style={{ width: '100%', justifyContent: 'center', padding: '8px 16px' }}
+              >
+                <Server size={14} />
+                <span>Sync Render Runtime Logs</span>
+              </button>
+              <button 
+                onClick={onOpenIngestModal}
+                className="btn-outline"
+                style={{ width: '100%', justifyContent: 'center', padding: '8px 16px' }}
+              >
+                <FileText size={14} />
+                <span>Ingest Production Log / Error</span>
+              </button>
+            </div>
           </div>
         )}
 
@@ -150,10 +172,14 @@ export default function APIDoctorPanel({
                 <span style={{ 
                   backgroundColor: activeIncident.status?.includes('VERIFIED') || activeIncident.status?.includes('PR') 
                     ? 'rgba(61, 214, 140, 0.15)' 
-                    : 'rgba(240, 96, 90, 0.15)', 
+                    : activeIncident.status?.includes('FAIL') 
+                      ? 'rgba(240, 96, 90, 0.15)'
+                      : 'rgba(124, 140, 248, 0.15)', 
                   color: activeIncident.status?.includes('VERIFIED') || activeIncident.status?.includes('PR')
                     ? 'var(--color-success)'
-                    : 'var(--color-failure)', 
+                    : activeIncident.status?.includes('FAIL')
+                      ? 'var(--color-failure)'
+                      : 'var(--color-accent)', 
                   padding: '2px 8px', 
                   borderRadius: '4px', 
                   fontSize: '11px', 
@@ -164,7 +190,7 @@ export default function APIDoctorPanel({
                 </span>
               </div>
               <div style={{ fontSize: '11px', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', display: 'flex', justifyContent: 'space-between' }}>
-                <span>{activeIncident.detection?.method || 'POST'} {activeIncident.detection?.endpoint || '/api/v1/checkout'}</span>
+                <span>{activeIncident.detection?.source ? `Source: ${activeIncident.detection.source}` : (activeIncident.detection?.endpoint || 'Error Ingested')}</span>
                 <span>{activeIncident.created_at ? new Date(activeIncident.created_at).toLocaleTimeString() : ''}</span>
               </div>
             </div>
@@ -193,10 +219,10 @@ export default function APIDoctorPanel({
                         )}
                         <div style={{ flex: 1, display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
                           <span style={{ color: ev.status === 'running' ? 'var(--color-accent)' : 'var(--text-primary)', fontWeight: ev.status === 'running' ? 600 : 400 }}>
-                            {ev.step || ev.message || 'Processing investigation step'}
+                            {ev.step?.replace(/_/g, ' ') || ev.message || 'Processing investigation step'}
                           </span>
                           <span style={{ fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--text-muted)' }}>
-                            {ev.timestamp || ev.ts ? new Date(ev.timestamp || ev.ts * 1000).toLocaleTimeString() : ''}
+                            {ev.timestamp ? new Date(ev.timestamp).toLocaleTimeString() : ''}
                           </span>
                         </div>
                       </div>
@@ -218,13 +244,13 @@ export default function APIDoctorPanel({
                     backgroundColor: 'var(--surface-2)',
                     display: 'flex',
                     alignItems: 'center',
-                    justify: 'space-between',
+                    justifyContent: 'space-between',
                     cursor: 'pointer',
                     fontSize: '11px',
                     fontWeight: 600
                   }}
                 >
-                  <span>{incidentContext.implicated_files.length} files analyzed</span>
+                  <span>{incidentContext.implicated_files.length} relevant file(s) retrieved</span>
                   {expandedFiles ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
                 </div>
 
@@ -238,25 +264,19 @@ export default function APIDoctorPanel({
                             padding: '6px 12px',
                             display: 'flex',
                             alignItems: 'center',
-                            justify: 'space-between',
+                            justifyContent: 'space-between',
                             cursor: 'pointer',
                             fontSize: '11px',
                             fontFamily: 'var(--font-mono)'
                           }}
                           className="hover-bg"
                         >
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                             <CheckCircle2 size={12} style={{ color: 'var(--color-success)' }} />
                             <span style={{ color: 'var(--text-primary)' }}>{filePath}</span>
                           </div>
                           <ChevronRight size={12} style={{ color: 'var(--text-muted)' }} />
                         </div>
-                        
-                        {expandedFileDetails[filePath] && (
-                          <div style={{ padding: '6px 12px 6px 30px', fontSize: '11px', color: 'var(--text-muted)', backgroundColor: 'var(--bg-canvas)' }}>
-                            Selected by AST & stack trace analyzer as implicated source.
-                          </div>
-                        )}
                       </div>
                     ))}
                   </div>
@@ -270,9 +290,9 @@ export default function APIDoctorPanel({
                 <div style={{ fontSize: '10px', fontWeight: 700, color: 'var(--text-muted)', letterSpacing: '0.05em' }}>
                   ROOT CAUSE ANALYSIS
                 </div>
-                {rootCause?.category && (
+                {getClassification() && (
                   <span style={{ backgroundColor: 'rgba(240, 96, 90, 0.15)', color: 'var(--color-failure)', padding: '2px 6px', borderRadius: '4px', fontSize: '10px', fontWeight: 700 }}>
-                    {rootCause.category.replaceAll('_', ' ')}
+                    {getClassification().replace(/_/g, ' ')}
                   </span>
                 )}
               </div>
@@ -280,7 +300,7 @@ export default function APIDoctorPanel({
               {!rootCause ? (
                 <div style={{ fontSize: '12px', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '6px' }}>
                   <Clock size={13} />
-                  <span>Agent analyzing stack trace & context...</span>
+                  <span>Analyzing root cause from code & trace...</span>
                 </div>
               ) : (
                 <>
@@ -300,18 +320,23 @@ export default function APIDoctorPanel({
                     {rootCause.root_cause || 'Root cause identified.'}
                   </p>
                   {rootCause.reason && (
-                    <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '10px', lineHeight: 1.4 }}>
+                    <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '8px', lineHeight: 1.4 }}>
                       {rootCause.reason}
                     </p>
                   )}
+                  {rootCause.recommended_action && (
+                    <div style={{ fontSize: '11px', color: 'var(--color-accent)', marginBottom: '10px', backgroundColor: 'rgba(124, 140, 248, 0.08)', padding: '6px 8px', borderRadius: '4px' }}>
+                      <strong>Action:</strong> {rootCause.recommended_action}
+                    </div>
+                  )}
 
-                  {incidentContext?.implicated_files?.[0] && (
+                  {rootCause.affected_files?.[0] && (
                     <button 
-                      onClick={() => setSelectedFile(incidentContext.implicated_files[0])}
+                      onClick={() => setSelectedFile(rootCause.affected_files[0])}
                       className="btn-outline"
                       style={{ width: '100%', justifyContent: 'center', fontSize: '11px' }}
                     >
-                      <span>Open File ({incidentContext.implicated_files[0]})</span>
+                      <span>Open {rootCause.affected_files[0]}</span>
                       <ArrowUpRight size={12} />
                     </button>
                   )}
@@ -323,7 +348,7 @@ export default function APIDoctorPanel({
             {incidentDiff && incidentDiff.present && (
               <div style={{ backgroundColor: 'var(--surface-2)', border: '1px solid var(--border-color)', borderRadius: '6px', padding: '12px' }}>
                 <div style={{ fontSize: '10px', fontWeight: 700, color: 'var(--text-muted)', letterSpacing: '0.05em', marginBottom: '8px' }}>
-                  AI PROPOSED CHANGE
+                  AI PROPOSED PATCH
                 </div>
 
                 <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '10px', fontFamily: 'var(--font-mono)' }}>
@@ -349,7 +374,7 @@ export default function APIDoctorPanel({
                       onClick={() => setIsDiffMode(true)} 
                       style={{ background: 'none', border: 'none', color: 'var(--color-accent)', cursor: 'pointer', fontSize: '11px', textDecoration: 'underline' }}
                     >
-                      Review Full Diff
+                      Review Diff
                     </button>
                   </div>
                 </div>
@@ -369,7 +394,7 @@ export default function APIDoctorPanel({
                   <span>{incidentSandbox.passed ? 'FIX VERIFIED' : 'VERIFICATION FAILED'}</span>
                 </div>
                 <p style={{ fontSize: '12px', color: 'var(--text-primary)', marginBottom: '8px' }}>
-                  {incidentSandbox.passed ? 'Original error resolved in verification sandbox.' : incidentSandbox.error || 'Tests failed.'}
+                  {incidentSandbox.passed ? 'Patch verified in isolated sandbox copy.' : incidentSandbox.error || 'Verification tests failed.'}
                 </p>
                 {incidentSandbox.steps && (
                   <div style={{ fontSize: '11px', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>
@@ -380,19 +405,19 @@ export default function APIDoctorPanel({
             )}
 
             {/* Section 7: GitHub PR Card */}
-            {incidentPR && incidentPR.present && (
+            {incidentPR && incidentPR.present ? (
               <div style={{ backgroundColor: 'var(--surface-2)', border: '1px solid var(--border-color)', borderRadius: '6px', padding: '12px' }}>
                 <div style={{ fontSize: '10px', fontWeight: 700, color: 'var(--text-muted)', letterSpacing: '0.05em', marginBottom: '8px' }}>
                   GITHUB PULL REQUEST
                 </div>
                 <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '4px' }}>
-                  PR #{incidentPR.pr_number || '1'} — API Repair
+                  PR #{incidentPR.pr_number || '1'} — API Doctor Repair
                 </div>
                 <div style={{ fontSize: '11px', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', marginBottom: '8px' }}>
-                  Branch: <code>{incidentPR.branch || 'fix/api-doctor'}</code>
+                  Branch: <code>{incidentPR.branch || `api-doctor/fix/${activeIncident.id}`}</code>
                 </div>
                 <div style={{ display: 'inline-block', backgroundColor: 'rgba(232, 162, 61, 0.15)', color: 'var(--color-warning)', padding: '2px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: 600, marginBottom: '12px' }}>
-                  {incidentPR.status || 'Awaiting human review'}
+                  {incidentPR.status || 'Ready for review'}
                 </div>
 
                 <a 
@@ -400,20 +425,20 @@ export default function APIDoctorPanel({
                   target="_blank" 
                   rel="noreferrer" 
                   className="btn-primary" 
-                  style={{ width: '100%', justifyContent: 'center', textDecoration: 'none' }}
+                  style={{ width: '100%', justifyContent: 'center', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '6px' }}
                 >
                   <span>Open Pull Request</span>
                   <ExternalLink size={12} />
                 </a>
               </div>
-            )}
-
-            {/* Create PR button if approved & sandbox passed */}
-            {incidentSandbox && incidentSandbox.passed && (!incidentPR || !incidentPR.present) && (
-              <button onClick={onCreatePR} className="btn-primary" style={{ width: '100%', justifyContent: 'center' }}>
-                <GitPullRequest size={14} />
-                <span>Create GitHub Pull Request</span>
-              </button>
+            ) : (
+              /* Create PR button if verified */
+              incidentSandbox && incidentSandbox.passed && (
+                <button onClick={onCreatePR} className="btn-primary" style={{ width: '100%', justifyContent: 'center', padding: '8px 16px' }}>
+                  <GitPullRequest size={14} />
+                  <span>Create GitHub Pull Request</span>
+                </button>
+              )
             )}
 
           </div>
@@ -426,7 +451,7 @@ export default function APIDoctorPanel({
             style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer', marginBottom: '10px' }}
           >
             <span style={{ fontSize: '10px', fontWeight: 700, color: 'var(--text-muted)', letterSpacing: '0.05em' }}>
-              BACKEND INCIDENT HISTORY ({incidentsList ? incidentsList.length : 0})
+              INCIDENT HISTORY ({incidentsList ? incidentsList.length : 0})
             </span>
             {historyOpen ? <ChevronUp size={14} style={{ color: 'var(--text-muted)' }} /> : <ChevronDown size={14} style={{ color: 'var(--text-muted)' }} />}
           </div>
@@ -445,7 +470,7 @@ export default function APIDoctorPanel({
                       borderRadius: '4px',
                       display: 'flex',
                       alignItems: 'center',
-                      justify: 'space-between',
+                      justifyContent: 'space-between',
                       fontSize: '11px',
                       fontFamily: 'var(--font-mono)',
                       cursor: 'pointer'
@@ -453,7 +478,7 @@ export default function APIDoctorPanel({
                   >
                     <span>#{inc.id.slice(0, 8).toUpperCase()}</span>
                     <span style={{ 
-                      color: inc.status?.includes('VERIFIED') ? 'var(--color-success)' : 'var(--color-failure)', 
+                      color: inc.status?.includes('VERIFIED') || inc.status?.includes('PR') ? 'var(--color-success)' : 'var(--color-failure)', 
                       fontWeight: 600, 
                       fontSize: '10px' 
                     }}>
@@ -462,7 +487,7 @@ export default function APIDoctorPanel({
                   </div>
                 ))
               ) : (
-                <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>No backend incidents stored yet.</div>
+                <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>No incidents recorded yet.</div>
               )}
             </div>
           )}

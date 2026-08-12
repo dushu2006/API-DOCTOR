@@ -1,4 +1,4 @@
-"""Incident state and data models."""
+"""Incident state machine and data models."""
 
 from __future__ import annotations
 
@@ -11,19 +11,31 @@ from pydantic import BaseModel, Field
 
 
 class IncidentStatus(str, Enum):
+    # Canonical Real Project States
+    RECEIVED = "RECEIVED"
+    DETECTING = "DETECTING"
+    CONTEXT_BUILDING = "CONTEXT_BUILDING"
+    INVESTIGATING = "INVESTIGATING"
+    ROOT_CAUSE_IDENTIFIED = "ROOT_CAUSE_IDENTIFIED"
+    FIX_GENERATING = "FIX_GENERATING"
+    FIX_READY = "FIX_READY"
+    SANDBOX_RUNNING = "SANDBOX_RUNNING"
+    TESTING = "TESTING"
+    FIX_VERIFIED = "FIX_VERIFIED"
+    PR_READY = "PR_READY"
+    PR_CREATED = "PR_CREATED"
+    FAILED = "FAILED"
+    REQUIRES_HUMAN_REVIEW = "REQUIRES_HUMAN_REVIEW"
+    CANCELLED = "CANCELLED"
+
+    # Backward compatibility aliases
     DETECTED = "DETECTED"
     COLLECTING_CONTEXT = "COLLECTING_CONTEXT"
-    INVESTIGATING = "INVESTIGATING"
     ROOT_CAUSE_FOUND = "ROOT_CAUSE_FOUND"
     FIX_PLANNED = "FIX_PLANNED"
     SANDBOX_TESTING = "SANDBOX_TESTING"
     VERIFYING = "VERIFYING"
-    FIX_VERIFIED = "FIX_VERIFIED"
-    PR_CREATED = "PR_CREATED"
     AWAITING_REVIEW = "AWAITING_REVIEW"
-    CANCELLED = "CANCELLED"
-
-    # Failure states
     INVESTIGATION_FAILED = "INVESTIGATION_FAILED"
     FIX_GENERATION_FAILED = "FIX_GENERATION_FAILED"
     VERIFICATION_FAILED = "VERIFICATION_FAILED"
@@ -32,17 +44,21 @@ class IncidentStatus(str, Enum):
     @property
     def is_terminal(self) -> bool:
         return self in {
+            IncidentStatus.FAILED,
+            IncidentStatus.CANCELLED,
+            IncidentStatus.REQUIRES_HUMAN_REVIEW,
+            IncidentStatus.PR_CREATED,
             IncidentStatus.INVESTIGATION_FAILED,
             IncidentStatus.FIX_GENERATION_FAILED,
             IncidentStatus.VERIFICATION_FAILED,
             IncidentStatus.REPAIR_LIMIT_REACHED,
             IncidentStatus.AWAITING_REVIEW,
-            IncidentStatus.CANCELLED,
         }
 
     @property
     def is_failed(self) -> bool:
         return self in {
+            IncidentStatus.FAILED,
             IncidentStatus.INVESTIGATION_FAILED,
             IncidentStatus.FIX_GENERATION_FAILED,
             IncidentStatus.VERIFICATION_FAILED,
@@ -91,8 +107,7 @@ class Incident(BaseModel):
         self.touch()
 
     def set_activity(self, step: str, status: str, message: str = "") -> None:
-        """Update the latest entry for ``step`` in place (avoids duplicate running
-        entries). If no entry exists yet, append a new one."""
+        """Update the latest entry for ``step`` in place. If none exists, append."""
         for ev in reversed(self.activity):
             if ev.step == step:
                 ev.status = status

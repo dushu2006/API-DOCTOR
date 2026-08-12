@@ -8,3 +8,4 @@ htmlcov/
 .mypy_cache/
 test_fix_repro.py
 .api_doctor_fix.patch
+workspace/
