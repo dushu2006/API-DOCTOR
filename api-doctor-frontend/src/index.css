@@ -1,0 +1,210 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap');
+
+:root {
+  --bg-canvas: #0A0B0D;
+  --surface-1: #131417;
+  --surface-2: #1B1D21;
+  --surface-hover: #212328;
+  --border-color: #26282D;
+  --border-light: #32353C;
+  --text-primary: #E4E5E7;
+  --text-muted: #8B8D93;
+  --text-disabled: #55575E;
+
+  --color-success: #3DD68C;
+  --color-failure: #F0605A;
+  --color-warning: #E8A23D;
+  --color-accent: #7C8CF8;
+  --color-accent-glow: rgba(124, 140, 248, 0.25);
+
+  --diff-add-bg: #123326;
+  --diff-add-text: #3DD68C;
+  --diff-remove-bg: #3A1518;
+  --diff-remove-text: #F0605A;
+
+  --font-ui: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', 'IBM Plex Mono', monospace;
+  --font-heading: 'Space Grotesk', sans-serif;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #root {
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background-color: var(--bg-canvas);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+/* Custom Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+/* Agent Presence Pulse Motif */
+.agent-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: var(--color-accent);
+  box-shadow: 0 0 8px var(--color-accent-glow);
+  display: inline-block;
+  animation: agent-pulse 1.8s infinite ease-in-out;
+}
+
+@keyframes agent-pulse {
+  0% {
+    transform: scale(0.95);
+    opacity: 0.7;
+    box-shadow: 0 0 4px var(--color-accent-glow);
+  }
+  50% {
+    transform: scale(1.15);
+    opacity: 1;
+    box-shadow: 0 0 12px var(--color-accent-glow);
+  }
+  100% {
+    transform: scale(0.95);
+    opacity: 0.7;
+    box-shadow: 0 0 4px var(--color-accent-glow);
+  }
+}
+
+/* Resizable drag handles */
+.resize-handle-col {
+  width: 4px;
+  height: 100%;
+  cursor: col-resize;
+  background: transparent;
+  transition: background 0.15s ease;
+  z-index: 10;
+}
+
+.resize-handle-col:hover,
+.resize-handle-col.dragging {
+  background: var(--color-accent);
+}
+
+.resize-handle-row {
+  height: 4px;
+  width: 100%;
+  cursor: row-resize;
+  background: transparent;
+  transition: background 0.15s ease;
+  z-index: 10;
+}
+
+.resize-handle-row:hover,
+.resize-handle-row.dragging {
+  background: var(--color-accent);
+}
+
+/* Monospace text helper */
+.font-mono {
+  font-family: var(--font-mono);
+}
+
+/* Buttons */
+.btn-primary {
+  background: var(--color-accent);
+  color: #ffffff;
+  border: none;
+  padding: 5px 12px;
+  border-radius: var(--radius-sm);
+  font-weight: 500;
+  font-size: 12px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: opacity 0.15s ease;
+}
+
+.btn-primary:hover {
+  opacity: 0.9;
+}
+
+.btn-success {
+  background: var(--color-success);
+  color: #0A0B0D;
+  border: none;
+  padding: 6px 14px;
+  border-radius: var(--radius-sm);
+  font-weight: 600;
+  font-size: 12px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: opacity 0.15s ease;
+}
+
+.btn-success:hover {
+  opacity: 0.9;
+}
+
+.btn-outline {
+  background: transparent;
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  padding: 5px 12px;
+  border-radius: var(--radius-sm);
+  font-weight: 500;
+  font-size: 12px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.15s ease;
+}
+
+.btn-outline:hover {
+  background: var(--surface-2);
+  border-color: var(--border-light);
+}
+
+.btn-danger-outline {
+  background: transparent;
+  color: var(--color-failure);
+  border: 1px solid var(--color-failure);
+  padding: 5px 12px;
+  border-radius: var(--radius-sm);
+  font-weight: 500;
+  font-size: 12px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.15s ease;
+}
+
+.btn-danger-outline:hover {
+  background: rgba(240, 96, 90, 0.15);
+}

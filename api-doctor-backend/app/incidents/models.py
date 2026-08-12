@@ -87,3 +87,15 @@ class Incident(BaseModel):
     def add_activity(self, step: str, status: str = "done", message: str = "") -> None:
         self.activity.append(ProgressEvent(step=step, status=status, message=message))
         self.touch()
+
+    def set_activity(self, step: str, status: str, message: str = "") -> None:
+        """Update the latest entry for ``step`` in place (avoids duplicate running
+        entries). If no entry exists yet, append a new one."""
+        for ev in reversed(self.activity):
+            if ev.step == step:
+                ev.status = status
+                ev.message = message
+                ev.timestamp = datetime.now(timezone.utc).isoformat()
+                self.touch()
+                return
+        self.add_activity(step, status, message)

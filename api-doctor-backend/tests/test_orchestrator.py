@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 from app.agent.fix_agent import FixProposal
 from app.agent.root_cause_agent import RootCauseAnalysis
@@ -50,7 +50,7 @@ async def test_full_pipeline_success(monkeypatch):
     )
     monkeypatch.setattr(
         orch.sandbox_runner, "run_verification",
-        AsyncMock(return_value=SandboxResult(passed=True, steps=[
+        MagicMock(return_value=SandboxResult(passed=True, steps=[
             SandboxStep(name="reproduce_failure", passed=True),
             SandboxStep(name="apply_patch", passed=True),
             SandboxStep(name="verify_fix", passed=True),
@@ -106,7 +106,7 @@ async def test_repair_limit_reached(monkeypatch):
     )
     monkeypatch.setattr(
         orch.sandbox_runner, "run_verification",
-        AsyncMock(return_value=SandboxResult(passed=False, error="still crashes", logs="x")),
+        MagicMock(return_value=SandboxResult(passed=False, error="still crashes", logs="x")),
     )
     inc = Incident(request_snapshot={}, stack_trace="t")
     incident_store.create(inc)

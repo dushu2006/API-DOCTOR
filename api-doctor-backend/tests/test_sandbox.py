@@ -57,13 +57,14 @@ def _make_fix() -> FixProposal:
     )
 
 
-async def test_sandbox_reproduce_patch_verify():
+def test_sandbox_reproduce_patch_verify():
     # Keep this fast/deterministic: targeted repro test only.
+    # run_verification is a synchronous (blocking) method — call it directly.
     old_tests = settings.REQUIRE_TESTS
     settings.REQUIRE_TESTS = False
     try:
         runner = SandboxRunner()
-        result = await runner.run_verification(_make_fix(), REQUEST)
+        result = runner.run_verification(_make_fix(), REQUEST)
     finally:
         settings.REQUIRE_TESTS = old_tests
 
@@ -74,7 +75,7 @@ async def test_sandbox_reproduce_patch_verify():
     assert steps["verify_fix"] is True
 
 
-async def test_sandbox_requires_valid_diff():
+def test_sandbox_requires_valid_diff():
     runner = SandboxRunner()
     bad = FixProposal(
         summary="bad",
@@ -83,6 +84,6 @@ async def test_sandbox_requires_valid_diff():
         reason="x",
         risk="high",
     )
-    result = await runner.run_verification(bad, REQUEST)
+    result = runner.run_verification(bad, REQUEST)
     assert result.passed is False
     assert "Invalid diff" in result.error
