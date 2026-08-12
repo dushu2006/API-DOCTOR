@@ -3,6 +3,12 @@
 Diffs are applied with an internal Python patch engine in a sandboxed workspace,
 never on the production repository. Before applying we validate the diff
 structurally and restrict it to paths inside the workspace root.
+
+LLM-generated diffs frequently carry git metadata headers (``diff --git``,
+``index ...``) or paths that do not exactly match the repository layout.
+:func:`normalize_diff` strips non-unified noise and :func:`resolve_diff_paths`
+rewrites diff paths to canonical repository-relative paths so a patch that says
+``app/main.py`` still finds ``src/app/main.py`` when that is the real location.
 """
 
 from __future__ import annotations
@@ -15,9 +21,217 @@ _HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 _UNSAFE_PATH = re.compile(r"(\.\.|^/|:|[\\])")
 
+# Git plumbing lines that may precede the actual unified diff body.
+_NOISE_PREFIXES = (
+    "diff --git ",
+    "index ",
+    "new file mode",
+    "deleted file mode",
+    "old mode",
+    "new mode",
+    "similarity index",
+    "dissimilarity index",
+    "rename from",
+    "rename to",
+    "copy from",
+    "copy to",
+    "Binary files",
+)
+
 
 class PatchError(Exception):
     """Raised for structurally invalid or unsafe patches."""
+
+
+def normalize_diff(diff: str) -> str:
+    """Strip git metadata noise so only the unified diff body remains.
+
+    Guarantees the result starts with a ``--- `` header (synthesizing one from
+    the first ``+++ `` header when the model omitted it) and ends with a
+    newline. Raises :class:`PatchError` when no usable diff body is present.
+    """
+    if not diff or not diff.strip():
+        raise PatchError("Empty diff")
+
+    cleaned: list[str] = []
+    for raw in diff.splitlines():
+        if any(raw.startswith(prefix) for prefix in _NOISE_PREFIXES):
+            continue
+        cleaned.append(raw.rstrip("\r"))
+
+    # Drop leading blanks / stray lines before the first file header.
+    while cleaned and not cleaned[0].startswith("--- ") and not cleaned[0].startswith("+++ "):
+        cleaned.pop(0)
+
+    if not cleaned:
+        raise PatchError("Diff contains no file headers")
+
+    if cleaned[0].startswith("+++ "):
+        # Model emitted only the new-side header; synthesize the old side.
+        new_header = cleaned[0][4:].strip()
+        old_path = new_header[2:] if new_header.startswith("b/") else new_header
+        cleaned.insert(0, f"--- a/{old_path}" if new_header != "/dev/null" else "--- /dev/null")
+
+    return "\n".join(cleaned).rstrip("\n") + "\n"
+
+
+def _header_path(header_line: str) -> str:
+    """Extract the path from a ``--- a/x`` / ``+++ b/x`` header."""
+    path = header_line[4:].strip()
+    # Strip tab-separated timestamps some tools append.
+    return path.split("\t")[0].strip()
+
+
+def resolve_diff_paths(diff: str, workspace_root: Path) -> tuple[str, dict[str, str]]:
+    """Rewrite diff file headers to canonical workspace-relative paths.
+
+    AI models often emit paths that are close but not exact (``main.py``
+    instead of ``app/main.py``, or vice versa). For every header path that does
+    not exist in the workspace we look for the best-matching real file by
+    shared trailing path segments. Paths that already exist (and ``/dev/null``)
+    are left untouched.
+
+    Returns ``(resolved_diff, mapping)`` where mapping is
+    ``{original_path: resolved_path}`` for every rewritten path.
+    """
+    root = Path(workspace_root)
+    normalized = normalize_diff(diff)
+    lines = normalized.splitlines()
+
+    # Index workspace files once.
+    workspace_files: list[str] | None = None
+
+    def _files() -> list[str]:
+        nonlocal workspace_files
+        if workspace_files is None:
+            from app.sandbox.workspace_manager import WorkspaceManager
+
+            workspace_files = WorkspaceManager(repo_root=root).files(root if root.is_dir() else None)
+        return workspace_files
+
+    def _resolve(path: str) -> str:
+        if not path or path == "/dev/null":
+            return path
+        rel = _strip_prefix(path)
+        if (root / rel).is_file():
+            return path  # already correct (keep original a/ b/ prefix)
+        candidates = _files()
+        best = _best_match(rel, candidates)
+        if not best:
+            return path
+        prefix = path[:2] if path.startswith(("a/", "b/")) else ""
+        return f"{prefix}{best}"
+
+    mapping: dict[str, str] = {}
+    out_lines: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith("--- ") and i + 1 < len(lines) and lines[i + 1].startswith("+++ "):
+            old_p = _header_path(line)
+            new_p = _header_path(lines[i + 1])
+            # New-file diffs key off the +++ path; deletions off the --- path.
+            resolved_new = _resolve(new_p)
+            resolved_old = _resolve(old_p) if old_p != "/dev/null" else old_p
+            if new_p != "/dev/null":
+                resolved_old = _align_old_with_new(old_p, new_p, resolved_new)
+            if _strip_prefix(resolved_new) != _strip_prefix(new_p):
+                mapping[_strip_prefix(new_p)] = _strip_prefix(resolved_new)
+            if old_p != "/dev/null" and _strip_prefix(resolved_old) != _strip_prefix(old_p):
+                mapping.setdefault(_strip_prefix(old_p), _strip_prefix(resolved_old))
+            out_lines.append(f"--- {resolved_old}")
+            out_lines.append(f"+++ {resolved_new}")
+            i += 2
+            continue
+        out_lines.append(line)
+        i += 1
+
+    return "\n".join(out_lines) + "\n", mapping
+
+
+def _align_old_with_new(old_p: str, new_p: str, resolved_new: str) -> str:
+    """Keep ---/+++ pairs consistent when the +++ side was relocated."""
+    if old_p == "/dev/null":
+        return old_p
+    if _strip_prefix(old_p) == _strip_prefix(new_p):
+        prefix = old_p[:2] if old_p.startswith(("a/", "b/")) else ""
+        return f"{prefix}{_strip_prefix(resolved_new)}"
+    return _resolve_same(old_p, resolved_new)
+
+
+def _resolve_same(path: str, resolved_other: str) -> str:
+    prefix = path[:2] if path.startswith(("a/", "b/")) else ""
+    return f"{prefix}{_strip_prefix(resolved_other)}"
+
+
+def _best_match(rel: str, candidates: list[str]) -> str | None:
+    """Pick the workspace file sharing the most trailing path segments."""
+    rel_parts = [p for p in Path(rel).parts if p not in (".", "/")]
+    if not rel_parts:
+        return None
+    scored: list[tuple[int, str]] = []
+    for cand in candidates:
+        cand_parts = Path(cand).parts
+        shared = 0
+        for a, b in zip(reversed(rel_parts), reversed(cand_parts)):
+            if a == b:
+                shared += 1
+            else:
+                break
+        if shared > 0:
+            scored.append((shared, cand))
+    if not scored:
+        return None
+    scored.sort(key=lambda item: (-item[0], len(item[1]), item[1]))
+    best_shared, best = scored[0]
+    # Require at least the filename to match; a bare directory-segment match is
+    # too weak to justify rewriting the patch target.
+    if best_shared < 1 or Path(best).name != rel_parts[-1]:
+        return None
+    return best
+
+
+def preview_patch(diff: str, workspace_root: Path) -> list[dict[str, Any]]:
+    """Compute per-file before/after contents without touching the workspace.
+
+    Used to power the side-by-side diff editor. Each entry contains::
+
+        {"path": str, "original": str, "proposed": str, "error": str | None}
+    """
+    root = Path(workspace_root)
+    resolved, _mapping = resolve_diff_paths(diff, root)
+    patches = _parse_unified_diff(resolved)
+    previews: list[dict[str, Any]] = []
+    for patch in patches:
+        rel_old = _strip_prefix(patch["old_path"])
+        rel_new = _strip_prefix(patch["new_path"])
+        entry: dict[str, Any] = {
+            "path": rel_new if patch["new_path"] != "/dev/null" else rel_old,
+            "original": "",
+            "proposed": "",
+            "error": None,
+        }
+        try:
+            if patch["old_path"] == "/dev/null":
+                orig_lines: list[str] = []
+            else:
+                original_file = root / rel_old
+                if not original_file.is_file():
+                    raise PatchError(f"Original file not found: {rel_old}")
+                entry["original"] = original_file.read_text(encoding="utf-8", errors="replace")
+                orig_lines = entry["original"].splitlines()
+            result_lines = _apply_hunks(orig_lines, patch["hunks"])
+            if patch["new_path"] == "/dev/null":
+                entry["proposed"] = ""
+            else:
+                text = "\n".join(result_lines)
+                if result_lines:
+                    text += "\n"
+                entry["proposed"] = text
+        except PatchError as exc:
+            entry["error"] = str(exc)
+        previews.append(entry)
+    return previews
 
 
 def validate_diff(diff: str, allowed_roots: list[str] | None = None) -> list[str]:
@@ -70,11 +284,15 @@ def _check_path(path: str, allowed_roots: list[str] | None) -> None:
 def apply_patch(diff: str, workspace_root: Path) -> list[str]:
     """Apply a validated unified diff to ``workspace_root``.
 
-    Returns the list of affected relative paths. Raises :class:`PatchError` on
-    structural problems or when the patch fails to apply cleanly.
+    The diff is normalized (git metadata stripped) and its paths are resolved
+    against the workspace before application, so relocated files are still
+    found. Returns the list of affected relative paths. Raises
+    :class:`PatchError` on structural problems or when the patch fails to apply
+    cleanly.
     """
-    affected = validate_diff(diff, allowed_roots=[str(workspace_root)])
-    _apply_diff(diff, workspace_root)
+    resolved, _mapping = resolve_diff_paths(diff, workspace_root)
+    affected = validate_diff(resolved, allowed_roots=[str(workspace_root)])
+    _apply_diff(resolved, workspace_root)
     return affected
 
 
@@ -194,23 +412,12 @@ def _locate_hunk(orig_lines: list[str], hunk: dict[str, Any], current_index: int
     return min(matches, key=lambda idx: abs(idx - claimed))
 
 
-def _apply_file_patch(patch: dict[str, Any], workspace_root: Path) -> None:
-    old_path = patch["old_path"]
-    new_path = patch["new_path"]
-    if old_path == "/dev/null":
-        orig_lines: list[str] = []
-    else:
-        rel_old = _strip_prefix(old_path)
-        old_file = workspace_root / rel_old
-        if not old_file.exists():
-            raise PatchError(f"Original file not found: {rel_old}")
-        orig_lines = old_file.read_text(encoding="utf-8", errors="replace").splitlines()
-
-    rel_new = _strip_prefix(new_path)
-    result_lines = []
+def _apply_hunks(orig_lines: list[str], hunks: list[dict[str, Any]]) -> list[str]:
+    """Apply parsed hunks to a list of source lines, returning the new lines."""
+    result_lines: list[str] = []
     current_index = 0
 
-    for hunk in patch["hunks"]:
+    for hunk in hunks:
         old_start = _locate_hunk(orig_lines, hunk, current_index)
         result_lines.extend(orig_lines[current_index:old_start])
         idx = old_start
@@ -240,10 +447,27 @@ def _apply_file_patch(patch: dict[str, Any], workspace_root: Path) -> None:
                 raise PatchError(f"Unsupported patch opcode: {opcode}")
         current_index = idx
     result_lines.extend(orig_lines[current_index:])
+    return result_lines
+
+
+def _apply_file_patch(patch: dict[str, Any], workspace_root: Path) -> None:
+    old_path = patch["old_path"]
+    new_path = patch["new_path"]
+    if old_path == "/dev/null":
+        orig_lines: list[str] = []
+    else:
+        rel_old = _strip_prefix(old_path)
+        old_file = workspace_root / rel_old
+        if not old_file.exists():
+            raise PatchError(f"Original file not found: {rel_old}")
+        orig_lines = old_file.read_text(encoding="utf-8", errors="replace").splitlines()
+
+    rel_new = _strip_prefix(new_path)
+    result_lines = _apply_hunks(orig_lines, patch["hunks"])
 
     if new_path == "/dev/null":
         # file deletion
-        (workspace_root / rel_old).unlink(missing_ok=True)
+        (workspace_root / _strip_prefix(old_path)).unlink(missing_ok=True)
         return
     target_file = workspace_root / rel_new
     target_file.parent.mkdir(parents=True, exist_ok=True)

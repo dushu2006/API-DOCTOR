@@ -25,6 +25,7 @@ from app.incidents.schemas import (
     CreatePRRequest,
     DiagnoseRequest,
     DiagnoseResponse,
+    DiffFilePreview,
     DiffResponse,
     IncidentResponse,
     IngestIncidentRequest,
@@ -179,14 +180,58 @@ async def get_diff(incident_id: str) -> DiffResponse:
     fix = inc.fix_proposal
     if not fix:
         return DiffResponse(incident_id=incident_id, present=False)
+
+    # Compute real before/after content per file so the frontend can render a
+    # proper side-by-side diff editor (and later the applied normal code).
+    previews: list[DiffFilePreview] = []
+    diff_text = fix.get("diff") or ""
+    if diff_text.strip():
+        project = project_store.get(inc.project_id) or project_store.get_current()
+        workspace_path = (
+            project.workspace_path
+            if project and project.workspace_path and Path(project.workspace_path).is_dir()
+            else settings.INTERNAL_REPO_ROOT
+        )
+        try:
+            from app.sandbox.patch_utils import preview_patch
+
+            for entry in preview_patch(diff_text, Path(workspace_path)):
+                previews.append(
+                    DiffFilePreview(
+                        path=entry["path"],
+                        original=entry["original"],
+                        proposed=entry["proposed"],
+                        error=entry.get("error"),
+                    )
+                )
+
+            # Once the patch has been applied to the workspace the "before"
+            # state no longer exists on disk. Show the current (fixed) content
+            # on both sides instead of a stale context-mismatch error.
+            if fix.get("applied_files") and previews:
+                from app.sandbox.workspace_manager import WorkspaceManager
+
+                wm = WorkspaceManager(repo_root=Path(workspace_path))
+                for preview in previews:
+                    current = wm.read_relative(None, preview.path)
+                    if current is not None:
+                        preview.original = current
+                        preview.proposed = current
+                        preview.error = None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Diff preview failed for incident %s: %s", incident_id, exc)
+
     return DiffResponse(
         incident_id=incident_id,
         present=True,
         summary=fix.get("summary"),
-        diff=fix.get("diff"),
+        diff=diff_text,
         files_changed=fix.get("files_changed", []),
         risk=fix.get("risk"),
         reason=fix.get("reason"),
+        applied=bool(fix.get("applied_files")),
+        applied_files=fix.get("applied_files") or [],
+        files=previews,
     )
 
 
@@ -458,7 +503,12 @@ async def approve_file_read(incident_id: str, req: ApproveRequest) -> dict:
 
 @router.post("/{incident_id}/approve-fix")
 async def approve_fix(incident_id: str, req: ApproveRequest) -> dict:
-    """Resume pipeline after user approves the proposed fix."""
+    """Keep Changes / resume pipeline after the user approves the proposed fix.
+
+    Approving applies the patch to the real project workspace first (a
+    pre-apply snapshot is kept), then verification runs against the snapshot.
+    If verification fails, the workspace is rolled back automatically.
+    """
     inc = _get_or_404(incident_id)
     if inc.status != IncidentStatus.AWAITING_FIX_APPROVAL:
         raise HTTPException(
@@ -469,12 +519,48 @@ async def approve_fix(incident_id: str, req: ApproveRequest) -> dict:
         inc.status = IncidentStatus.REQUIRES_HUMAN_REVIEW
         inc.add_activity("fix_approval", "failed", "rejected by user")
         incident_store.update(inc)
+        await event_hub.publish(incident_id, {"type": "progress", "step": "fix_rejected", "status": "done", "message": "Patch rejected — workspace untouched"})
         return {"incident_id": incident_id, "approved": False}
-    
+
+    # Keep Changes: apply to the real workspace, then resume into sandbox
+    # verification (which runs against the pre-apply snapshot). When the
+    # workspace cannot be used (not synced / demo mode) this is a no-op and the
+    # classic sandbox-only verification still runs.
+    await orchestrator.stage_workspace_apply(incident_id)
+
     success = await orchestrator.resume_fix(incident_id)
     if not success:
         raise HTTPException(500, "Failed to resume fix")
     return {"incident_id": incident_id, "approved": True}
+
+
+@router.post("/{incident_id}/apply-fix")
+async def apply_fix(incident_id: str) -> dict:
+    """Explicitly (re)apply the proposed patch to the project workspace."""
+    inc = _get_or_404(incident_id)
+    if not inc.fix_proposal or not (inc.fix_proposal.get("diff") or "").strip():
+        raise HTTPException(409, "No fix proposal available to apply.")
+    outcome = await orchestrator.stage_workspace_apply(incident_id)
+    if not outcome.get("applied"):
+        raise HTTPException(409, outcome.get("reason") or "Patch could not be applied.")
+    return {
+        "incident_id": incident_id,
+        "applied": True,
+        "files": outcome.get("files", []),
+    }
+
+
+@router.post("/{incident_id}/commit")
+async def commit_changes(incident_id: str) -> dict:
+    """Create a real git commit in the project workspace for applied changes."""
+    _get_or_404(incident_id)
+    try:
+        outcome = await orchestrator.commit_changes(incident_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"Commit failed: {exc}") from exc
+    return {"incident_id": incident_id, "committed": True, **outcome}
 
 
 @router.post("/{incident_id}/create-pr")
@@ -508,7 +594,9 @@ async def stream_incident(incident_id: str, request: Request) -> StreamingRespon
             inc = incident_store.get(incident_id)
             if inc:
                 for ev in inc.activity:
-                    yield _sse(ev.model_dump() if hasattr(ev, "model_dump") else ev)
+                    payload = ev.model_dump() if hasattr(ev, "model_dump") else dict(ev)
+                    payload["replay"] = True
+                    yield _sse(payload)
             yield _sse({"type": "connected"})
             while True:
                 if await request.is_disconnected():

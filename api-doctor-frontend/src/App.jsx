@@ -85,6 +85,11 @@ export default function App() {
 
   const [highlightLine, setHighlightLine] = useState(null);
   const [failureReason, setFailureReason] = useState('');
+  const [fileContentVersion, setFileContentVersion] = useState(0);
+
+  // Ref mirror so the SSE subscription does not depend on the selected file.
+  const selectedFileRef = useRef('');
+  useEffect(() => { selectedFileRef.current = selectedFile; }, [selectedFile]);
 
   const isDraggingExplorer = useRef(false);
   const isDraggingDoctor = useRef(false);
@@ -249,11 +254,41 @@ export default function App() {
         }
       })
       .catch(err => {
-        console.warn(`Could not read ${selectedFile}:`, err);
-        if (isMounted) setFileContent('');
+        // AI-suggested paths occasionally don't exist in the synced workspace.
+        // Show a clear placeholder instead of spamming the console with 404s.
+        if (isMounted) {
+          setFileContent(
+            `# ${selectedFile}\n# This file was not found in the synchronized workspace` +
+            (err?.status === 404 ? ' (the agent referenced a path that does not exist).' : '.')
+          );
+        }
       });
     return () => { isMounted = false; };
-  }, [selectedFile, currentProject?.id]);
+  }, [selectedFile, currentProject?.id, fileContentVersion]);
+
+  // Resolve an agent-suggested path against the real workspace file list.
+  // Falls back to a unique suffix match (AI paths are sometimes approximate).
+  const openProjectFile = useCallback((path) => {
+    if (!path) return;
+    const files = projectFiles.files || [];
+    if (files.includes(path)) {
+      setSelectedFile(path);
+      return;
+    }
+    const suffixMatches = files.filter(f => f.endsWith(`/${path}`));
+    if (suffixMatches.length === 1) {
+      setSelectedFile(suffixMatches[0]);
+      return;
+    }
+    const base = path.split('/').pop();
+    const nameMatches = files.filter(f => f === base || f.endsWith(`/${base}`));
+    if (nameMatches.length === 1) {
+      setSelectedFile(nameMatches[0]);
+      return;
+    }
+    // Let the editor surface a friendly "not found" placeholder.
+    setSelectedFile(path);
+  }, [projectFiles]);
 
   const isFetchingIncident = useRef(false);
   const fetchIncidentDetails = useCallback(async (id) => {
@@ -286,11 +321,11 @@ export default function App() {
         Boolean(incidentData?.status) && ACTIVE_DIAGNOSIS_STATUSES.has(incidentData.status)
       );
 
-      // Highlight the offending line for the selected file in the editor. The
-      // callback depends on selectedFile precisely so this stays current.
+      // Highlight the offending line for the selected file in the editor.
       let nextHighlightLine = null;
-      const snippetForFile = selectedFile
-        ? contextData?.code_snippets?.[selectedFile]
+      const currentSelectedFile = selectedFileRef.current;
+      const snippetForFile = currentSelectedFile
+        ? contextData?.code_snippets?.[currentSelectedFile]
         : null;
       if (snippetForFile && typeof snippetForFile === 'object' && snippetForFile.error_line != null) {
         nextHighlightLine = snippetForFile.error_line;
@@ -311,7 +346,7 @@ export default function App() {
     } finally {
       isFetchingIncident.current = false;
     }
-  }, [selectedFile]);
+  }, []);
 
   useEffect(() => {
     if (activeIncidentId) {
@@ -328,12 +363,20 @@ export default function App() {
         if (eventData.step || eventData.message) {
           setTimelineEvents(prev => [...prev, eventData]);
         }
+        // Workspace content changed — refresh file tree, exit diff mode, and
+        // reload the open editor so the applied code shows as normal code.
+        if (['changes_applied', 'changes_rolled_back'].includes(eventData.step) && eventData.status !== 'running') {
+          if (currentProject?.id) loadProjectFiles(currentProject.id, true);
+          setIsDiffMode(false);
+          setFileContentVersion(v => v + 1);
+        }
         fetchIncidentDetails(activeIncidentId);
       },
       () => console.log('SSE stream closed')
     );
     return () => unsubscribe();
-  }, [activeIncidentId, fetchIncidentDetails]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeIncidentId, fetchIncidentDetails, currentProject?.id]);
 
   useEffect(() => {
     const handleMouseMove = (e) => {
@@ -570,7 +613,12 @@ export default function App() {
       setShowProjectSelector(true);
       return;
     }
-    if (activeIncidentId) {
+
+    // Resume only when the current incident is genuinely mid-flight (running
+    // or paused waiting for approval). A finished/failed historical incident
+    // is never re-diagnosed silently — the button starts a NEW diagnosis for
+    // the current production state instead.
+    if (activeIncidentId && activeIncident && ACTIVE_DIAGNOSIS_STATUSES.has(activeIncident.status)) {
       try {
         setIsDiagnosing(true);
         await api.diagnoseIncident(activeIncidentId);
@@ -609,16 +657,70 @@ export default function App() {
   };
 
   const handleApproveFix = async (approved) => {
+    // Legacy entry point (diff-view buttons). Route to the Keep/Reject flow.
+    if (approved) return handleKeepChanges();
+    return handleRejectChanges();
+  };
+
+  // "Keep Changes": apply the AI patch to the real workspace, then the backend
+  // verifies it in an isolated copy of the pre-apply state. If verification
+  // fails the workspace is rolled back automatically.
+  const handleKeepChanges = async () => {
+    if (!activeIncidentId) return;
+    try {
+      setIsDiagnosing(true);
+      if (activeIncident?.status === 'AWAITING_FIX_APPROVAL') {
+        await api.approveFixProposal(activeIncidentId, true);
+      } else {
+        await api.applyFix(activeIncidentId);
+      }
+      setFileContentVersion(v => v + 1);
+      await fetchIncidentDetails(activeIncidentId);
+    } catch (err) {
+      setIsDiagnosing(false);
+      alert(`Keep Changes failed: ${err.message}`);
+    }
+  };
+
+  const handleRejectChanges = async () => {
     if (!activeIncidentId) return;
     try {
       if (activeIncident?.status === 'AWAITING_FIX_APPROVAL') {
-        await api.approveFixProposal(activeIncidentId, approved);
+        await api.approveFixProposal(activeIncidentId, false);
       } else {
-        await api.approveFix(activeIncidentId, approved);
+        await api.approveFix(activeIncidentId, false);
+      }
+      setIsDiagnosing(false);
+      await fetchIncidentDetails(activeIncidentId);
+    } catch (err) {
+      alert(`Failed to reject the patch: ${err.message}`);
+    }
+  };
+
+  const handleApplyFix = async () => {
+    if (!activeIncidentId) return;
+    try {
+      const res = await api.applyFix(activeIncidentId);
+      if (res?.applied) {
+        if (currentProject?.id) await loadProjectFiles(currentProject.id, true);
+        setFileContentVersion(v => v + 1);
+        setIsDiffMode(false);
       }
       await fetchIncidentDetails(activeIncidentId);
     } catch (err) {
-      alert(`Failed to record approval: ${err.message}`);
+      alert(`Failed to apply the patch: ${err.message}`);
+    }
+  };
+
+  const handleCommitChanges = async () => {
+    if (!activeIncidentId) return;
+    try {
+      const res = await api.commitFix(activeIncidentId);
+      if (res?.sha) {
+        await fetchIncidentDetails(activeIncidentId);
+      }
+    } catch (err) {
+      alert(`Commit failed: ${err.message}`);
     }
   };
 
@@ -764,9 +866,11 @@ export default function App() {
             incidentPR={incidentPR}
             timelineEvents={timelineEvents}
             isDiagnosing={isDiagnosing}
-            onApproveFix={handleApproveFix}
+            onKeepChanges={handleKeepChanges}
+            onRejectChanges={handleRejectChanges}
+            onApplyFix={handleApplyFix}
+            onCommitChanges={handleCommitChanges}
             onApproveFileRead={handleApproveFileRead}
-            onApproveFixProposal={handleApproveFixProposal}
             onCreatePR={handleCreatePR}
             onSelectIncident={(id) => setActiveIncidentId(id)}
             onSyncRender={handleSyncRender}
@@ -774,7 +878,7 @@ export default function App() {
             doctorWidth={doctorWidth}
             isDoctorOpen={isDoctorOpen}
             setIsDoctorOpen={setIsDoctorOpen}
-            setSelectedFile={setSelectedFile}
+            setSelectedFile={openProjectFile}
             setIsDiffMode={setIsDiffMode}
           />
         </div>

@@ -136,7 +136,7 @@ export const api = {
   getProjectStatus: (projectId) => request(`/api/projects/${projectId}/status`, { suppressErrorLog: true }),
   syncProject: (projectId) => request(`/api/projects/${projectId}/sync`, { method: 'POST' }),
   getProjectFiles: (projectId) => request(`/api/projects/files/list${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ''}`),
-  getFileContent: (path, projectId) => request(`/api/projects/file-content?path=${encodeURIComponent(path)}${projectId ? `&project_id=${encodeURIComponent(projectId)}` : ''}`),
+  getFileContent: (path, projectId) => request(`/api/projects/file-content?path=${encodeURIComponent(path)}${projectId ? `&project_id=${encodeURIComponent(projectId)}` : ''}`, { suppressErrorLog: true }),
   connectProject: (data) => request('/api/projects/connect', {
     method: 'POST',
     body: JSON.stringify(data)
@@ -172,6 +172,8 @@ export const api = {
     method: 'POST',
     body: JSON.stringify({ approved })
   }),
+  applyFix: (id) => request(`/api/incidents/${id}/apply-fix`, { method: 'POST' }),
+  commitFix: (id) => request(`/api/incidents/${id}/commit`, { method: 'POST' }),
   createPR: (id) => request(`/api/incidents/${id}/create-pr`, {
     method: 'POST',
     body: JSON.stringify({ approved: true })

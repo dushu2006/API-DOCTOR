@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 from app.agent.fix_agent import FixProposal
 from app.core.config import settings
 from app.projects.models import ProjectProfile
-from app.sandbox.patch_utils import PatchError, apply_patch, validate_diff
+from app.sandbox.patch_utils import PatchError, apply_patch, resolve_diff_paths, validate_diff
 from app.sandbox.workspace_manager import WorkspaceManager
 
 logger = logging.getLogger(__name__)
@@ -78,9 +78,11 @@ class SandboxRunner:
     ) -> SandboxResult:
         """Run the reproduce/patch/tests/build/health/verify pipeline on an isolated workspace copy."""
         req = request_snapshot or {}
-        # 0. Validate the diff before touching anything.
+        # 0. Normalize + resolve diff paths against this workspace, then
+        # validate before touching anything.
         try:
-            validate_diff(fix.diff, allowed_roots=[str(self.repo_root)])
+            resolved_diff, _mapping = resolve_diff_paths(fix.diff, self.repo_root)
+            validate_diff(resolved_diff, allowed_roots=[str(self.repo_root)])
         except PatchError as exc:
             return SandboxResult(passed=False, error=f"Invalid diff: {exc}")
 
@@ -103,7 +105,7 @@ class SandboxRunner:
             # 2. Apply the patch.
             t0 = time.perf_counter()
             try:
-                affected = apply_patch(fix.diff, workspace)
+                affected = apply_patch(resolved_diff, workspace)
             except PatchError as exc:
                 return SandboxResult(
                     passed=False, steps=steps, error=f"Patch application failed: {exc}"
