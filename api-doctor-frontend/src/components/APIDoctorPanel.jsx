@@ -495,41 +495,6 @@ export default function APIDoctorPanel({
                 </div>
               </div>
             )}
-            {incidentDiff && incidentDiff.present && (
-              <div style={{ backgroundColor: 'var(--surface-2)', border: '1px solid var(--border-color)', borderRadius: '6px', padding: '12px' }}>
-                <div style={{ fontSize: '10px', fontWeight: 700, color: 'var(--text-muted)', letterSpacing: '0.05em', marginBottom: '8px' }}>
-                  AI PROPOSED PATCH
-                </div>
-
-                <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '10px', fontFamily: 'var(--font-mono)' }}>
-                  {incidentDiff.files_changed?.length || 1} file(s) changed
-                </div>
-
-                <p style={{ fontSize: '12px', color: 'var(--text-primary)', marginBottom: '12px' }}>
-                  {incidentDiff.summary}
-                </p>
-
-                {/* Approvals */}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  <button onClick={() => onApproveFix(true)} className="btn-success" style={{ justifyContent: 'center', width: '100%' }}>
-                    <Check size={14} />
-                    <span>Keep Changes</span>
-                  </button>
-
-                  <div style={{ display: 'flex', gap: '8px' }}>
-                    <button onClick={() => onApproveFix(false)} className="btn-outline" style={{ flex: 1, justifyContent: 'center' }}>
-                      Reject
-                    </button>
-                    <button 
-                      onClick={() => setIsDiffMode(true)} 
-                      style={{ background: 'none', border: 'none', color: 'var(--color-accent)', cursor: 'pointer', fontSize: '11px', textDecoration: 'underline' }}
-                    >
-                      Review Diff
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
 
             {/* Section 6: Sandbox Result */}
             {incidentSandbox && incidentSandbox.present && (
