@@ -219,6 +219,23 @@ export default function APIDoctorPanel({
                 <span>{activeIncident.detection?.source ? `Source: ${activeIncident.detection.source}` : (activeIncident.detection?.endpoint || 'Error Ingested')}</span>
                 <span>{activeIncident.created_at ? new Date(activeIncident.created_at).toLocaleTimeString() : ''}</span>
               </div>
+              {activeIncident.error_message && (
+                <div style={{
+                  fontSize: '11px',
+                  fontFamily: 'var(--font-mono)',
+                  color: 'var(--color-failure)',
+                  backgroundColor: 'rgba(240, 96, 90, 0.08)',
+                  border: '1px solid rgba(240, 96, 90, 0.25)',
+                  borderRadius: '4px',
+                  padding: '6px 8px',
+                  marginTop: '8px',
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-word',
+                  lineHeight: 1.4
+                }}>
+                  {activeIncident.error_message}
+                </div>
+              )}
             </div>
 
             {/* Section 2: Live Investigation Timeline */}

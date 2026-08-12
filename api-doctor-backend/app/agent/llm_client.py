@@ -115,6 +115,11 @@ class LLMClient:
             },
         ]
 
+        # Stream by default: with a slow provider the first tokens arrive
+        # quickly and the connection stays alive while generation continues,
+        # instead of tripping a fixed read timeout on long responses.
+        stream = bool(getattr(settings, "AI_STREAMING", True))
+
         last_error: str | None = None
         attempts = max(1, settings.AI_MAX_RETRIES)
 
@@ -154,6 +159,7 @@ class LLMClient:
                         temperature=temp,
                         max_tokens=tokens,
                         response_format={"type": "json_object"},
+                        stream=stream,
                     )
                 except AIProviderError as exc:
                     last_ai_error = exc
@@ -165,11 +171,13 @@ class LLMClient:
                         is_fallback,
                         str(exc)[:200],
                     )
-                    # If not fallback yet, break inner loop to attempt fallback model
-                    if not is_fallback and len(models_to_try) > 1:
-                        break
-                    # else continue retry
-                    continue
+                    # The provider already exhausted its own retries (bounded
+                    # by the overall AI_TIMEOUT_SECONDS budget) and any fallback
+                    # model it was configured with. Re-calling the same model
+                    # here would just burn the same budget again, so break out
+                    # and let the outer loop try the fallback model — or fail
+                    # fast if there is none.
+                    break
 
                 content = data["choices"][0]["message"]["content"]
                 try:

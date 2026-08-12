@@ -63,8 +63,17 @@ class Settings(BaseSettings):
     # AI behaviour
     # ------------------------------------------------------------------
     AI_PROVIDER: str = "auto"
+    # Overall wall-clock budget for a single provider chat call, including
+    # every retry and any fallback model. Keeps slow/hung endpoints from
+    # stalling the diagnosis pipeline for minutes.
     AI_TIMEOUT_SECONDS: float = 90.0
+    # Per-attempt timeout. For streaming calls this is the idle timeout
+    # between chunks; for non-streaming calls it is the full-request timeout.
     AI_REQUEST_TIMEOUT_SECONDS: float = 35.0
+    # Stream chat completions so long generations are not killed by a
+    # fixed read timeout (first tokens arrive while the model is still
+    # working, keeping the connection alive).
+    AI_STREAMING: bool = True
     AI_MAX_TOKENS: int = 4096
     AI_MAX_RETRIES: int = 3
     AI_TEMPERATURE: float = 0.1
