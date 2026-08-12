@@ -16,6 +16,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import shutil
 import signal
@@ -33,6 +34,22 @@ REPO_ROOT = Path(__file__).resolve().parent
 BACKEND_DIR = REPO_ROOT / "api-doctor-backend"
 FRONTEND_DIR = REPO_ROOT / "api-doctor-frontend"
 PRINT_LOCK = threading.Lock()
+
+# Import names that must be present before uvicorn loads app.main.
+# fastapi/uvicorn alone is not enough — an older or partial venv can
+# import those and still crash on sqlalchemy, cryptography, etc.
+REQUIRED_BACKEND_MODULES: tuple[str, ...] = (
+    "fastapi",
+    "uvicorn",
+    "pydantic",
+    "pydantic_settings",
+    "dotenv",
+    "httpx",
+    "tenacity",
+    "docker",
+    "sqlalchemy",
+    "cryptography",
+)
 
 
 class LauncherError(RuntimeError):
@@ -94,20 +111,76 @@ def _run_setup(command: Sequence[str], cwd: Path, description: str) -> None:
         raise LauncherError(f"{description} failed with exit code {exc.returncode}") from exc
 
 
+def _requirements_hash(requirements: Path) -> str:
+    return hashlib.sha256(requirements.read_bytes()).hexdigest()
+
+
+def _requirements_stamp_path(venv_dir: Path) -> Path:
+    return venv_dir / ".api-doctor-requirements.sha256"
+
+
+def _requirements_are_current(venv_dir: Path, requirements: Path) -> bool:
+    stamp = _requirements_stamp_path(venv_dir)
+    if not stamp.is_file() or not requirements.is_file():
+        return False
+    try:
+        return stamp.read_text(encoding="utf-8").strip() == _requirements_hash(requirements)
+    except OSError:
+        return False
+
+
+def _write_requirements_stamp(venv_dir: Path, requirements: Path) -> None:
+    venv_dir.mkdir(parents=True, exist_ok=True)
+    _requirements_stamp_path(venv_dir).write_text(
+        _requirements_hash(requirements), encoding="utf-8"
+    )
+
+
+def _missing_backend_modules(python: Path) -> list[str]:
+    """Return required modules that the given interpreter cannot import."""
+    script = (
+        "import importlib.util, sys\n"
+        "missing = [name for name in sys.argv[1:] "
+        "if importlib.util.find_spec(name) is None]\n"
+        "sys.stdout.write('\\n'.join(missing))\n"
+    )
+    try:
+        result = subprocess.run(
+            [str(python), "-c", script, *REQUIRED_BACKEND_MODULES],
+            cwd=BACKEND_DIR,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return list(REQUIRED_BACKEND_MODULES)
+    if result.returncode != 0 and not result.stdout.strip():
+        return list(REQUIRED_BACKEND_MODULES)
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def _install_backend_requirements(python: Path, requirements: Path) -> None:
+    _run_setup(
+        [str(python), "-m", "pip", "install", "--upgrade", "pip"],
+        BACKEND_DIR,
+        "Upgrading pip in the backend virtual environment",
+    )
+    _run_setup(
+        [str(python), "-m", "pip", "install", "-r", str(requirements)],
+        BACKEND_DIR,
+        "Installing backend dependencies",
+    )
+
+
 def _prepare_backend(skip_install: bool) -> Path:
     requirements = BACKEND_DIR / "requirements.txt"
+    if not requirements.is_file():
+        raise LauncherError(f"Backend requirements file is missing: {requirements}")
     venv_dir = BACKEND_DIR / ".venv"
     python = _venv_python(venv_dir)
 
     if not python.exists():
-        # Check if current python has packages installed
-        check = subprocess.run(
-            [sys.executable, "-c", "import fastapi, uvicorn"],
-            cwd=BACKEND_DIR,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        if check.returncode == 0:
+        # Allow a fully provisioned system/conda interpreter when no venv exists.
+        if not _missing_backend_modules(Path(sys.executable)):
             return Path(sys.executable)
 
         if skip_install:
@@ -120,28 +193,28 @@ def _prepare_backend(skip_install: bool) -> Path:
             "Creating backend virtual environment",
         )
 
-    dependency_check = subprocess.run(
-        [str(python), "-c", "import fastapi, uvicorn"],
-        cwd=BACKEND_DIR,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    if dependency_check.returncode != 0:
+    missing = _missing_backend_modules(python)
+    stale_requirements = not _requirements_are_current(venv_dir, requirements)
+    if missing or stale_requirements:
         if skip_install:
+            detail = ", ".join(missing) if missing else "requirements.txt changed"
             raise LauncherError(
-                "Backend dependencies are missing. Run: "
+                f"Backend dependencies are missing ({detail}). Run: "
                 f"{python} -m pip install -r {requirements}"
             )
-        _run_setup(
-            [str(python), "-m", "pip", "install", "--upgrade", "pip"],
-            BACKEND_DIR,
-            "Upgrading pip in the backend virtual environment",
-        )
-        _run_setup(
-            [str(python), "-m", "pip", "install", "-r", str(requirements)],
-            BACKEND_DIR,
-            "Installing backend dependencies",
-        )
+        if missing:
+            _print(f"[setup] Backend is missing: {', '.join(missing)}")
+        elif stale_requirements:
+            _print("[setup] Backend requirements.txt changed; syncing virtual environment")
+        _install_backend_requirements(python, requirements)
+        still_missing = _missing_backend_modules(python)
+        if still_missing:
+            raise LauncherError(
+                "Backend still missing after install: "
+                + ", ".join(still_missing)
+                + f". Try: {python} -m pip install -r {requirements}"
+            )
+        _write_requirements_stamp(venv_dir, requirements)
 
     return python
 

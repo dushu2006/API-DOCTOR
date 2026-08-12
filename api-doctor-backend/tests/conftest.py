@@ -11,9 +11,13 @@ from pathlib import Path
 
 import pytest
 
-_REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_BACKEND_ROOT = Path(__file__).resolve().parent.parent
+_TEST_DB = _REPO_ROOT / "data" / "pytest_api_doctor.db"
+_TEST_DB.parent.mkdir(parents=True, exist_ok=True)
+os.environ["DATABASE_URL"] = f"sqlite:///{_TEST_DB}"
 os.environ.setdefault("SANDBOX_MODE", "local")
-os.environ.setdefault("REPO_ROOT", _REPO_ROOT)
+os.environ.setdefault("REPO_ROOT", str(_BACKEND_ROOT))
 os.environ.setdefault("MAX_REPAIR_ATTEMPTS", "2")
 os.environ.setdefault("AUTO_CREATE_PR", "false")
 os.environ.setdefault("DEMO_MODE", "true")
@@ -31,9 +35,11 @@ os.environ.setdefault("RENDER_API_BASE_URL", "https://api.render.com/v1")
 
 @pytest.fixture(autouse=True)
 def _clear_incidents():
+    from app.db.base import init_db
     from app.incidents.store import incident_store
     from app.projects.store import project_store
 
+    init_db()
     incident_store.clear()
     project_store.reset()
     # Clear AI cache between tests to avoid cross-test contamination
@@ -56,4 +62,4 @@ def _clear_incidents():
 
 @pytest.fixture
 def repo_root() -> Path:
-    return Path(_REPO_ROOT)
+    return _BACKEND_ROOT
