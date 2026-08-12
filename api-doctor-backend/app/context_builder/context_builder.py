@@ -44,7 +44,7 @@ _IGNORED_TRACE_PARTS = {
 
 def _is_project_frame(frame: StackFrame) -> bool:
     """True if frame looks like project code (not vendored/framework)."""
-    if not frame.relative_path:
+    if not frame.path or not frame.relative_path:
         return False
     lower_file = (frame.file or "").lower()
     lower_rel = (frame.relative_path or "").lower()

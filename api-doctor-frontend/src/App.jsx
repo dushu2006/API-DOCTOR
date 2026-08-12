@@ -255,8 +255,10 @@ export default function App() {
     return () => { isMounted = false; };
   }, [selectedFile, currentProject?.id]);
 
+  const isFetchingIncident = useRef(false);
   const fetchIncidentDetails = useCallback(async (id) => {
-    if (!id) return;
+    if (!id || isFetchingIncident.current) return;
+    isFetchingIncident.current = true;
     try {
       const [inc, ctx, diff, sb, pr] = await Promise.allSettled([
         api.getIncident(id),
@@ -265,37 +267,11 @@ export default function App() {
         api.getIncidentSandbox(id),
         api.getIncidentPR(id)
       ]);
-
-      if (inc.status === 'fulfilled') {
-        const incData = inc.value;
-        setActiveIncident(incData);
-        setIsDiagnosing(ACTIVE_DIAGNOSIS_STATUSES.has(incData.status));
-        if (Array.isArray(incData.activity) && incData.activity.length > 0) {
-          setTimelineEvents(incData.activity);
-        }
-
-        const rc = incData.root_cause;
-        if (rc?.affected_files?.length > 0) {
-          setSelectedFile(rc.affected_files[0]);
-          if (rc.affected_lines?.length > 0) {
-            setHighlightLine(rc.affected_lines[0]);
-          }
-          if (rc.root_cause) {
-            setFailureReason(rc.root_cause);
-          }
-        }
-      }
-      if (ctx.status === 'fulfilled') {
-        setIncidentContext(ctx.value);
-        if (ctx.value.implicated_files?.length > 0 && !selectedFile) {
-          setSelectedFile(ctx.value.implicated_files[0]);
-        }
-      }
-      if (diff.status === 'fulfilled') setIncidentDiff(diff.value);
-      if (sb.status === 'fulfilled') setIncidentSandbox(sb.value);
-      if (pr.status === 'fulfilled') setIncidentPR(pr.value);
+...
     } catch (err) {
       console.error('Failed to fetch incident details:', err);
+    } finally {
+      isFetchingIncident.current = false;
     }
   }, [selectedFile]);
 
@@ -597,7 +573,11 @@ export default function App() {
   const handleApproveFix = async (approved) => {
     if (!activeIncidentId) return;
     try {
-      await api.approveFix(activeIncidentId, approved);
+      if (activeIncident?.status === 'AWAITING_FIX_APPROVAL') {
+        await api.approveFixProposal(activeIncidentId, approved);
+      } else {
+        await api.approveFix(activeIncidentId, approved);
+      }
       await fetchIncidentDetails(activeIncidentId);
     } catch (err) {
       alert(`Failed to record approval: ${err.message}`);

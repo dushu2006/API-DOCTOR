@@ -139,7 +139,9 @@ def _resolve_frame_path(file_str: str, root: Path | None) -> tuple[Path | None, 
     # Try treating as relative path to root
     candidate = (root / file_str.lstrip("/")).resolve()
     try:
-        if candidate.is_file() or candidate.is_relative_to(root):
+        # Only return as a resolved project path if the file actually exists
+        # within the workspace. is_relative_to alone is too permissive.
+        if candidate.is_file() and candidate.is_relative_to(root):
             rel = str(candidate.relative_to(root)).replace("\\", "/")
             return candidate, rel
     except (ValueError, OSError):
