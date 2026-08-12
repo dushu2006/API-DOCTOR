@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import sys
 from datetime import datetime, timezone
@@ -60,6 +61,11 @@ class JsonFormatter(logging.Formatter):
 
 
 def setup_logging(level: str = "INFO") -> None:
+    # Allow callers / subprocesses to override the level via env so sandboxed
+    # runs can silence INFO-level JSON noise on stdout (where we print markers).
+    # The env var always wins when set, so callers can pass a default but
+    # operators/tests can still tune verbosity.
+    level = os.environ.get("API_DOCTOR_LOG_LEVEL", level)
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JsonFormatter())
     root = logging.getLogger()

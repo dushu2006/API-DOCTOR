@@ -18,6 +18,7 @@ Latency / streaming improvements:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any
@@ -132,12 +133,13 @@ class Orchestrator:
             inc.add_activity("logs_retrieved", "done")
             inc.add_activity("stack_trace_parsed", "done")
             inc.add_activity("relevant_source_identified", "done", f"{len(context['affected_files'])} files")
+            inc.set_activity("collecting_context", "done", f"{len(context['affected_files'])} files")
             log_operation(logger, inc.id, "collect_context", "ok", duration=time.perf_counter() - t0)
             await emit(inc.id, "collecting_context", "done", f"{len(context['affected_files'])} files")
         except Exception as exc:
             inc.status = IncidentStatus.INVESTIGATION_FAILED
             inc.error_message = f"context build failed: {exc}"
-            inc.add_activity("collecting_context", "failed", str(exc))
+            inc.set_activity("collecting_context", "failed", str(exc)[:200])
             log_operation(logger, inc.id, "collect_context", "failed", error=str(exc))
             await emit(inc.id, "collecting_context", "failed", str(exc)[:500])
             raise
@@ -160,17 +162,20 @@ class Orchestrator:
                     f"{settings.MIN_ROOT_CAUSE_CONFIDENCE}): {analysis.reason}"
                 )
                 inc.add_activity("root_cause_identified", "failed", inc.error_message)
+                inc.set_activity("investigating", "failed", inc.error_message[:200])
                 log_operation(logger, inc.id, "root_cause", "failed", duration=time.perf_counter() - t0, error=inc.error_message)
                 await emit(inc.id, "investigating", "failed", inc.error_message)
                 return
             inc.status = IncidentStatus.ROOT_CAUSE_FOUND
             inc.add_activity("root_cause_identified", "done", analysis.category)
+            inc.set_activity("investigating", "done", f"{analysis.category} conf={analysis.confidence:.2f}")
             log_operation(logger, inc.id, "root_cause", "ok", duration=time.perf_counter() - t0, error=f"confidence={analysis.confidence:.2f}")
             await emit(inc.id, "investigating", "done", f"{analysis.category} conf={analysis.confidence:.2f}")
         except Exception as exc:
             inc.status = IncidentStatus.INVESTIGATION_FAILED
             inc.error_message = f"root cause analysis failed: {exc}"
             inc.add_activity("root_cause_identified", "failed", str(exc))
+            inc.set_activity("investigating", "failed", str(exc)[:200])
             log_operation(logger, inc.id, "root_cause", "failed", error=str(exc))
             await emit(inc.id, "investigating", "failed", str(exc)[:500])
             raise
@@ -192,13 +197,13 @@ class Orchestrator:
                 analysis, files
             )
             inc.fix_proposal = proposal.model_dump()
-            inc.add_activity("fix_generated", "done", proposal.summary)
+            inc.set_activity("fix_generated", "done", proposal.summary)
             log_operation(logger, inc.id, "fix_generation", "ok", duration=time.perf_counter() - t0)
             await emit(inc.id, "fix_generated", "done", proposal.summary)
         except Exception as exc:
             inc.status = IncidentStatus.FIX_GENERATION_FAILED
             inc.error_message = f"fix generation failed: {exc}"
-            inc.add_activity("fix_generated", "failed", str(exc))
+            inc.set_activity("fix_generated", "failed", str(exc)[:200])
             log_operation(logger, inc.id, "fix_generation", "failed", error=str(exc))
             await emit(inc.id, "fix_generated", "failed", str(exc)[:500])
         finally:
@@ -225,16 +230,20 @@ class Orchestrator:
         while attempt < max(1, settings.MAX_REPAIR_ATTEMPTS):
             attempt += 1
             inc.attempt_count = attempt
-            inc.add_activity("sandbox_started", "running", f"attempt {attempt}")
+            inc.set_activity("sandbox_started", "running", f"attempt {attempt}")
             incident_store.update(inc)
             await emit(inc.id, "sandbox_started", "running", f"attempt {attempt}")
             t0 = time.perf_counter()
             try:
-                result = await self.sandbox_runner.run_verification(proposal, inc.request_snapshot)
+                # run_verification performs blocking subprocess calls — run it
+                # on a worker thread so the status endpoint stays responsive.
+                result = await asyncio.to_thread(
+                    self.sandbox_runner.run_verification, proposal, inc.request_snapshot
+                )
             except Exception as exc:
                 inc.status = IncidentStatus.VERIFICATION_FAILED
                 inc.error_message = f"sandbox error: {exc}"
-                inc.add_activity("sandbox_started", "failed", str(exc))
+                inc.set_activity("sandbox_started", "failed", str(exc)[:200])
                 log_operation(logger, inc.id, "sandbox", "failed", error=str(exc))
                 incident_store.update(inc)
                 await emit(inc.id, "sandbox_started", "failed", str(exc)[:500])
@@ -249,7 +258,7 @@ class Orchestrator:
                 break
             if attempt < settings.MAX_REPAIR_ATTEMPTS:
                 # Regenerate the fix with the failure feedback.
-                inc.add_activity("fix_generated", "failed", f"attempt {attempt} failed — regenerating")
+                inc.set_activity("fix_generated", "running", f"attempt {attempt} failed — regenerating")
                 incident_store.update(inc)
                 await emit(inc.id, "fix_generated", "running", f"Attempt {attempt} failed, retrying")
                 try:
@@ -265,16 +274,17 @@ class Orchestrator:
 
         if result and result.passed:
             inc.status = IncidentStatus.FIX_VERIFIED
-            inc.add_activity("sandbox_started", "done")
+            inc.set_activity("sandbox_started", "done")
             for step in result.steps:
-                inc.add_activity(step.name, "done" if step.passed else "failed", step.detail[:200])
+                inc.add_activity(step.name, "done" if step.passed else "failed", _summarize_step(step))
             inc.add_activity("fix_verified", "done")
             await emit(inc.id, "sandbox_started", "done", "Verification passed")
             await emit(inc.id, "fix_verified", "done", "Fix verified")
         else:
             inc.status = IncidentStatus.REPAIR_LIMIT_REACHED if attempt >= settings.MAX_REPAIR_ATTEMPTS else IncidentStatus.VERIFICATION_FAILED
             inc.error_message = result.error if result else "verification failed"
-            inc.add_activity("fix_verified", "failed", inc.error_message)
+            inc.set_activity("sandbox_started", "failed", inc.error_message[:200])
+            inc.add_activity("fix_verified", "failed", inc.error_message[:200])
             await emit(inc.id, "fix_verified", "failed", inc.error_message[:500])
         incident_store.update(inc)
 
@@ -393,6 +403,64 @@ class Orchestrator:
             "> Generated automatically. Please review before merging.",
         ]
         return "\n".join(lines)
+
+
+def _summarize_step(step: Any) -> str:
+    """Produce a short, human-friendly summary for a sandbox step's activity
+    message. Strips parent JSON log lines so consumers don't see raw
+    ``SANDBOX_MODE=local ...`` noise mixed into the step detail."""
+    name = getattr(step, "name", "")
+    passed = bool(getattr(step, "passed", False))
+    detail = (getattr(step, "detail", "") or "").strip()
+    if not detail:
+        return "ok" if passed else "failed"
+
+    # Drop structured JSON log lines (one per line) coming from sandboxed
+    # subprocess stdout/stderr — they start with '{' and contain "timestamp".
+    cleaned_lines: list[str] = []
+    for line in detail.splitlines():
+        s = line.strip()
+        if s.startswith("{") and "\"timestamp\"" in s:
+            continue
+        cleaned_lines.append(line)
+    cleaned = "\n".join(cleaned_lines).strip()
+
+    # For steps that print known markers, pick the human-readable tail.
+    if name == "reproduce_failure":
+        # Keep just the exception type/message line if present.
+        for line in reversed(cleaned_lines):
+            s = line.strip()
+            if s.startswith("AttributeError") or s.startswith("TypeError") or s.startswith("ValueError") or s.startswith("Error"):
+                return s[:200]
+        # Fall back to status/body/ok tail.
+        tail = _tail_markers(cleaned, ("STATUS", "BODY", "OK"))
+        return tail[:200] if tail else ("reproduced 5xx" if passed else "did not reproduce failure")
+    if name == "apply_patch":
+        return cleaned[:200] or ("patch applied" if passed else "patch failed")
+    if name in ("run_tests", "verify_fix"):
+        tail = _tail_markers(cleaned, ("TEST_STATUS", "TEST_BODY", "TEST_OK", "STATUS", "BODY", "OK"))
+        return tail[:200] if tail else ("passed" if passed else "failed")
+    if name == "run_build":
+        return cleaned[:200] or ("compileall ok" if passed else "build failed")
+    if name == "health_check":
+        for line in cleaned_lines:
+            if line.strip().startswith("HEALTH"):
+                return line.strip()[:200]
+        return cleaned[:200] or ("health ok" if passed else "health failed")
+    return cleaned[:200]
+
+
+def _tail_markers(text: str, markers: tuple[str, ...]) -> str:
+    """Return a compact string made of the last line matching each marker."""
+    lines = [l for l in text.splitlines() if l.strip()]
+    picked: list[str] = []
+    seen: set[str] = set()
+    for line in lines:
+        for m in markers:
+            if line.strip().startswith(m) and m not in seen:
+                picked.append(line.strip())
+                seen.add(m)
+    return " | ".join(picked)
 
 
 # Singleton for import convenience / background task wiring.

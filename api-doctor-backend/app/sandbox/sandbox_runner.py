@@ -59,9 +59,14 @@ class SandboxRunner:
         self.timeout = settings.SANDBOX_TIMEOUT_SECONDS
 
     # ------------------------------------------------------------------
-    async def run_verification(
+    def run_verification(
         self, fix: FixProposal, request_snapshot: dict
     ) -> SandboxResult:
+        """Run the reproduce/patch/tests/build/health/verify pipeline.
+
+        Implemented as a synchronous method so it can be executed off the
+        event loop via ``asyncio.to_thread`` (subprocess calls are blocking).
+        """
         # 0. Validate the diff before touching anything.
         try:
             validate_diff(fix.diff, allowed_roots=[str(self.repo_root)])
@@ -218,6 +223,9 @@ class SandboxRunner:
         )
         env = dict(os.environ)
         env["PYTHONPATH"] = str(workspace)
+        # Silence the JSON INFO logs on stdout from app imports in the
+        # subprocess — they otherwise swamp our STATUS/BODY/OK markers.
+        env.setdefault("API_DOCTOR_LOG_LEVEL", "WARNING")
         try:
             result = subprocess.run(
                 [sys.executable, "-c", script],

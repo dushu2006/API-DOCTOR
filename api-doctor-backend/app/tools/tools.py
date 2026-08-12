@@ -106,6 +106,8 @@ async def _get_deployment_status(project_id: str = "default") -> dict:
 
 async def _run_test(incident_id: str) -> dict:
     # Runs the sandbox verification (reproduce -> patch -> tests) for an incident.
+    import asyncio
+
     from app.incidents.store import incident_store
     from app.sandbox.sandbox_runner import SandboxRunner
 
@@ -113,7 +115,8 @@ async def _run_test(incident_id: str) -> dict:
     if not inc or not inc.fix_proposal:
         return {"error": "incident has no fix proposal to test"}
     runner = SandboxRunner()
-    result = await runner.run_verification(inc.fix_proposal, inc.request_snapshot)
+    # run_verification is synchronous (subprocess-blocking); offload it.
+    result = await asyncio.to_thread(runner.run_verification, inc.fix_proposal, inc.request_snapshot)
     return result.model_dump()
 
 
