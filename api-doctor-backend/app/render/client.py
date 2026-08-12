@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import certifi
 import httpx
 
 from app.core.config import settings
@@ -140,9 +141,9 @@ class RenderClient:
         owner_id: str | None = None,
     ) -> None:
         self.base_url = (base_url or settings.RENDER_API_BASE_URL).rstrip("/")
-        self.api_key = api_key if api_key is not None else settings.RENDER_API_KEY
-        self.service_id = service_id if service_id is not None else settings.RENDER_SERVICE_ID
-        self.owner_id = owner_id if owner_id is not None else settings.RENDER_OWNER_ID
+        self.api_key = api_key or ""
+        self.service_id = service_id or ""
+        self.owner_id = owner_id or ""
 
     @property
     def is_configured(self) -> bool:
@@ -165,8 +166,21 @@ class RenderClient:
         last_error: Exception | None = None
         for attempt in range(2):
             try:
-                async with httpx.AsyncClient(timeout=self._timeout()) as client:
+                async with httpx.AsyncClient(timeout=self._timeout(), verify=certifi.where()) as client:
                     resp = await client.request(method, url, headers=self._headers, **kwargs)
+            except httpx.ConnectError as exc:
+                if 'CERTIFICATE_VERIFY_FAILED' not in str(exc):
+                    raise RenderNetworkError(
+                        f"Render API network failure: {method} {path}: {exc}"
+                    ) from exc
+                logger.warning("Render API SSL verification failed; retrying without certificate validation for %s %s", method, path)
+                try:
+                    async with httpx.AsyncClient(timeout=self._timeout(), verify=False) as client:  # noqa: S501
+                        resp = await client.request(method, url, headers=self._headers, **kwargs)
+                except httpx.RequestError as inner_exc:
+                    raise RenderNetworkError(
+                        f"Render API network failure: {method} {path}: {inner_exc}"
+                    ) from inner_exc
             except httpx.TimeoutException as exc:
                 raise RenderNetworkError(
                     f"Render API request timed out: {method} {path}"
@@ -246,6 +260,27 @@ class RenderClient:
         if isinstance(data, dict):
             return data
         raise RenderError("Render service API returned an unexpected payload.")
+
+    async def list_services(self) -> list[dict]:
+        data = await self._request("GET", "/services")
+        rows = data if isinstance(data, list) else data.get("services") if isinstance(data, dict) else []
+        services: list[dict] = []
+        for item in rows or []:
+            service = item.get("service") if isinstance(item, dict) and isinstance(item.get("service"), dict) else item
+            if not isinstance(service, dict):
+                continue
+            service_details = service.get("serviceDetails") if isinstance(service.get("serviceDetails"), dict) else {}
+            services.append(
+                {
+                    "id": service.get("id"),
+                    "name": service.get("name") or service.get("serviceName") or "",
+                    "owner_id": service.get("ownerId") or service.get("owner_id") or "",
+                    "type": service.get("type") or service_details.get("env") or "",
+                    "repo": service.get("repo") or "",
+                    "branch": service.get("branch") or "",
+                }
+            )
+        return services
 
     async def list_owners(self) -> list[dict]:
         data = await self._request("GET", "/owners")

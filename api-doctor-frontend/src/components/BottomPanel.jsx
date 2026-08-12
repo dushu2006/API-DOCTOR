@@ -43,6 +43,25 @@ export default function BottomPanel({
     }
   };
 
+  const rawLogText = [
+    activeIncident?.detection?.raw_logs,
+    activeIncident?.detection?.stack_trace,
+    incidentContext?.stack_trace,
+    activeIncident?.error_message,
+  ].find(value => typeof value === 'string' && value.trim()) || '';
+
+  const extractedTrace = incidentContext?.stack_trace || activeIncident?.detection?.stack_trace || '';
+  const normalizedLogFilter = logFilter.trim().toLowerCase();
+  const filteredLogLines = rawLogText
+    ? rawLogText.split('\n').filter(line => !normalizedLogFilter || line.toLowerCase().includes(normalizedLogFilter))
+    : [];
+  const traceLines = extractedTrace
+    ? extractedTrace.split('\n').filter(line => !normalizedLogFilter || line.toLowerCase().includes(normalizedLogFilter))
+    : [];
+  const hasSeparateTrace = Boolean(
+    extractedTrace.trim() && rawLogText.trim() && extractedTrace.trim() !== rawLogText.trim()
+  );
+
   if (isBottomCollapsed) {
     return (
       <div style={{
@@ -181,8 +200,8 @@ export default function BottomPanel({
 
         {/* Logs Tab */}
         {activeBottomTab === 'logs' && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-            <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            <div style={{ display: 'flex', gap: '8px', marginBottom: '2px', flexWrap: 'wrap' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '4px', backgroundColor: 'var(--surface-2)', padding: '2px 8px', borderRadius: '4px', border: '1px solid var(--border-color)' }}>
                 <Search size={12} style={{ color: 'var(--text-muted)' }} />
                 <input 
@@ -193,14 +212,63 @@ export default function BottomPanel({
                   style={{ background: 'none', border: 'none', color: 'var(--text-primary)', fontSize: '11px', outline: 'none' }}
                 />
               </div>
+              {activeIncident?.detection?.source && (
+                <span style={{ fontSize: '10px', padding: '3px 6px', borderRadius: '4px', backgroundColor: 'rgba(124, 140, 248, 0.12)', color: 'var(--color-accent)' }}>
+                  SOURCE: {String(activeIncident.detection.source).toUpperCase()}
+                </span>
+              )}
+              {activeIncident?.detection?.service && (
+                <span style={{ fontSize: '10px', padding: '3px 6px', borderRadius: '4px', backgroundColor: 'var(--surface-2)', color: 'var(--text-muted)', border: '1px solid var(--border-color)' }}>
+                  SERVICE: {activeIncident.detection.service}
+                </span>
+              )}
+              {activeIncident?.detection?.endpoint && (
+                <span style={{ fontSize: '10px', padding: '3px 6px', borderRadius: '4px', backgroundColor: 'var(--surface-2)', color: 'var(--text-muted)', border: '1px solid var(--border-color)' }}>
+                  {activeIncident.detection.method || 'GET'} {activeIncident.detection.endpoint}
+                </span>
+              )}
             </div>
 
-            {incidentContext && incidentContext.stack_trace ? (
-              <pre style={{ whiteSpace: 'pre-wrap', color: 'var(--color-failure)', fontSize: '11px' }}>
-                {incidentContext.stack_trace}
-              </pre>
+            {rawLogText ? (
+              <>
+                <div style={{ backgroundColor: 'var(--surface-2)', border: '1px solid var(--border-color)', borderRadius: '6px', overflow: 'hidden' }}>
+                  <div style={{ padding: '8px 10px', borderBottom: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-primary)' }}>
+                      Captured runtime logs
+                    </span>
+                    <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>
+                      {filteredLogLines.length}/{rawLogText.split('\n').length} lines
+                    </span>
+                  </div>
+                  <pre style={{ whiteSpace: 'pre-wrap', color: 'var(--text-primary)', fontSize: '11px', margin: 0, padding: '10px', lineHeight: 1.6, maxHeight: '220px', overflowY: 'auto' }}>
+                    {filteredLogLines.length > 0
+                      ? filteredLogLines.map((line, index) => `${String(index + 1).padStart(3, ' ')} | ${line}`).join('\n')
+                      : 'No log lines match the current filter.'}
+                  </pre>
+                </div>
+
+                {hasSeparateTrace && (
+                  <div style={{ backgroundColor: 'rgba(240, 96, 90, 0.08)', border: '1px solid rgba(240, 96, 90, 0.25)', borderRadius: '6px', overflow: 'hidden' }}>
+                    <div style={{ padding: '8px 10px', borderBottom: '1px solid rgba(240, 96, 90, 0.2)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontSize: '11px', fontWeight: 600, color: 'var(--color-failure)' }}>
+                        Extracted stack trace
+                      </span>
+                      <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>
+                        {traceLines.length}/{extractedTrace.split('\n').length} lines
+                      </span>
+                    </div>
+                    <pre style={{ whiteSpace: 'pre-wrap', color: 'var(--color-failure)', fontSize: '11px', margin: 0, padding: '10px', lineHeight: 1.6, maxHeight: '160px', overflowY: 'auto' }}>
+                      {traceLines.length > 0
+                        ? traceLines.join('\n')
+                        : 'No stack-trace lines match the current filter.'}
+                    </pre>
+                  </div>
+                )}
+              </>
             ) : (
-              <div style={{ color: 'var(--text-muted)' }}>No exception logs captured for this incident.</div>
+              <div style={{ color: 'var(--text-muted)' }}>
+                No logs captured for this incident yet. Use Sync Render Logs to extract them automatically, or paste logs with Ingest Log.
+              </div>
             )}
           </div>
         )}

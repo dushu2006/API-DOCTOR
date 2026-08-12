@@ -63,24 +63,13 @@ def _load_env_file() -> None:
 
 def _validate_configuration() -> None:
     """Validate and log configuration state."""
-    owner = os.getenv("GITHUB_OWNER", "")
-    repo = os.getenv("GITHUB_REPO", "")
-    token = os.getenv("GITHUB_TOKEN", "")
-    render_sid = os.getenv("RENDER_SERVICE_ID", "")
-    render_key = os.getenv("RENDER_API_KEY", "")
     ai_key = os.getenv("NVIDIA_API_KEY", "")
     ai_provider = os.getenv("AI_PROVIDER", "auto")
+    database_url = os.getenv("DATABASE_URL", "sqlite:///./data/api_doctor.db")
 
     _print("\n=== API DOCTOR CONFIGURATION ===")
-    if owner and repo:
-        _print(f"✓ GitHub Project: {owner}/{repo} (Token: {'Configured' if token else 'None/Public'})")
-    else:
-        _print("○ GitHub Project: Not configured in .env (Use UI to connect a repository)")
-
-    if render_sid and render_key:
-        _print(f"✓ Render Service: {render_sid}")
-    else:
-        _print("○ Render Integration: Not configured (Render log sync disabled)")
+    _print(f"✓ Database: {database_url}")
+    _print("○ Project integrations: configured in-app and stored in the database")
 
     if ai_key:
         _print(f"✓ AI Provider: NVIDIA NIM (Provider={ai_provider})")

@@ -68,7 +68,7 @@ class WorkspaceManager:
         workspace_base: Path | str | None = None,
     ) -> None:
         self.workspace_base = Path(workspace_base or settings.WORKSPACE_DIR).resolve()
-        self.repo_root = Path(repo_root or settings.REPO_ROOT).resolve()
+        self.repo_root = Path(repo_root or settings.INTERNAL_REPO_ROOT).resolve()
 
     def get_project_workspace_path(self, owner: str, repo: str) -> Path:
         """Return the baseline workspace directory for a given owner/repo."""
@@ -86,8 +86,8 @@ class WorkspaceManager:
         target_dir = self.get_project_workspace_path(owner, repo)
         target_dir.parent.mkdir(parents=True, exist_ok=True)
 
-        token = token or settings.GITHUB_TOKEN
-        branch = branch or settings.GITHUB_DEFAULT_BRANCH or "main"
+        token = token or ""
+        branch = branch or "main"
 
         # Determine git clone URL
         if token:

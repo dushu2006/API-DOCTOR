@@ -14,8 +14,7 @@ from typing import Any, Literal
 
 import httpx
 
-from app.core.config import settings
-from app.security.sanitizer import sanitize
+from app.security.sanitizer import redact_text, sanitize
 
 logger = logging.getLogger(__name__)
 
@@ -44,17 +43,20 @@ def _build_detection(
     source: str = "manual",
     raw_logs: str = "",
 ) -> DetectionResult:
+    safe_error_message = redact_text(str(error_message or ""))
+    safe_stack_trace = redact_text(str(stack_trace or ""))
+    safe_raw_logs = redact_text(str(raw_logs or ""))
     return DetectionResult(
         error=True,
         status_code=status_code,
-        error_message=error_message,
-        stack_trace=stack_trace,
+        error_message=safe_error_message,
+        stack_trace=safe_stack_trace,
         endpoint=path,
         method=method,
         timestamp=_now_iso(),
         service=service,
         source=source,
-        raw_logs=raw_logs,
+        raw_logs=safe_raw_logs,
         request_snapshot=sanitize(
             {"method": method, "path": path, "body": body, "headers": headers}
         ),
@@ -297,13 +299,8 @@ class FailureDetector:
         payload: dict | None,
         headers: dict[str, str] | None,
     ) -> httpx.Response:
-        if settings.DEMO_API_BASE_URL:
-            url = settings.DEMO_API_BASE_URL.rstrip("/") + endpoint
-            async with httpx.AsyncClient(timeout=settings.HTTP_TIMEOUT_SECONDS) as client:
-                request = client.build_request(method, url, json=payload, headers=headers)
-                return await client.send(request)
-
         from app.main import app
+
         transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
         async with httpx.AsyncClient(
             transport=transport, base_url="http://test", timeout=30.0

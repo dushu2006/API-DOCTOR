@@ -93,7 +93,7 @@ class ContextBuilder:
         retriever: LocalRetriever | None = None,
         semantic: SemanticRetriever | None = None,
     ) -> None:
-        self.repo_root = Path(repo_root or settings.REPO_ROOT).resolve()
+        self.repo_root = Path(repo_root or settings.INTERNAL_REPO_ROOT).resolve()
         self.retriever = retriever or LocalRetriever(self.repo_root)
         self.semantic = semantic or SemanticRetriever(self.retriever)
 

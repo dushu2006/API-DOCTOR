@@ -7,9 +7,11 @@ import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from app.auth.dependencies import require_authenticated_user
+from app.auth.dependencies import require_authenticated_user
 from app.core.config import settings
 from app.detector.failure_detector import FailureDetector
 from app.events.hub import event_hub
@@ -28,20 +30,14 @@ from app.incidents.schemas import (
     StatusResponse,
 )
 from app.incidents.store import incident_store
+from app.integrations.factory import get_log_provider
 from app.orchestrator import orchestrator
 from app.projects.store import project_store
-from app.render.client import (
-    RenderAuthError,
-    RenderClient,
-    RenderError,
-    RenderNetworkError,
-    RenderNotFoundError,
-    RenderRateLimitError,
-)
+from app.render.client import RenderError
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/incidents", tags=["incidents"])
+router = APIRouter(prefix="/api/incidents", tags=["incidents"], dependencies=[Depends(require_authenticated_user)])
 
 SCENARIOS = {
     "external_api": ("GET", "/api/v1/external/status", None),
@@ -51,18 +47,25 @@ SCENARIOS = {
 }
 
 
+def _resolved_project_id(project_id: str | None = None) -> str | None:
+    if project_id:
+        return project_id
+    current = project_store.get_current()
+    return current.id if current else None
+
+
 # ---------------------------------------------------------------------------
 # Listing & retrieval
 # ---------------------------------------------------------------------------
 @router.get("", response_model=list[IncidentResponse])
 async def list_incidents(project_id: str | None = None) -> list[IncidentResponse]:
-    return [IncidentResponse.from_model(i) for i in incident_store.list_all(project_id)]
+    resolved = _resolved_project_id(project_id)
+    return [IncidentResponse.from_model(i) for i in incident_store.list_all(resolved)]
 
 
 @router.get("/{incident_id}", response_model=IncidentResponse)
 async def get_incident(incident_id: str) -> IncidentResponse:
-    inc = _get_or_404(incident_id)
-    return IncidentResponse.from_model(inc)
+    return IncidentResponse.from_model(_get_or_404(incident_id))
 
 
 @router.get("/{incident_id}/status", response_model=StatusResponse)
@@ -140,11 +143,11 @@ async def get_pr(incident_id: str) -> PRInfoResponse:
 # ---------------------------------------------------------------------------
 @router.post("/ingest", response_model=DiagnoseResponse)
 async def ingest_incident(req: IngestIncidentRequest) -> DiagnoseResponse:
-    """Ingest a real incident from Render, CI failures, manual logs, or user reports."""
     trace = req.stack_trace or req.log_text or req.raw_logs or req.message or ""
     if not trace.strip():
         raise HTTPException(400, "Log text, stack trace, or error message is required.")
 
+    project_id = req.project_id or _resolved_project_id() or "default"
     incident = await orchestrator.ingest_incident(
         source=req.source,
         raw_logs=req.raw_logs or req.log_text or trace,
@@ -154,7 +157,7 @@ async def ingest_incident(req: IngestIncidentRequest) -> DiagnoseResponse:
         method=req.method or "GET",
         status_code=req.status_code or 500,
         service_id=req.service_id or "",
-        project_id=req.project_id or "default",
+        project_id=project_id,
     )
 
     if req.auto_diagnose:
@@ -180,75 +183,66 @@ def _render_error_payload(exc: RenderError, service_id: str | None = None) -> di
 
 
 @router.post("/sync-render")
-async def sync_render_logs(service_id: str | None = None, auto_diagnose: bool = True) -> dict[str, Any]:
-    """Retrieve runtime logs from Render service and detect incidents.
-
-    Success and failure are explicit. Log-retrieval failures are never reported
-    as a successful sync.
-    """
-    project = project_store.get_current()
-    sid = (
-        service_id
-        or (project.render_service_id if project and project.is_connected else None)
-        or settings.RENDER_SERVICE_ID
-    )
-    client = RenderClient(service_id=sid)
-
-    if not client.api_key:
+async def sync_render_logs(
+    service_id: str | None = None,
+    auto_diagnose: bool = True,
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    project = project_store.get(project_id) if project_id else project_store.get_current()
+    if not project:
         return {
             "status": "error",
-            "message": "Render integration is not configured: RENDER_API_KEY is missing.",
-            "error_type": "unconfigured",
-            "incidents_created": [],
-            "logs_retrieved": 0,
-        }
-    if not client.service_id:
-        return {
-            "status": "error",
-            "message": (
-                "Render service is not configured. Provide service_id, set "
-                "RENDER_SERVICE_ID, or connect a project with a Render service."
-            ),
+            "message": "No project is configured.",
             "error_type": "unconfigured",
             "incidents_created": [],
             "logs_retrieved": 0,
         }
 
+    render = project_store.resolve_render(project.id)
+    if service_id:
+        render["service_id"] = service_id
+    if not render.get("api_key"):
+        return {
+            "status": "error",
+            "message": "Render integration is not configured for the selected project.",
+            "error_type": "unconfigured",
+            "incidents_created": [],
+            "logs_retrieved": 0,
+        }
+    if not render.get("service_id"):
+        return {
+            "status": "error",
+            "message": "Render service is not configured for the selected project.",
+            "error_type": "unconfigured",
+            "incidents_created": [],
+            "logs_retrieved": 0,
+        }
+
+    provider = get_log_provider(project.id, "render")
     try:
-        fetch = await client.fetch_runtime_logs(limit=200)
-    except RenderAuthError as exc:
-        logger.warning("Render log retrieval auth error: %s", exc)
-        return _render_error_payload(exc, client.service_id)
-    except RenderNotFoundError as exc:
-        logger.warning("Render log retrieval not found: %s", exc)
-        return _render_error_payload(exc, client.service_id)
-    except RenderRateLimitError as exc:
-        logger.warning("Render log retrieval rate-limited: %s", exc)
-        return _render_error_payload(exc, client.service_id)
-    except RenderNetworkError as exc:
-        logger.warning("Render log retrieval network failure: %s", exc)
-        return _render_error_payload(exc, client.service_id)
+        payload = await provider.get_logs(
+            service_id=render.get("service_id"),
+            owner_id=render.get("owner_id"),
+            limit=200,
+        )
     except RenderError as exc:
         logger.warning("Render log retrieval failed: %s", exc)
-        return _render_error_payload(exc, client.service_id)
+        return _render_error_payload(exc, render.get("service_id"))
 
-    logs = fetch.logs
-    project_id = project.id if project and project.is_connected else "default"
-    project_ready = bool(project and project.is_connected)
-
+    logs = payload.get("logs") or []
     if not logs:
         return {
             "status": "success",
-            "message": fetch.message or "Render logs retrieved successfully; no log entries found.",
+            "message": payload.get("message") or "No production errors were found in the selected time range.",
             "logs_retrieved": 0,
             "incidents_created": [],
-            "service_id": fetch.service_id,
-            "owner_id": fetch.owner_id,
-            "service_name": fetch.service_name,
+            "service_id": payload.get("service_id"),
+            "owner_id": payload.get("owner_id"),
+            "service_name": payload.get("service_name"),
         }
 
-    detector = FailureDetector(service=client.service_id)
-    detections = detector.detect_from_logs(logs, service=client.service_id, source="render")
+    detector = FailureDetector(service=render.get("service_id") or "render")
+    detections = detector.detect_from_logs(logs, service=render.get("service_id") or "render", source="render")
 
     created_ids: list[str] = []
     for det in detections:
@@ -260,30 +254,25 @@ async def sync_render_logs(service_id: str | None = None, auto_diagnose: bool = 
             endpoint=det.get("endpoint", ""),
             method=det.get("method", "GET"),
             status_code=det.get("status_code", 500),
-            service_id=client.service_id,
-            project_id=project_id,
+            service_id=render.get("service_id", ""),
+            project_id=project.id,
         )
         created_ids.append(inc.id)
 
-    # Never start AI diagnosis against the API Doctor repo itself.
     diagnosed = False
-    if auto_diagnose and created_ids and project_ready:
+    if auto_diagnose and created_ids and project.is_connected:
         diagnosed = bool(orchestrator.start_diagnosis(created_ids[0]))
-    elif auto_diagnose and created_ids and not project_ready:
-        logger.info("Skipping auto-diagnosis: no GitHub project is connected.")
 
     return {
         "status": "success",
-        "message": (
-            f"Retrieved {len(logs)} Render log entries; {len(detections)} incident(s) detected."
-        ),
+        "message": f"Retrieved {len(logs)} Render log entries; {len(detections)} incident(s) detected.",
         "logs_retrieved": len(logs),
         "incidents_detected": len(detections),
         "incidents_created": created_ids,
         "diagnosis_started": diagnosed,
-        "service_id": fetch.service_id,
-        "owner_id": fetch.owner_id,
-        "service_name": fetch.service_name,
+        "service_id": payload.get("service_id"),
+        "owner_id": payload.get("owner_id"),
+        "service_name": payload.get("service_name"),
     }
 
 
@@ -292,7 +281,8 @@ async def sync_render_logs(service_id: str | None = None, auto_diagnose: bool = 
 # ---------------------------------------------------------------------------
 @router.post("/trigger/{scenario}", response_model=DiagnoseResponse)
 async def trigger_scenario(scenario: str) -> DiagnoseResponse:
-    """Trigger demo scenario (retained for isolated tests / development)."""
+    if not settings.DEMO_MODE:
+        raise HTTPException(404, "Demo scenarios are disabled when DEMO_MODE=false.")
     if scenario not in SCENARIOS:
         raise HTTPException(400, f"unknown scenario {scenario!r}; choose from {sorted(SCENARIOS)}")
     method, path, payload = SCENARIOS[scenario]
@@ -366,7 +356,7 @@ async def stream_incident(incident_id: str, request: Request) -> StreamingRespon
             inc = incident_store.get(incident_id)
             if inc:
                 for ev in inc.activity:
-                    yield _sse(ev.model_dump())
+                    yield _sse(ev.model_dump() if hasattr(ev, "model_dump") else ev)
             yield _sse({"type": "connected"})
             while True:
                 if await request.is_disconnected():

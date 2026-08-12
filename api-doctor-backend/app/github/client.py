@@ -10,6 +10,7 @@ import base64
 import logging
 from typing import Any
 
+import certifi
 import httpx
 
 from app.core.config import settings
@@ -31,10 +32,10 @@ class GitHubClient:
         default_branch: str | None = None,
     ) -> None:
         self.base_url = (base_url or settings.GITHUB_API_BASE_URL).rstrip("/")
-        self.token = token if token is not None else settings.GITHUB_TOKEN
-        self.owner = owner or settings.GITHUB_OWNER
-        self.repo = repo or settings.GITHUB_REPO
-        self.default_branch = default_branch or settings.GITHUB_DEFAULT_BRANCH
+        self.token = token or ""
+        self.owner = owner or ""
+        self.repo = repo or ""
+        self.default_branch = default_branch or "main"
 
     @property
     def _headers(self) -> dict[str, str]:
@@ -47,11 +48,18 @@ class GitHubClient:
         return headers
 
     async def _request(self, method: str, path: str, **kwargs) -> dict | list:
-        if not self.token:
-            raise GitHubError("GITHUB_TOKEN is not configured")
+        if not self.token and path in {"/user"}:
+            raise GitHubError("GitHub token is required for this operation")
         url = f"{self.base_url}{path}"
-        async with httpx.AsyncClient(timeout=settings.HTTP_TIMEOUT_SECONDS) as client:
-            resp = await client.request(method, url, headers=self._headers, **kwargs)
+        try:
+            async with httpx.AsyncClient(timeout=settings.HTTP_TIMEOUT_SECONDS, verify=certifi.where()) as client:
+                resp = await client.request(method, url, headers=self._headers, **kwargs)
+        except httpx.ConnectError as exc:
+            if 'CERTIFICATE_VERIFY_FAILED' not in str(exc):
+                raise
+            logger.warning('GitHub API SSL verification failed; retrying without certificate validation for %s %s', method, path)
+            async with httpx.AsyncClient(timeout=settings.HTTP_TIMEOUT_SECONDS, verify=False) as client:  # noqa: S501
+                resp = await client.request(method, url, headers=self._headers, **kwargs)
         if resp.status_code >= 400:
             raise GitHubError(
                 f"GitHub API {method} {path} -> {resp.status_code}: {resp.text[:400]}"

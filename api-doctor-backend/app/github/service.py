@@ -8,6 +8,7 @@ from typing import Any
 
 from app.github.client import GitHubClient
 from app.projects.models import Project
+from app.projects.store import project_store
 from app.sandbox.workspace_manager import WorkspaceManager
 
 logger = logging.getLogger(__name__)
@@ -23,13 +24,14 @@ class GitHubService:
     def sync_project_workspace(self, project: Project) -> Path:
         """Synchronize the configured GitHub repository into a local working workspace."""
         wm = WorkspaceManager()
-        owner = project.github_owner or self.client.owner
-        repo = project.github_repo or self.client.repo
-        branch = project.github_branch or self.client.default_branch
-        token = project.github_token or self.client.token
+        github = project_store.resolve_github(project.id)
+        owner = project.github_owner or github.get("owner") or self.client.owner
+        repo = project.github_repo or github.get("repo") or self.client.repo
+        branch = project.github_branch or github.get("branch") or self.client.default_branch
+        token = github.get("token") or self.client.token
 
         if not owner or not repo:
-            raise ValueError("Project must have github_owner and github_repo configured")
+            raise ValueError("Project must have GitHub repository configuration")
 
         ws_path = wm.sync_repository(
             owner=owner,

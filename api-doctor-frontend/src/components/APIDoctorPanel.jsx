@@ -13,9 +13,7 @@ import {
   ArrowUpRight, 
   ChevronUp,
   Server,
-  FileText,
-  AlertOctagon,
-  Sparkles
+  FileText
 } from 'lucide-react';
 
 const STEP_LABELS = {
@@ -44,19 +42,6 @@ const STEP_LABELS = {
   pr_created: 'Pull request created',
 };
 
-function activityLabel(ev) {
-  const message = (ev?.message || '').trim();
-  if (message) return message;
-  const step = ev?.step || '';
-  if (STEP_LABELS[step]) {
-    if (step === 'fix_generated' && ev?.status === 'done') return 'Fix generated';
-    if (step === 'sandbox_started' && ev?.status === 'done') return 'Sandbox finished';
-    if (step === 'tests_started' && ev?.status === 'done') return 'Tests finished';
-    return STEP_LABELS[step];
-  }
-  return step ? step.replace(/_/g, ' ') : 'Processing investigation step';
-}
-
 export default function APIDoctorPanel({ 
   incidentsList = [],
   activeIncident,
@@ -66,7 +51,6 @@ export default function APIDoctorPanel({
   incidentPR,
   timelineEvents = [],
   isDiagnosing,
-  onStartDiagnosis,
   onApproveFix,
   onCreatePR,
   onSelectIncident,
@@ -79,7 +63,6 @@ export default function APIDoctorPanel({
   setIsDiffMode
 }) {
   const [expandedFiles, setExpandedFiles] = useState(true);
-  const [expandedFileDetails, setExpandedFileDetails] = useState({});
   const [historyOpen, setHistoryOpen] = useState(true);
 
   const rootCause = activeIncident?.root_cause;
@@ -90,9 +73,6 @@ export default function APIDoctorPanel({
 
   if (!isDoctorOpen) return null;
 
-  const toggleFileDetail = (path) => {
-    setExpandedFileDetails(prev => ({ ...prev, [path]: !prev[path] }));
-  };
 
   const getClassification = () => {
     if (!rootCause) return null;
@@ -172,7 +152,7 @@ export default function APIDoctorPanel({
               Ready to diagnose your project.
             </h3>
             <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '20px', lineHeight: 1.5 }}>
-              Retrieve real Render logs or ingest production errors to begin automated investigation.
+              Retrieve real Render logs automatically, or paste production errors manually when the logs come from another source.
             </p>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
               <button 
@@ -258,7 +238,7 @@ export default function APIDoctorPanel({
                         )}
                         <div style={{ flex: 1, display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
                           <span style={{ color: ev.status === 'running' ? 'var(--color-accent)' : 'var(--text-primary)', fontWeight: ev.status === 'running' ? 600 : 400 }}>
-                            {ev.step?.replace(/_/g, ' ') || ev.message || 'Processing investigation step'}
+                            {ev.message || STEP_LABELS[ev.step] || ev.step?.replace(/_/g, ' ') || 'Processing investigation step'}
                           </span>
                           <span style={{ fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--text-muted)' }}>
                             {ev.timestamp ? new Date(ev.timestamp).toLocaleTimeString() : ''}
@@ -298,7 +278,7 @@ export default function APIDoctorPanel({
                     {incidentContext.implicated_files.map((filePath) => (
                       <div key={filePath} style={{ borderBottom: '1px solid var(--border-color)' }}>
                         <div 
-                          onClick={() => { setSelectedFile(filePath); toggleFileDetail(filePath); }}
+                          onClick={() => { setSelectedFile(filePath); }}
                           style={{
                             padding: '6px 12px',
                             display: 'flex',

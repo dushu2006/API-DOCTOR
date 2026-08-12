@@ -1,8 +1,8 @@
 """Application configuration.
 
-All configuration values come from the environment (optionally a ``.env`` file).
-Secrets are loaded here and are never exposed to the frontend, logs, or LLM
-prompts (see :mod:`app.security.sanitizer`).
+Only application-level, runtime-level, and AI-level configuration is stored in
+environment variables. Project and integration configuration live in the
+application database.
 """
 
 from __future__ import annotations
@@ -14,6 +14,12 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+_BACKEND_ROOT = Path(__file__).resolve().parents[2]
+_DATA_DIR = _REPOSITORY_ROOT / "data"
+_WORKSPACE_DIR = _DATA_DIR / "workspaces"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -23,10 +29,18 @@ class Settings(BaseSettings):
     )
 
     # ------------------------------------------------------------------
+    # Application
+    # ------------------------------------------------------------------
+    APP_ENV: str = "development"
+    LOG_LEVEL: str = "INFO"
+    HOST: str = "0.0.0.0"
+    PORT: int = 8000
+    SECRET_KEY: str = "api-doctor-dev-secret"
+    DATABASE_URL: str = "sqlite:///./data/api_doctor.db"
+
+    # ------------------------------------------------------------------
     # Operational Mode
     # ------------------------------------------------------------------
-    # DEMO_MODE=false is default (REAL PROJECT MODE).
-    # Only when DEMO_MODE=true may the demo_api patient be mounted / used.
     DEMO_MODE: bool = False
 
     # ------------------------------------------------------------------
@@ -34,59 +48,41 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     NVIDIA_API_KEY: str = ""
     NVIDIA_BASE_URL: str = "https://integrate.api.nvidia.com/v1"
-
-    # Model routing (exact names stay configurable — never hard-coded).
-    # Faster defaults to cut latency; users may override in .env.
     INVESTIGATOR_MODEL: str = "deepseek-ai/deepseek-v4-flash-0731"
     CODER_MODEL: str = "z-ai/glm-5.2"
     FAST_MODEL: str = "nvidia/nemotron-3-nano-30b-a3b"
     EMBEDDING_MODEL: str = "nvidia/nv-embedcode-7b-v1"
 
     # ------------------------------------------------------------------
-    # GitHub integration
+    # GitHub / Render API defaults (non-secret, non-project-specific)
     # ------------------------------------------------------------------
     GITHUB_API_BASE_URL: str = "https://api.github.com"
-    GITHUB_TOKEN: str = ""
-    GITHUB_OWNER: str = ""
-    GITHUB_REPO: str = ""
-    GITHUB_DEFAULT_BRANCH: str = "main"
-
-    # ------------------------------------------------------------------
-    # Render integration
-    # ------------------------------------------------------------------
     RENDER_API_BASE_URL: str = "https://api.render.com/v1"
-    RENDER_API_KEY: str = ""
-    RENDER_SERVICE_ID: str = ""
-    # Optional workspace/owner id. When empty, resolved from GET /services/{id}.ownerId.
-    RENDER_OWNER_ID: str = ""
 
     # ------------------------------------------------------------------
     # AI behaviour
     # ------------------------------------------------------------------
-    # auto: NVIDIA when a key exists, otherwise the deterministic mock.
-    # This is deliberately independent from SANDBOX_MODE.
-    AI_PROVIDER: str = "auto"  # "auto" | "nvidia" | "mock"
+    AI_PROVIDER: str = "auto"
     AI_TIMEOUT_SECONDS: float = 90.0
-    # Short per-request timeout for fail-fast + fallback (distinct from overall AI_TIMEOUT).
     AI_REQUEST_TIMEOUT_SECONDS: float = 35.0
     AI_MAX_TOKENS: int = 4096
     AI_MAX_RETRIES: int = 3
     AI_TEMPERATURE: float = 0.1
-    # Fallback: if primary model times out / fails, retry once with FAST_MODEL.
     AI_MODEL_FALLBACK: bool = True
 
-    # Caching (exact cache keyed by hash(model + system_prompt + user_prompt)).
+    # ------------------------------------------------------------------
+    # AI cache
+    # ------------------------------------------------------------------
     AI_CACHE_ENABLED: bool = True
     AI_CACHE_TTL_SECONDS: int = 3600
     AI_CACHE_MAX_SIZE: int = 128
-    # Optional semantic cache (needs EMBEDDING_MODEL; degrades gracefully if it fails).
     AI_CACHE_SEMANTIC_ENABLED: bool = False
     AI_CACHE_SEMANTIC_THRESHOLD: float = 0.9
 
     # ------------------------------------------------------------------
     # Sandbox
     # ------------------------------------------------------------------
-    SANDBOX_MODE: str = "local"  # "docker" | "local"
+    SANDBOX_MODE: str = "local"
     SANDBOX_BASE_IMAGE: str = "python:3.11-slim"
     SANDBOX_TIMEOUT_SECONDS: int = 120
     SANDBOX_MEMORY_LIMIT: str = "512m"
@@ -115,13 +111,13 @@ class Settings(BaseSettings):
     MIN_ROOT_CAUSE_CONFIDENCE: float = 0.6
 
     # ------------------------------------------------------------------
-    # Repository / Workspace
+    # Internal paths
     # ------------------------------------------------------------------
-    REPO_ROOT: str = str(Path(__file__).resolve().parent.parent.parent)
-    WORKSPACE_DIR: str = str(Path(__file__).resolve().parent.parent.parent / "workspace")
-
-    # The "patient" demo API (used by the detector in demo mode).
-    DEMO_API_BASE_URL: str = ""
+    REPOSITORY_ROOT: str = str(_REPOSITORY_ROOT)
+    BACKEND_ROOT: str = str(_BACKEND_ROOT)
+    DATA_DIR: str = str(_DATA_DIR)
+    WORKSPACE_DIR: str = str(_WORKSPACE_DIR)
+    INTERNAL_REPO_ROOT: str = str(_BACKEND_ROOT)
 
     # ------------------------------------------------------------------
     # HTTP
@@ -132,23 +128,14 @@ class Settings(BaseSettings):
     def has_nvidia(self) -> bool:
         return bool(self.NVIDIA_API_KEY)
 
-    @property
-    def has_github(self) -> bool:
-        return bool(self.GITHUB_OWNER and self.GITHUB_REPO)
-
-    @property
-    def has_render(self) -> bool:
-        return bool(self.RENDER_API_KEY and self.RENDER_SERVICE_ID)
-
     def secret_scan_patterns(self) -> list[str]:
-        """High-value secret names for sanitisation (case-insensitive)."""
         return [
             "nvidia_api_key",
             "github_token",
             "render_api_key",
             "openai_api_key",
             "anthropic_api_key",
-            "stripe",
+            "secret_key",
             "database_url",
             "postgres",
             "mysql",
