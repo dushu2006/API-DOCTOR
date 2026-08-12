@@ -111,6 +111,19 @@ class ProjectStore:
     def count(self, user_id: str | None = None) -> int:
         return len(self.list_all(user_id))
 
+    def reset(self) -> None:
+        """Remove all projects and users. Used by tests to isolate state."""
+        from app.db.models import SessionRecord, UserRecord
+
+        with self._lock:
+            with session_scope() as session:
+                for row in session.execute(select(ProjectRecord)).scalars().all():
+                    session.delete(row)
+                for row in session.execute(select(SessionRecord)).scalars().all():
+                    session.delete(row)
+                for row in session.execute(select(UserRecord)).scalars().all():
+                    session.delete(row)
+
     def get(self, project_id: str, user_id: str | None = None) -> Optional[Project]:
         with session_scope() as session:
             stmt = self._base_stmt().where(ProjectRecord.id == project_id)

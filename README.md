@@ -18,7 +18,7 @@ python run.py
 
 The launcher will:
 
-1. Create `api-doctor-backend/.venv` and install Python requirements when missing.
+1. Create `api-doctor-backend/.venv` and install every package in `api-doctor-backend/requirements.txt` when any runtime import (including SQLAlchemy) is missing or the requirements file has changed.
 2. Install frontend packages when `node_modules` is missing.
 3. Start FastAPI at `http://127.0.0.1:8000`.
 4. Start Vite at `http://127.0.0.1:5173`.
