@@ -74,6 +74,11 @@ def parse_stack_trace(trace: str, repo_root: Path | str | None = None) -> Parsed
                         rel = file_str
                 except (ValueError, OSError):
                     pass
+        if rel is not None:
+            try:
+                rel = Path(rel).as_posix()
+            except Exception:
+                pass
         frames.append(
             StackFrame(file=file_str, line=line_no, function=func, path=path, relative_path=rel)
         )
