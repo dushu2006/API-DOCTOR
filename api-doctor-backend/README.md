@@ -76,6 +76,14 @@ cp .env.example .env        # add your NVIDIA_API_KEY (and GitHub/Render when us
 
 ### 3. Run
 
+To start the backend, frontend, and browser together from the repository root:
+
+```bash
+python ../run.py
+```
+
+To start only this backend:
+
 ```bash
 python run.py               # backend on http://localhost:8000
 ```
