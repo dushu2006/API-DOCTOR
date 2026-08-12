@@ -111,6 +111,12 @@ class NIMClient(AIClient):
         if fallback_enabled and fast_model and fast_model != model:
             models_to_try.append(fast_model)
 
+        # Overall wall-clock budget across every attempt and fallback model.
+        # A slow or hung endpoint must fail fast with a clear error instead
+        # of silently burning minutes of wall-clock time per retry.
+        overall_budget = max(1.0, float(self.timeout))
+        deadline = time.perf_counter() + overall_budget
+
         last_exc: Exception | None = None
         overall_start = time.perf_counter()
 
@@ -123,7 +129,15 @@ class NIMClient(AIClient):
             payload = {**base_payload, "model": try_model}
 
             for attempt in range(attempts):
-                per_attempt_timeout = self.request_timeout
+                # Enforce the overall budget before spending another attempt.
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0:
+                    raise AIProviderError(
+                        f"AI chat timed out after {overall_budget:.0f}s "
+                        f"(AI_TIMEOUT_SECONDS budget) trying {models_to_try}"
+                    ) from last_exc
+
+                per_attempt_timeout = min(self.request_timeout, remaining)
                 try:
                     start = time.perf_counter()
                     data = await self._single_chat_request(
@@ -229,7 +243,11 @@ class NIMClient(AIClient):
                 break
 
         # All models exhausted
-        err_msg = f"AI chat failed after trying {models_to_try}: {last_exc}"
+        elapsed = time.perf_counter() - overall_start
+        err_msg = (
+            f"AI chat failed after trying {models_to_try} "
+            f"(elapsed {elapsed:.1f}s): {last_exc}"
+        )
         raise AIProviderError(err_msg) from last_exc
 
     async def _stream_chat(self, url: str, payload: dict, model: str, timeout: float | None = None) -> dict[str, Any]:
@@ -260,7 +278,9 @@ class NIMClient(AIClient):
                     if obj.get("usage"):
                         usage = obj["usage"]
         except httpx.TimeoutException as exc:
-            raise AIProviderError(f"NVIDIA NIM streaming timed out after {t}s") from exc
+            # Re-raise so chat() treats it like any other request timeout
+            # (logs, backs off, and can still fall back to FAST_MODEL).
+            raise exc
         content = "".join(full_text)
         return {
             "choices": [{"message": {"role": "assistant", "content": content}}],
