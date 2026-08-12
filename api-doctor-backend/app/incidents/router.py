@@ -1,14 +1,17 @@
-"""Incident dashboard API endpoints."""
+"""Incident dashboard and ingestion API endpoints."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from app.core.config import settings
+from app.detector.failure_detector import FailureDetector
 from app.events.hub import event_hub
 from app.incidents.models import Incident, IncidentStatus
 from app.incidents.schemas import (
@@ -19,12 +22,14 @@ from app.incidents.schemas import (
     DiagnoseResponse,
     DiffResponse,
     IncidentResponse,
+    IngestIncidentRequest,
     PRInfoResponse,
     SandboxResponse,
     StatusResponse,
 )
 from app.incidents.store import incident_store
 from app.orchestrator import orchestrator
+from app.render.client import RenderClient
 
 logger = logging.getLogger(__name__)
 
@@ -123,10 +128,88 @@ async def get_pr(incident_id: str) -> PRInfoResponse:
 
 
 # ---------------------------------------------------------------------------
+# Real Incident Ingestion Endpoints
+# ---------------------------------------------------------------------------
+@router.post("/ingest", response_model=DiagnoseResponse)
+async def ingest_incident(req: IngestIncidentRequest) -> DiagnoseResponse:
+    """Ingest a real incident from Render, CI failures, manual logs, or user reports."""
+    trace = req.stack_trace or req.log_text or req.raw_logs or req.message or ""
+    if not trace.strip():
+        raise HTTPException(400, "Log text, stack trace, or error message is required.")
+
+    incident = await orchestrator.ingest_incident(
+        source=req.source,
+        raw_logs=req.raw_logs or req.log_text or trace,
+        stack_trace=trace,
+        message=req.message or "",
+        endpoint=req.endpoint or "",
+        method=req.method or "GET",
+        status_code=req.status_code or 500,
+        service_id=req.service_id or "",
+        project_id=req.project_id or "default",
+    )
+
+    if req.auto_diagnose:
+        orchestrator.start_diagnosis(incident.id)
+
+    return DiagnoseResponse(
+        incident_id=incident.id,
+        status=incident.status,
+        message=f"Incident ingested from {req.source} and diagnosis started.",
+    )
+
+
+@router.post("/sync-render")
+async def sync_render_logs(service_id: str | None = None, auto_diagnose: bool = True) -> dict[str, Any]:
+    """Retrieve runtime logs from Render service and detect incidents."""
+    client = RenderClient(service_id=service_id)
+    if not client.api_key or not client.service_id:
+        return {
+            "status": "unconfigured",
+            "message": "Render integration is not configured.",
+            "incidents_created": [],
+        }
+
+    logs = await client.get_logs(limit=200)
+    if not logs:
+        return {
+            "status": "ok",
+            "message": "No logs retrieved from Render service.",
+            "incidents_created": [],
+        }
+
+    detector = FailureDetector(service=client.service_id)
+    detections = detector.detect_from_logs(logs, service=client.service_id, source="render")
+
+    created_ids: list[str] = []
+    for det in detections:
+        inc = await orchestrator.ingest_incident(
+            source="render",
+            raw_logs=det.get("raw_logs", ""),
+            stack_trace=det.get("stack_trace", ""),
+            message=det.get("error_message", ""),
+            endpoint=det.get("endpoint", ""),
+            method=det.get("method", "GET"),
+            status_code=det.get("status_code", 500),
+            service_id=client.service_id,
+        )
+        created_ids.append(inc.id)
+        if auto_diagnose and len(created_ids) == 1:
+            orchestrator.start_diagnosis(inc.id)
+
+    return {
+        "status": "ok",
+        "message": f"Processed Render logs: {len(detections)} incident(s) detected.",
+        "incidents_created": created_ids,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Workflow triggers
 # ---------------------------------------------------------------------------
 @router.post("/trigger/{scenario}", response_model=DiagnoseResponse)
 async def trigger_scenario(scenario: str) -> DiagnoseResponse:
+    """Trigger demo scenario (retained for isolated tests / development)."""
     if scenario not in SCENARIOS:
         raise HTTPException(400, f"unknown scenario {scenario!r}; choose from {sorted(SCENARIOS)}")
     method, path, payload = SCENARIOS[scenario]
@@ -163,7 +246,7 @@ async def approve(incident_id: str, req: ApproveRequest) -> dict:
     inc.add_activity("human_review", "done", "approved" if req.approved else "rejected")
     incident_store.update(inc)
     if not req.approved:
-        inc.status = IncidentStatus.REPAIR_LIMIT_REACHED
+        inc.status = IncidentStatus.REQUIRES_HUMAN_REVIEW
         incident_store.update(inc)
         return {"incident_id": incident_id, "approved": False}
     return {"incident_id": incident_id, "approved": True}
@@ -197,7 +280,6 @@ async def stream_incident(incident_id: str, request: Request) -> StreamingRespon
 
     async def gen():
         try:
-            # Replay existing activity first so late subscribers catch up.
             inc = incident_store.get(incident_id)
             if inc:
                 for ev in inc.activity:

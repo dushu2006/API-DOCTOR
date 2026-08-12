@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""Run the API Doctor backend and frontend for local development.
+"""Run the API Doctor real project debugging system (backend + frontend).
 
 Usage:
     python run.py
 
-Creates missing dependency directories, starts FastAPI and Vite, waits until
-both services respond, and opens the dashboard in the default browser.
-Press Ctrl+C once to stop both services.
+1. Verifies Python 3.11+ and Node.js environment.
+2. Installs required dependencies if needed.
+3. Loads environment variables from .env.
+4. Validates required configuration.
+5. Starts FastAPI backend.
+6. Starts Vite frontend.
+7. Opens browser workspace.
 """
 
 from __future__ import annotations
@@ -40,6 +44,51 @@ def _print(message: str = "") -> None:
         print(message, flush=True)
 
 
+def _load_env_file() -> None:
+    """Load environment variables from .env files if present."""
+    for env_path in [REPO_ROOT / ".env", BACKEND_DIR / ".env"]:
+        if env_path.is_file():
+            try:
+                for line in env_path.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        k = k.strip()
+                        v = v.strip().strip("'\"")
+                        if k and k not in os.environ:
+                            os.environ[k] = v
+            except Exception:
+                pass
+
+
+def _validate_configuration() -> None:
+    """Validate and log configuration state."""
+    owner = os.getenv("GITHUB_OWNER", "")
+    repo = os.getenv("GITHUB_REPO", "")
+    token = os.getenv("GITHUB_TOKEN", "")
+    render_sid = os.getenv("RENDER_SERVICE_ID", "")
+    render_key = os.getenv("RENDER_API_KEY", "")
+    ai_key = os.getenv("NVIDIA_API_KEY", "")
+    ai_provider = os.getenv("AI_PROVIDER", "auto")
+
+    _print("\n=== API DOCTOR CONFIGURATION ===")
+    if owner and repo:
+        _print(f"✓ GitHub Project: {owner}/{repo} (Token: {'Configured' if token else 'None/Public'})")
+    else:
+        _print("○ GitHub Project: Not configured in .env (Use UI to connect a repository)")
+
+    if render_sid and render_key:
+        _print(f"✓ Render Service: {render_sid}")
+    else:
+        _print("○ Render Integration: Not configured (Render log sync disabled)")
+
+    if ai_key:
+        _print(f"✓ AI Provider: NVIDIA NIM (Provider={ai_provider})")
+    else:
+        _print(f"○ AI Provider: Local deterministic engine (Provider={ai_provider})")
+    _print("=================================\n")
+
+
 def _venv_python(venv_dir: Path) -> Path:
     if os.name == "nt":
         return venv_dir / "Scripts" / "python.exe"
@@ -62,6 +111,16 @@ def _prepare_backend(skip_install: bool) -> Path:
     python = _venv_python(venv_dir)
 
     if not python.exists():
+        # Check if current python has packages installed
+        check = subprocess.run(
+            [sys.executable, "-c", "import fastapi, uvicorn"],
+            cwd=BACKEND_DIR,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if check.returncode == 0:
+            return Path(sys.executable)
+
         if skip_install:
             raise LauncherError(
                 f"Backend environment is missing. Run: {sys.executable} -m venv {venv_dir}"
@@ -156,6 +215,7 @@ def _start_services(
     backend_env = os.environ.copy()
     backend_env.setdefault("SANDBOX_MODE", "local")
     backend_env.setdefault("PYTHONUNBUFFERED", "1")
+    backend_env.setdefault("DEMO_MODE", "false")
 
     backend_command = [
         str(python),
@@ -286,9 +346,9 @@ def _install_signal_handlers() -> None:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Start API Doctor's FastAPI backend and Vite frontend."
+        description="Start API Doctor real project debugging system (backend + frontend)."
     )
-    parser.add_argument("--backend-host", default="127.0.0.1")
+    parser.add_argument("--backend-host", default="0.0.0.0")
     parser.add_argument("--backend-port", type=int, default=8000)
     parser.add_argument("--frontend-host", default="0.0.0.0")
     parser.add_argument("--frontend-port", type=int, default=5173)
@@ -320,7 +380,7 @@ def main() -> int:
     args = _parse_args()
     services: list[tuple[str, subprocess.Popen[str]]] = []
     frontend_url = f"http://{_browser_host(args.frontend_host)}:{args.frontend_port}"
-    backend_health_url = f"http://{args.backend_host}:{args.backend_port}/health"
+    backend_health_url = f"http://{_browser_host(args.backend_host)}:{args.backend_port}/health"
 
     _install_signal_handlers()
 
@@ -331,6 +391,9 @@ def main() -> int:
             raise LauncherError(
                 "Run this script from an intact API Doctor repository checkout."
             )
+
+        _load_env_file()
+        _validate_configuration()
 
         python = _prepare_backend(args.skip_install)
         npm = _prepare_frontend(args.skip_install)
@@ -356,7 +419,7 @@ def main() -> int:
             except Exception:
                 opened = False
             if not opened:
-                _print(f"[browser] Could not open a browser automatically. Visit {frontend_url}")
+                _print(f"[browser] Visit {frontend_url}")
         else:
             _print(f"[browser] Automatic browser launch disabled. Visit {frontend_url}")
 

@@ -1,20 +1,13 @@
-"""Failure detection.
+"""Failure detection and log ingestion pipeline.
 
-The detector watches the "patient" demo API and, on a failed request, emits a
-structured :class:`DetectionResult`. The shape is provider-agnostic so a Render
-log source (or Sentry/CloudWatch) can produce the exact same incident format
-later.
-
-Two transports are supported:
-    * ``in-process`` (default): calls the FastAPI app over an ASGI transport so
-      the demo is fully self-contained and deterministic.
-    * ``http``: calls ``settings.DEMO_API_BASE_URL`` (e.g. a deployed Render
-      service). The served app must expose tracebacks on 5xx for this to work.
+Parses real production logs (Render, CI failures, manual logs) and HTTP responses
+to detect and group failures into structured Incident detections.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 import traceback
 from datetime import datetime, timezone
 from typing import Any, Literal
@@ -30,12 +23,7 @@ Method = Literal["GET", "POST", "PUT", "DELETE", "PATCH"]
 
 
 class DetectionResult(dict):
-    """Structured incident-ready detection payload.
-
-    Used as a plain dict but typed for clarity. Fields follow the spec:
-    HTTP status, error message, traceback, endpoint, timestamp, service,
-    request information, relevant response information.
-    """
+    """Structured incident-ready detection payload."""
 
 
 def _now_iso() -> str:
@@ -47,12 +35,14 @@ def _build_detection(
     status_code: int,
     error_message: str,
     stack_trace: str,
-    method: Method,
-    path: str,
-    body: Any,
-    headers: dict[str, str] | None,
-    response_snapshot: dict[str, Any],
-    service: str,
+    method: Method | str = "GET",
+    path: str = "",
+    body: Any = None,
+    headers: dict[str, str] | None = None,
+    response_snapshot: dict[str, Any] | None = None,
+    service: str = "production",
+    source: str = "manual",
+    raw_logs: str = "",
 ) -> DetectionResult:
     return DetectionResult(
         error=True,
@@ -63,19 +53,181 @@ def _build_detection(
         method=method,
         timestamp=_now_iso(),
         service=service,
+        source=source,
+        raw_logs=raw_logs,
         request_snapshot=sanitize(
             {"method": method, "path": path, "body": body, "headers": headers}
         ),
-        response_snapshot=sanitize(response_snapshot),
+        response_snapshot=sanitize(response_snapshot or {}),
     )
 
 
+# Patterns to detect start of error blocks
+_TRACEBACK_START = re.compile(r"Traceback \(most recent call last\):", re.IGNORECASE)
+_HTTP_ERROR_LINE = re.compile(r"(?:HTTP\s+|status\s*=?\s*|code\s*=?\s*)([45]\d\d)|(5\d\d\s+Internal\s+Server\s+Error)", re.IGNORECASE)
+_EXCEPTION_LINE = re.compile(r"(?:Exception|Error|FATAL|CRITICAL):\s*(.+)", re.IGNORECASE)
+
+
 class FailureDetector:
-    def __init__(self) -> None:
-        self.service = "demo-api"
+    def __init__(self, service: str = "production") -> None:
+        self.service = service
+
+    def detect_from_logs(
+        self,
+        logs: list[dict] | str,
+        service: str | None = None,
+        source: str = "render",
+    ) -> list[DetectionResult]:
+        """Parse raw log lines and group related error lines into coherent incidents.
+
+        Avoids treating every individual log line as an isolated incident.
+        """
+        svc = service or self.service
+        raw_text_lines: list[str] = []
+
+        if isinstance(logs, str):
+            raw_text_lines = logs.splitlines()
+        elif isinstance(logs, list):
+            for entry in logs:
+                if isinstance(entry, dict):
+                    msg = entry.get("message") or entry.get("text") or entry.get("log", {}).get("message", "")
+                    if msg:
+                        raw_text_lines.append(str(msg))
+                elif isinstance(entry, str):
+                    raw_text_lines.append(entry)
+
+        if not raw_text_lines:
+            return []
+
+        results: list[DetectionResult] = []
+        i = 0
+        n = len(raw_text_lines)
+
+        while i < n:
+            line = raw_text_lines[i]
+            # 1. Detect Python traceback block
+            if "Traceback (most recent call last):" in line:
+                trace_lines = [line]
+                i += 1
+                while i < n:
+                    curr = raw_text_lines[i]
+                    trace_lines.append(curr)
+                    # Python tracebacks end with the exception line (e.g. TypeError: ...)
+                    if curr and not curr.startswith(" ") and not curr.startswith("\t") and ":" in curr:
+                        break
+                    i += 1
+                full_trace = "\n".join(trace_lines)
+                last_line = trace_lines[-1] if trace_lines else line
+                results.append(
+                    _build_detection(
+                        status_code=500,
+                        error_message=last_line.strip() or "Unhandled traceback exception",
+                        stack_trace=full_trace,
+                        service=svc,
+                        source=source,
+                        raw_logs=full_trace,
+                    )
+                )
+                i += 1
+                continue
+
+            # 2. Detect JS / Node / Java stack trace block
+            if any(marker in line for marker in ["TypeError:", "ReferenceError:", "SyntaxError:", "UnhandledPromiseRejection:", "Exception in thread", "NullPointerException"]):
+                trace_lines = [line]
+                i += 1
+                while i < n and (raw_text_lines[i].strip().startswith("at ") or "Caused by:" in raw_text_lines[i]):
+                    trace_lines.append(raw_text_lines[i])
+                    i += 1
+                full_trace = "\n".join(trace_lines)
+                results.append(
+                    _build_detection(
+                        status_code=500,
+                        error_message=line.strip(),
+                        stack_trace=full_trace,
+                        service=svc,
+                        source=source,
+                        raw_logs=full_trace,
+                    )
+                )
+                continue
+
+            # 3. Detect HTTP 5xx or 4xx failures in logs
+            http_match = _HTTP_ERROR_LINE.search(line)
+            if http_match:
+                code_str = http_match.group(1) or "500"
+                try:
+                    code = int(code_str)
+                except ValueError:
+                    code = 500
+                # Extract endpoint if present
+                ep_match = re.search(r'(?:GET|POST|PUT|DELETE|PATCH)\s+([/\w\-._~:?#[\]@!$&\'()*+,;=]+)', line)
+                endpoint = ep_match.group(1) if ep_match else ""
+                method = ep_match.group(0).split()[0] if ep_match else "GET"
+
+                results.append(
+                    _build_detection(
+                        status_code=code,
+                        error_message=line.strip(),
+                        stack_trace=line.strip(),
+                        method=method,
+                        path=endpoint,
+                        service=svc,
+                        source=source,
+                        raw_logs=line.strip(),
+                    )
+                )
+                i += 1
+                continue
+
+            # 4. Detect Database / Connection / Timeout errors
+            if any(crit in line.lower() for crit in ["connectionrefusederror", "operationalerror", "timeout expired", "timed out", "failed to connect to database", "econnrefused"]):
+                results.append(
+                    _build_detection(
+                        status_code=503,
+                        error_message=line.strip(),
+                        stack_trace=line.strip(),
+                        service=svc,
+                        source=source,
+                        raw_logs=line.strip(),
+                    )
+                )
+                i += 1
+                continue
+
+            i += 1
+
+        return results
+
+    async def detect_from_log(
+        self,
+        *,
+        message: str,
+        traceback: str,
+        service: str,
+        endpoint: str | None = None,
+        status_code: int | None = None,
+        timestamp: str | None = None,
+        source: str = "manual",
+        **extra: Any,
+    ) -> DetectionResult:
+        """Create a structured detection result from external/manual log parameters."""
+        return DetectionResult(
+            error=True,
+            status_code=status_code or 500,
+            error_message=message,
+            stack_trace=traceback,
+            endpoint=endpoint or "",
+            method=extra.get("method") or "GET",
+            timestamp=timestamp or _now_iso(),
+            service=service,
+            source=source,
+            raw_logs=traceback or message,
+            request_snapshot=sanitize(extra.get("request_snapshot") or {}),
+            response_snapshot=sanitize(extra.get("response_snapshot") or {}),
+        )
 
     # ------------------------------------------------------------------
-    # Public API
+    # Demo / Testing Trigger
     # ------------------------------------------------------------------
     async def trigger_diagnosis(
         self,
@@ -84,10 +236,10 @@ class FailureDetector:
         payload: dict | None = None,
         headers: dict[str, str] | None = None,
     ) -> DetectionResult:
-        """Exercise the demo API and capture the failure (if any)."""
+        """Exercise the demo API or in-process server for automated tests."""
         try:
             response = await self._call(endpoint, method, payload, headers)
-        except Exception as exc:  # transport-level failure
+        except Exception as exc:
             return _build_detection(
                 status_code=0,
                 error_message=str(exc),
@@ -97,7 +249,8 @@ class FailureDetector:
                 body=payload,
                 headers=headers,
                 response_snapshot={"error": "transport failure"},
-                service=self.service,
+                service="demo-api",
+                source="demo",
             )
 
         status_code = response.status_code
@@ -113,7 +266,8 @@ class FailureDetector:
                 endpoint=endpoint,
                 method=method,
                 timestamp=_now_iso(),
-                service=self.service,
+                service="demo-api",
+                source="demo",
                 request_snapshot=sanitize(
                     {"method": method, "path": endpoint, "body": payload}
                 ),
@@ -122,16 +276,6 @@ class FailureDetector:
 
         error_message = str(resp_json.get("detail") or resp_json.get("message") or "error")
         stack_trace = resp_json.get("traceback") or ""
-
-        # Fallback: if the served app didn't return a traceback, try to
-        # reconstruct one from the current stack (in-process mode always
-        # returns one via the app's exception handler).
-        if not stack_trace:
-            logger.warning(
-                "No traceback returned for %s %s (status=%s). Provide a log-source "
-                "traceback or enable debug tracebacks on the served app.",
-                method, endpoint, status_code,
-            )
 
         return _build_detection(
             status_code=status_code,
@@ -142,41 +286,10 @@ class FailureDetector:
             body=payload,
             headers=headers,
             response_snapshot={"status_code": status_code, "body": resp_json},
-            service=self.service,
+            service="demo-api",
+            source="demo",
         )
 
-    async def detect_from_log(
-        self,
-        *,
-        message: str,
-        traceback: str,
-        service: str,
-        endpoint: str | None = None,
-        status_code: int | None = None,
-        timestamp: str | None = None,
-        **extra: Any,
-    ) -> DetectionResult:
-        """Adapter: build an identical incident from an external log source.
-
-        This is the seam where a Render log source (or Sentry / CloudWatch)
-        plugs in later.
-        """
-        return DetectionResult(
-            error=True,
-            status_code=status_code or 500,
-            error_message=message,
-            stack_trace=traceback,
-            endpoint=endpoint or "",
-            method="GET",
-            timestamp=timestamp or _now_iso(),
-            service=service,
-            request_snapshot=sanitize(extra.get("request_snapshot") or {}),
-            response_snapshot=sanitize(extra.get("response_snapshot") or {}),
-        )
-
-    # ------------------------------------------------------------------
-    # Transport
-    # ------------------------------------------------------------------
     async def _call(
         self,
         endpoint: str,
@@ -185,32 +298,12 @@ class FailureDetector:
         headers: dict[str, str] | None,
     ) -> httpx.Response:
         if settings.DEMO_API_BASE_URL:
-            return await self._call_http(endpoint, method, payload, headers)
-        return await self._call_inprocess(endpoint, method, payload, headers)
+            url = settings.DEMO_API_BASE_URL.rstrip("/") + endpoint
+            async with httpx.AsyncClient(timeout=settings.HTTP_TIMEOUT_SECONDS) as client:
+                request = client.build_request(method, url, json=payload, headers=headers)
+                return await client.send(request)
 
-    async def _call_http(
-        self,
-        endpoint: str,
-        method: Method,
-        payload: dict | None,
-        headers: dict[str, str] | None,
-    ) -> httpx.Response:
-        url = settings.DEMO_API_BASE_URL.rstrip("/") + endpoint
-        async with httpx.AsyncClient(timeout=settings.HTTP_TIMEOUT_SECONDS) as client:
-            request = client.build_request(method, url, json=payload, headers=headers)
-            return await client.send(request)
-
-    async def _call_inprocess(
-        self,
-        endpoint: str,
-        method: Method,
-        payload: dict | None,
-        headers: dict[str, str] | None,
-    ) -> httpx.Response:
-        from app.main import app  # lazy import to avoid circular imports
-
-        # raise_app_exceptions=False so the app's 500 (with traceback) is returned
-        # to us as a normal response rather than re-raised by the transport.
+        from app.main import app
         transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
         async with httpx.AsyncClient(
             transport=transport, base_url="http://test", timeout=30.0

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 from app.github.client import GitHubClient
 from app.projects.models import Project
+from app.sandbox.workspace_manager import WorkspaceManager
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +20,26 @@ class GitHubService:
     def _branch_name(self, incident_id: str) -> str:
         return f"api-doctor/fix/{incident_id}"
 
+    def sync_project_workspace(self, project: Project) -> Path:
+        """Synchronize the configured GitHub repository into a local working workspace."""
+        wm = WorkspaceManager()
+        owner = project.github_owner or self.client.owner
+        repo = project.github_repo or self.client.repo
+        branch = project.github_branch or self.client.default_branch
+        token = project.github_token or self.client.token
+
+        if not owner or not repo:
+            raise ValueError("Project must have github_owner and github_repo configured")
+
+        ws_path = wm.sync_repository(
+            owner=owner,
+            repo=repo,
+            branch=branch,
+            token=token,
+            base_url=self.client.base_url,
+        )
+        return ws_path
+
     async def repair(
         self,
         incident_id: str,
@@ -25,7 +47,7 @@ class GitHubService:
         message: str,
         title: str,
         body: str,
-        project: Project,
+        project: Project | None = None,
     ) -> dict[str, Any]:
         """Create a repair branch off the project's default branch, commit the
         changed files and open a pull request. ``main`` is never modified."""
@@ -39,7 +61,7 @@ class GitHubService:
             return self._pr_payload(pr, branch)
 
         # Ensure the base branch exists; branch off the project default branch.
-        base = project.github_branch or self.client.default_branch
+        base = (project.github_branch if project else None) or self.client.default_branch
         branches = await self.client.list_branches()
         if branch not in branches:
             await self.client.create_branch(branch, base)
@@ -50,8 +72,6 @@ class GitHubService:
         return self._pr_payload(pr, branch)
 
     async def pr_status(self, incident_id: str, pr_info: dict | None) -> dict[str, Any]:
-        # ``repair`` stores the normalized key ``pr_number``. Accept the raw
-        # GitHub key as well for backwards compatibility with older records.
         number = (pr_info or {}).get("pr_number") or (pr_info or {}).get("number")
         if not number:
             return {"present": False}

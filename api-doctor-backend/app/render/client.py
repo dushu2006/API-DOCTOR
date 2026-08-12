@@ -1,6 +1,6 @@
-"""Render REST client.
+"""Render REST client and log retrieval service.
 
-Provides service/deployment/log information isolated behind a client layer so
+Provides service, deployment, and log information isolated behind a client layer so
 the orchestrator never calls the Render API directly.
 """
 
@@ -32,6 +32,10 @@ class RenderClient:
         self.service_id = service_id if service_id is not None else settings.RENDER_SERVICE_ID
 
     @property
+    def is_configured(self) -> bool:
+        return bool(self.api_key and self.service_id)
+
+    @property
     def _headers(self) -> dict[str, str]:
         return {
             "Accept": "application/json",
@@ -40,7 +44,7 @@ class RenderClient:
 
     async def _request(self, method: str, path: str, **kwargs) -> Any:
         if not self.api_key:
-            raise RenderError("RENDER_API_KEY is not configured")
+            raise RenderError("Render integration is not configured: RENDER_API_KEY is missing.")
         url = f"{self.base_url}{path}"
         async with httpx.AsyncClient(timeout=settings.HTTP_TIMEOUT_SECONDS) as client:
             resp = await client.request(method, url, headers=self._headers, **kwargs)
@@ -55,45 +59,68 @@ class RenderClient:
     # ------------------------------------------------------------------
     async def get_service(self, service_id: str | None = None) -> dict:
         sid = service_id or self.service_id
+        if not sid:
+            raise RenderError("Render integration is not configured: RENDER_SERVICE_ID is missing.")
         return await self._request("GET", f"/services/{sid}")
 
     async def list_deployments(self, service_id: str | None = None, limit: int = 10) -> list[dict]:
         sid = service_id or self.service_id
+        if not sid:
+            raise RenderError("Render integration is not configured: RENDER_SERVICE_ID is missing.")
         data = await self._request("GET", f"/services/{sid}/deploys?limit={limit}")
         return data  # type: ignore[return-value]
 
     async def get_deployment(self, deploy_id: str, service_id: str | None = None) -> dict:
         sid = service_id or self.service_id
+        if not sid:
+            raise RenderError("Render integration is not configured: RENDER_SERVICE_ID is missing.")
         return await self._request("GET", f"/services/{sid}/deploys/{deploy_id}")
 
     async def get_logs(self, service_id: str | None = None, limit: int = 200) -> list[dict]:
         sid = service_id or self.service_id
+        if not self.api_key or not sid:
+            logger.info("Render integration is not configured.")
+            return []
         try:
             data = await self._request("GET", f"/services/{sid}/logs?limit={limit}")
             return data if isinstance(data, list) else []
-        except RenderError:
+        except Exception as exc:
+            logger.warning("Failed to fetch Render logs: %s", exc)
             return []
 
     async def get_deployment_status(self, service_id: str | None = None) -> dict[str, Any]:
-        deploys = await self.list_deployments(service_id=service_id, limit=1)
-        if not deploys:
-            return {"present": False, "status": "unknown"}
-        dep = deploys[0]
-        return {
-            "present": True,
-            "deploy_id": dep.get("id"),
-            "status": dep.get("status"),
-            "created_at": dep.get("createdAt"),
-            "finished_at": dep.get("finishedAt"),
-        }
+        sid = service_id or self.service_id
+        if not self.api_key or not sid:
+            return {"present": False, "status": "unconfigured", "message": "Render integration is not configured."}
+        try:
+            deploys = await self.list_deployments(service_id=sid, limit=1)
+            if not deploys:
+                return {"present": False, "status": "unknown"}
+            dep = deploys[0]
+            return {
+                "present": True,
+                "deploy_id": dep.get("id"),
+                "status": dep.get("status"),
+                "created_at": dep.get("createdAt"),
+                "finished_at": dep.get("finishedAt"),
+            }
+        except RenderError as exc:
+            return {"present": False, "status": "error", "message": str(exc)}
 
     async def get_runtime_info(self, service_id: str | None = None) -> dict[str, Any]:
-        service = await self.get_service(service_id)
-        return {
-            "service_id": service.get("id"),
-            "service_name": service.get("name"),
-            "service_url": service.get("serviceDetails", {}).get("url"),
-            "auto_deploy": service.get("autoDeploy"),
-            "repo": service.get("repo"),
-            "branch": service.get("branch"),
-        }
+        sid = service_id or self.service_id
+        if not self.api_key or not sid:
+            return {"present": False, "message": "Render integration is not configured."}
+        try:
+            service = await self.get_service(sid)
+            return {
+                "present": True,
+                "service_id": service.get("id"),
+                "service_name": service.get("name"),
+                "service_url": service.get("serviceDetails", {}).get("url"),
+                "auto_deploy": service.get("autoDeploy"),
+                "repo": service.get("repo"),
+                "branch": service.get("branch"),
+            }
+        except RenderError as exc:
+            return {"present": False, "message": str(exc)}

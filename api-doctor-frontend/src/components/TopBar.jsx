@@ -9,41 +9,39 @@ import {
   GitCommit, 
   ChevronDown,
   X,
-  Radio
+  Radio,
+  RefreshCw,
+  PlusCircle,
+  Server
 } from 'lucide-react';
 
 export default function TopBar({ 
   activeIncident, 
   onStartDiagnosis, 
   onStopDiagnosis, 
+  onSyncRender,
+  onOpenIngestModal,
+  onOpenConnectModal,
   isDiagnosing,
   isBackendConnected,
-  backendHealth
+  backendHealth,
+  currentProject
 }) {
   const [showBranches, setShowBranches] = useState(false);
-  const [showScenarioMenu, setShowScenarioMenu] = useState(false);
   const [showStopDialog, setShowStopDialog] = useState(false);
-  const [currentBranch, setCurrentBranch] = useState('main');
+  const [isSyncingRender, setIsSyncingRender] = useState(false);
 
-  const branches = ['main', 'feature/auth-refactor', 'fix/null-pointer', 'staging'];
-  const scenarios = [
-    { id: 'null_pointer', label: 'Null Pointer Dereference' },
-    { id: 'external_api', label: 'External API Timeout' },
-    { id: 'config', label: 'Missing Environment Config' },
-    { id: 'schema', label: 'JSON Schema Mismatch' }
-  ];
+  const projectName = currentProject?.name || (currentProject?.github_owner && currentProject?.github_repo ? `${currentProject.github_owner}/${currentProject.github_repo}` : 'API-DOCTOR');
+  const currentBranch = currentProject?.github_branch || 'main';
 
-  const handleDiagnoseClick = () => {
-    if (isDiagnosing) {
-      setShowStopDialog(true);
-    } else {
-      setShowScenarioMenu(!showScenarioMenu);
+  const handleSyncRenderClick = async () => {
+    if (!onSyncRender) return;
+    setIsSyncingRender(true);
+    try {
+      await onSyncRender();
+    } finally {
+      setIsSyncingRender(false);
     }
-  };
-
-  const selectScenario = (sc) => {
-    setShowScenarioMenu(false);
-    onStartDiagnosis(sc);
   };
 
   const confirmStop = () => {
@@ -58,12 +56,12 @@ export default function TopBar({
       borderBottom: '1px solid var(--border-color)',
       display: 'flex',
       alignItems: 'center',
-      justify: 'space-between',
+      justifyContent: 'space-between',
       padding: '0 16px',
       position: 'relative',
       zIndex: 50
     }}>
-      {/* Left section: Logo & Branch Breadcrumb */}
+      {/* Left section: Logo & Project/Branch Breadcrumb */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
         {/* Brand */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-primary)', fontWeight: 600, fontSize: '13px' }}>
@@ -74,7 +72,7 @@ export default function TopBar({
             background: 'var(--color-accent)',
             display: 'flex',
             alignItems: 'center',
-            justify: 'center',
+            justifyContent: 'center',
             color: '#fff'
           }}>
             <Stethoscope size={14} />
@@ -84,15 +82,17 @@ export default function TopBar({
 
         <div style={{ width: '1px', height: '16px', backgroundColor: 'var(--border-color)' }} />
 
-        {/* Branch Breadcrumb */}
-        <div style={{ position: 'relative' }}>
+        {/* Project & Branch Breadcrumb */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
           <button 
-            onClick={() => setShowBranches(!showBranches)}
+            onClick={onOpenConnectModal}
+            title="Click to configure or switch repository"
             style={{
               background: 'transparent',
               border: 'none',
-              color: 'var(--text-muted)',
+              color: 'var(--text-primary)',
               fontSize: '12px',
+              fontWeight: 600,
               display: 'flex',
               alignItems: 'center',
               gap: '6px',
@@ -100,76 +100,66 @@ export default function TopBar({
               padding: '4px 8px',
               borderRadius: '4px'
             }}
+            className="hover-bg"
           >
-            <span style={{ color: 'var(--text-primary)', fontWeight: 500 }}>API-DOCTOR</span>
-            <span>/</span>
-            <GitBranch size={13} style={{ color: 'var(--color-accent)' }} />
-            <span style={{ color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>{currentBranch}</span>
-            <ChevronDown size={12} />
+            <span>{projectName}</span>
+            <ChevronDown size={11} style={{ color: 'var(--text-muted)' }} />
           </button>
 
-          {showBranches && (
-            <div style={{
-              position: 'absolute',
-              top: '100%',
-              left: 0,
-              marginTop: '4px',
-              width: '180px',
-              backgroundColor: 'var(--surface-2)',
-              border: '1px solid var(--border-color)',
-              borderRadius: '6px',
-              boxShadow: '0 8px 16px rgba(0,0,0,0.4)',
-              padding: '6px 0',
-              zIndex: 100
-            }}>
-              <div style={{ padding: '4px 12px', fontSize: '11px', color: 'var(--text-muted)', fontWeight: 600 }}>
-                SWITCH BRANCH
-              </div>
-              {branches.map(b => (
-                <div 
-                  key={b}
-                  onClick={() => { setCurrentBranch(b); setShowBranches(false); }}
-                  style={{
-                    padding: '6px 12px',
-                    fontSize: '12px',
-                    color: b === currentBranch ? 'var(--color-accent)' : 'var(--text-primary)',
-                    cursor: 'pointer',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justify: 'space-between',
-                    fontFamily: 'var(--font-mono)'
-                  }}
-                >
-                  <span>{b}</span>
-                  {b === currentBranch && <CheckCircle2 size={12} />}
-                </div>
-              ))}
-            </div>
-          )}
+          <span style={{ color: 'var(--text-muted)' }}>/</span>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--text-muted)', fontSize: '12px', padding: '4px 6px' }}>
+            <GitBranch size={13} style={{ color: 'var(--color-accent)' }} />
+            <span style={{ color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>{currentBranch}</span>
+          </div>
         </div>
       </div>
 
-      {/* Middle Section: Connection & Diagnosis Status */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-        {/* Real Backend Connection status */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: 'var(--text-muted)' }}>
+      {/* Middle Section: Actions & Connection Status */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+        {/* Backend Connection status */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: 'var(--text-muted)' }}>
           <span style={{ 
             width: '6px', 
             height: '6px', 
             borderRadius: '50%', 
             backgroundColor: isBackendConnected ? 'var(--color-success)' : 'var(--color-failure)' 
           }} />
-          <span>{isBackendConnected ? 'Backend Connected' : 'Backend Disconnected'}</span>
+          <span>{isBackendConnected ? 'Backend Connected' : 'Disconnected'}</span>
           {isBackendConnected && backendHealth?.ai_provider && (
             <span style={{
               color: backendHealth.ai_provider === 'mock' ? 'var(--color-warning)' : 'var(--color-success)',
               fontFamily: 'var(--font-mono)',
-              fontSize: '10px'
+              fontSize: '10px',
+              marginLeft: '4px'
             }}>
-              AI: {backendHealth.ai_provider === 'mock' ? 'MOCK' : backendHealth.ai_provider.toUpperCase()}
+              AI: {backendHealth.ai_provider.toUpperCase()}
             </span>
           )}
         </div>
+
+        {/* Sync Render Logs Button */}
+        <button 
+          onClick={handleSyncRenderClick}
+          disabled={isSyncingRender}
+          className="btn-outline"
+          title="Retrieve runtime logs from Render service"
+          style={{ padding: '4px 10px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '6px' }}
+        >
+          <Server size={12} style={{ color: 'var(--color-accent)' }} />
+          <span>{isSyncingRender ? 'Syncing Render...' : 'Sync Render Logs'}</span>
+        </button>
+
+        {/* Ingest Log / Error Button */}
+        <button 
+          onClick={onOpenIngestModal}
+          className="btn-outline"
+          title="Paste production logs or stack trace"
+          style={{ padding: '4px 10px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '6px' }}
+        >
+          <PlusCircle size={12} style={{ color: 'var(--color-accent)' }} />
+          <span>Ingest Log</span>
+        </button>
 
         {/* Diagnosis Status Pill */}
         {isDiagnosing && (
@@ -185,68 +175,30 @@ export default function TopBar({
             color: 'var(--color-accent)'
           }}>
             <span className="agent-dot" />
-            <span style={{ fontWeight: 500 }}>Diagnosing Backend...</span>
+            <span style={{ fontWeight: 500 }}>Diagnosing...</span>
           </div>
         )}
 
-        {/* Main CTA */}
-        <div style={{ position: 'relative' }}>
-          <button 
-            onClick={handleDiagnoseClick}
-            className={isDiagnosing ? 'btn-danger-outline' : 'btn-primary'}
-            style={{ minWidth: '100px', justifyContent: 'center' }}
-          >
-            {isDiagnosing ? (
-              <>
-                <OctagonAlert size={13} />
-                <span>Stop</span>
-              </>
-            ) : (
-              <>
-                <Stethoscope size={13} />
-                <span>Diagnose ▾</span>
-              </>
-            )}
-          </button>
-
-          {/* Scenario Trigger Selector */}
-          {showScenarioMenu && (
-            <div style={{
-              position: 'absolute',
-              top: '100%',
-              right: 0,
-              marginTop: '6px',
-              width: '220px',
-              backgroundColor: 'var(--surface-2)',
-              border: '1px solid var(--border-color)',
-              borderRadius: '6px',
-              boxShadow: '0 8px 16px rgba(0,0,0,0.5)',
-              padding: '6px 0',
-              zIndex: 100
-            }}>
-              <div style={{ padding: '4px 12px', fontSize: '10px', color: 'var(--text-muted)', fontWeight: 700, letterSpacing: '0.05em' }}>
-                SELECT BACKEND SCENARIO
-              </div>
-              {scenarios.map(sc => (
-                <div 
-                  key={sc.id}
-                  onClick={() => selectScenario(sc.id)}
-                  style={{
-                    padding: '8px 12px',
-                    fontSize: '12px',
-                    color: 'var(--text-primary)',
-                    cursor: 'pointer',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '8px'
-                  }}
-                  className="hover-bg"
-                >
-                  <Radio size={12} style={{ color: 'var(--color-accent)' }} />
-                  <span>{sc.label}</span>
-                </div>
-              ))}
-            </div>
+        {/* Main Diagnose / Stop CTA */}
+        <div>
+          {isDiagnosing ? (
+            <button 
+              onClick={() => setShowStopDialog(true)}
+              className="btn-danger-outline"
+              style={{ minWidth: '90px', justifyContent: 'center' }}
+            >
+              <OctagonAlert size={13} />
+              <span>Stop</span>
+            </button>
+          ) : (
+            <button 
+              onClick={() => onStartDiagnosis()}
+              className="btn-primary"
+              style={{ minWidth: '90px', justifyContent: 'center' }}
+            >
+              <Stethoscope size={13} />
+              <span>Diagnose</span>
+            </button>
           )}
         </div>
       </div>
@@ -254,7 +206,7 @@ export default function TopBar({
       {/* Right Section: Git status, Settings, Profile */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
         <div 
-          title="Source Control"
+          title="Active Incident / Branch"
           style={{ 
             display: 'flex', 
             alignItems: 'center', 
@@ -265,21 +217,22 @@ export default function TopBar({
         >
           <GitCommit size={15} />
           <span style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--color-warning)' }}>
-            {activeIncident ? `${activeIncident.id.slice(0, 7)}` : 'main'}
+            {activeIncident ? `#${activeIncident.id.slice(0, 7)}` : currentBranch}
           </span>
         </div>
 
         <div style={{ width: '1px', height: '16px', backgroundColor: 'var(--border-color)' }} />
 
         <button 
-          title="Settings (⌘,)" 
+          onClick={onOpenConnectModal}
+          title="Repository & Workspace Settings" 
           style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}
         >
           <Settings size={15} />
         </button>
 
         <div 
-          title="Account Profile"
+          title="API Doctor Workspace"
           style={{
             width: '26px',
             height: '26px',
@@ -288,7 +241,7 @@ export default function TopBar({
             border: '1px solid var(--border-color)',
             display: 'flex',
             alignItems: 'center',
-            justify: 'center',
+            justifyContent: 'center',
             cursor: 'pointer',
             color: 'var(--text-muted)'
           }}
@@ -297,7 +250,7 @@ export default function TopBar({
         </div>
       </div>
 
-      {/* Confirm Stop Micro-Dialog */}
+      {/* Confirm Stop Dialog */}
       {showStopDialog && (
         <div style={{
           position: 'fixed',
@@ -309,7 +262,7 @@ export default function TopBar({
           zIndex: 1000,
           display: 'flex',
           alignItems: 'center',
-          justify: 'center'
+          justifyContent: 'center'
         }}>
           <div style={{
             backgroundColor: 'var(--surface-1)',
@@ -328,11 +281,11 @@ export default function TopBar({
               </button>
             </div>
             <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '16px' }}>
-              Are you sure you want to stop this investigation? Progress will be saved to incident history.
+              Are you sure you want to cancel this diagnosis? The current progress will be recorded.
             </p>
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
               <button onClick={() => setShowStopDialog(false)} className="btn-outline">Cancel</button>
-              <button onClick={confirmStop} className="btn-danger-outline">Stop Investigation</button>
+              <button onClick={confirmStop} className="btn-danger-outline">Stop Diagnosis</button>
             </div>
           </div>
         </div>

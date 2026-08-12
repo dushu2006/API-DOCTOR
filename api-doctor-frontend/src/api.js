@@ -14,7 +14,7 @@ async function request(endpoint, options = {}) {
     });
     if (!res.ok) {
       const errData = await res.json().catch(() => ({}));
-      throw new Error(errData.detail || `HTTP Error ${res.status}`);
+      throw new Error(errData.detail || errData.message || `HTTP Error ${res.status}`);
     }
     return await res.json();
   } catch (err) {
@@ -25,6 +25,19 @@ async function request(endpoint, options = {}) {
 
 export const api = {
   getHealth: () => request('/health'),
+
+  // Project workspace management
+  getCurrentProject: () => request('/api/projects/current'),
+  listProjects: () => request('/api/projects'),
+  connectProject: (data) => request('/api/projects/connect', {
+    method: 'POST',
+    body: JSON.stringify(data)
+  }),
+  syncProject: () => request('/api/projects/sync', { method: 'POST' }),
+  getProjectFiles: (projectId = 'default') => request(`/api/projects/files/list?project_id=${projectId}`),
+  getFileContent: (path, projectId = 'default') => request(`/api/projects/file-content?path=${encodeURIComponent(path)}&project_id=${projectId}`),
+
+  // Incident lifecycle & ingestion
   listIncidents: (projectId) => request(`/api/incidents${projectId ? `?project_id=${projectId}` : ''}`),
   getIncident: (id) => request(`/api/incidents/${id}`),
   getIncidentStatus: (id) => request(`/api/incidents/${id}/status`),
@@ -32,7 +45,14 @@ export const api = {
   getIncidentDiff: (id) => request(`/api/incidents/${id}/diff`),
   getIncidentSandbox: (id) => request(`/api/incidents/${id}/sandbox`),
   getIncidentPR: (id) => request(`/api/incidents/${id}/pr`),
-  
+
+  ingestIncident: (data) => request('/api/incidents/ingest', {
+    method: 'POST',
+    body: JSON.stringify(data)
+  }),
+  syncRenderLogs: (serviceId) => request(`/api/incidents/sync-render${serviceId ? `?service_id=${serviceId}` : ''}`, {
+    method: 'POST'
+  }),
   triggerScenario: (scenario = 'null_pointer') => request(`/api/incidents/trigger/${scenario}`, { method: 'POST' }),
   diagnoseIncident: (id) => request(`/api/incidents/${id}/diagnose`, { method: 'POST' }),
   cancelDiagnosis: (id) => request(`/api/incidents/${id}/cancel`, { method: 'POST' }),
