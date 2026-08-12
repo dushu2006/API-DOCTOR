@@ -391,9 +391,12 @@ async def diagnose(incident_id: str, req: DiagnoseRequest | None = None) -> Diag
 
 @router.post("/{incident_id}/cancel")
 async def cancel_diagnosis(incident_id: str) -> dict:
-    _get_or_404(incident_id)
+    inc = _get_or_404(incident_id)
     if not await orchestrator.cancel_diagnosis(incident_id):
-        raise HTTPException(409, "no active diagnosis to cancel")
+        raise HTTPException(
+            409,
+            f"no active diagnosis to cancel (status={inc.status.value})",
+        )
     return {"incident_id": incident_id, "cancelled": True}
 
 

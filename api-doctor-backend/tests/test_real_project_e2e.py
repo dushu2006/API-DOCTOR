@@ -141,9 +141,17 @@ async def test_real_project_e2e_workflow(monkeypatch, auth_headers, project_fact
             )),
         )
 
-        # 4. Run pipeline
+        # 4. Run pipeline through interactive approval gates
         result = await orchestrator.run_pipeline(incident_id)
         assert result is not None
+        if result.status == IncidentStatus.AWAITING_FILE_READ_APPROVAL:
+            assert await orchestrator.resume_file_read(incident_id)
+            task = orchestrator._pipeline_tasks.get(incident_id)
+            result = await task if task else incident_store.get(incident_id)
+        if result.status == IncidentStatus.AWAITING_FIX_APPROVAL:
+            assert await orchestrator.resume_fix(incident_id)
+            task = orchestrator._pipeline_tasks.get(incident_id)
+            result = await task if task else incident_store.get(incident_id)
         assert result.status == IncidentStatus.FIX_VERIFIED
         assert result.sandbox_result["passed"] is True
 

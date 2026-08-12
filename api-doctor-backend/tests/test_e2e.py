@@ -16,6 +16,25 @@ from app.incidents.models import IncidentStatus
 from app.incidents.store import incident_store
 from app.orchestrator import Orchestrator
 
+
+async def _await_started(orch: Orchestrator, incident_id: str):
+    task = orch._pipeline_tasks.get(incident_id)
+    if task:
+        return await task
+    return incident_store.get(incident_id)
+
+
+async def _drive_pipeline(orch: Orchestrator, incident_id: str):
+    """Run the pipeline through interactive approval gates."""
+    result = await orch.run_pipeline(incident_id)
+    if result and result.status == IncidentStatus.AWAITING_FILE_READ_APPROVAL:
+        assert await orch.resume_file_read(incident_id)
+        result = await _await_started(orch, incident_id)
+    if result and result.status == IncidentStatus.AWAITING_FIX_APPROVAL:
+        assert await orch.resume_fix(incident_id)
+        result = await _await_started(orch, incident_id)
+    return result
+
 ORIGINAL_MARKER = (
     '    transaction_id = bugs.charge_user(user_id, body.amount)\n'
     '    return {"success": True, "transaction_id": transaction_id}\n'
@@ -76,7 +95,7 @@ async def test_e2e_null_pointer(monkeypatch):
     )
 
     # 4-7. Run the full pipeline with a real sandbox verification.
-    result = await orch.run_pipeline(incident.id)
+    result = await _drive_pipeline(orch, incident.id)
 
     assert result.status == IncidentStatus.FIX_VERIFIED
     assert result.sandbox_result["passed"] is True
@@ -100,7 +119,7 @@ async def test_e2e_null_pointer_with_mock_ai():
         incident = await orch.detect_and_create(
             "/api/v1/users/user_2/charge", "POST", {"amount": 100.0}
         )
-        result = await orch.run_pipeline(incident.id)
+        result = await _drive_pipeline(orch, incident.id)
     finally:
         settings.REQUIRE_TESTS = old_tests
 

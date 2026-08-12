@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 
-from app.incidents.models import Incident
+from app.incidents.models import Incident, IncidentStatus
 from app.incidents.store import incident_store
 from app.main import app
 from app.orchestrator import orchestrator
@@ -70,3 +70,50 @@ async def test_incident_response_exposes_root_cause(auth_headers):
     assert response.status_code == 200
     assert response.json()["root_cause"]["confidence"] == 0.87
     assert response.json()["root_cause"]["category"] == "CODE_BUG"
+
+
+async def test_cancel_endpoint_rejects_when_orchestrator_returns_false(monkeypatch, auth_headers):
+    inc = incident_store.create(Incident(status=IncidentStatus.CANCELLED))
+    monkeypatch.setattr(orchestrator, "cancel_diagnosis", AsyncMock(return_value=False))
+
+    response = await _request("POST", f"/api/incidents/{inc.id}/cancel", auth_headers)
+
+    assert response.status_code == 409
+    assert "no active diagnosis to cancel" in response.json()["detail"]
+
+
+async def test_approve_file_read_calls_resume(monkeypatch, auth_headers):
+    inc = incident_store.create(Incident(status=IncidentStatus.AWAITING_FILE_READ_APPROVAL))
+    resume = AsyncMock(return_value=True)
+    monkeypatch.setattr(orchestrator, "resume_file_read", resume)
+
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            f"/api/incidents/{inc.id}/approve-file-read",
+            headers=auth_headers,
+            json={"approved": True},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"incident_id": inc.id, "approved": True}
+    resume.assert_awaited_once_with(inc.id)
+
+
+async def test_approve_fix_calls_resume(monkeypatch, auth_headers):
+    inc = incident_store.create(Incident(status=IncidentStatus.AWAITING_FIX_APPROVAL))
+    resume = AsyncMock(return_value=True)
+    monkeypatch.setattr(orchestrator, "resume_fix", resume)
+
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            f"/api/incidents/{inc.id}/approve-fix",
+            headers=auth_headers,
+            json={"approved": True},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"incident_id": inc.id, "approved": True}
+    resume.assert_awaited_once_with(inc.id)
+
