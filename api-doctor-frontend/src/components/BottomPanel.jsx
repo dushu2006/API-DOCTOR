@@ -7,8 +7,7 @@ import {
   CheckCircle2, 
   ChevronDown, 
   ChevronUp, 
-  Copy, 
-  Pin, 
+  Copy,
   Search,
   Check,
   XCircle
@@ -20,9 +19,8 @@ export default function BottomPanel({
   incidentDiff,
   incidentSandbox,
   activeBottomTab, 
-  setActiveBottomTab, 
-  bottomHeight, 
-  setBottomHeight,
+  setActiveBottomTab,
+  bottomHeight,
   isBottomCollapsed,
   setIsBottomCollapsed
 }) {
@@ -267,12 +265,16 @@ export default function BottomPanel({
                   Sandbox Result: {incidentSandbox.passed ? 'PASSED' : 'FAILED'}
                 </div>
                 {incidentSandbox.steps && incidentSandbox.steps.map((st, i) => (
-                  <div key={i} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '4px 8px', backgroundColor: 'var(--surface-2)', borderRadius: '4px', marginBottom: '4px' }}>
+                  <div key={i} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', padding: '4px 8px', backgroundColor: 'var(--surface-2)', borderRadius: '4px', marginBottom: '4px' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <CheckCircle2 size={13} style={{ color: 'var(--color-success)' }} />
+                      {st.passed
+                        ? <CheckCircle2 size={13} style={{ color: 'var(--color-success)' }} />
+                        : <XCircle size={13} style={{ color: 'var(--color-failure)' }} />}
                       <span>{st.name || st.step || `Step ${i + 1}`}</span>
                     </div>
-                    <span style={{ color: 'var(--text-muted)' }}>{st.status || 'OK'}</span>
+                    <span title={st.detail || ''} style={{ color: st.passed ? 'var(--color-success)' : 'var(--color-failure)' }}>
+                      {st.passed ? 'PASSED' : 'FAILED'}
+                    </span>
                   </div>
                 ))}
                 {incidentSandbox.logs && (

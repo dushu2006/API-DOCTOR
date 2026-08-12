@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # AI behaviour
     # ------------------------------------------------------------------
+    # auto: NVIDIA when a key exists, otherwise the deterministic mock.
+    # This is deliberately independent from SANDBOX_MODE.
+    AI_PROVIDER: str = "auto"  # "auto" | "nvidia" | "mock"
     AI_TIMEOUT_SECONDS: float = 90.0
     # Short per-request timeout for fail-fast + fallback (distinct from overall AI_TIMEOUT).
     AI_REQUEST_TIMEOUT_SECONDS: float = 35.0

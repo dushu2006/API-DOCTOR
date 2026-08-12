@@ -1,16 +1,32 @@
-# React + Vite
+# API Doctor frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+React/Vite dashboard for the API Doctor incident workflow. It consumes the FastAPI incident API, subscribes to live progress over Server-Sent Events, and renders retrieved source context, generated diffs, sandbox results, and pull-request details.
 
-Currently, two official plugins are available:
+## Run locally
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+Start the backend first on port 8000, then:
 
-## React Compiler
+```bash
+npm install
+npm run dev
+```
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+Open the URL printed by Vite. In development, Vite proxies same-origin `/api` and `/health` requests to `http://localhost:8000`, so the browser does not need a hardcoded backend origin.
 
-## Expanding the Oxlint configuration
+## Configuration
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+- `VITE_BACKEND_URL`: backend target used only by the Vite development proxy. Defaults to `http://localhost:8000`.
+- `VITE_API_BASE_URL`: optional browser-facing API origin for deployments where the frontend and backend are hosted separately. Leave unset for same-origin deployments.
+
+Example:
+
+```bash
+VITE_BACKEND_URL=http://localhost:9000 npm run dev
+```
+
+## Checks
+
+```bash
+npm run lint
+npm run build
+```

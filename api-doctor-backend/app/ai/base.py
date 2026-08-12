@@ -47,39 +47,38 @@ class AIProviderError(Exception):
     """Raised when an AI provider call fails after retries."""
 
 
-def create_ai_client() -> AIClient:
-    """Factory — pick a concrete provider from configuration."""
-    # Default to NVIDIA NIM but fall back to a local mock client if the
-    # provider is unavailable (useful for development and CI without keys).
-    from app.ai.nim_client import NIMClient
-    from app.ai.mock_client import MockAIClient
-
+def selected_ai_provider() -> str:
+    """Return the effective provider name without exposing configuration secrets."""
     from app.core.config import settings
 
-    # If running in a local sandbox (developer environment), prefer the
-    # mock client to avoid external API calls and rate limits.
-    # Prefer the explicit environment variable first so a restarted or
-    # externally-launched process that sets `SANDBOX_MODE` at runtime will
-    # reliably prefer the MockAIClient (avoids stale/cached settings).
-    import os
+    configured = settings.AI_PROVIDER.strip().lower()
+    if configured not in {"auto", "nvidia", "mock"}:
+        raise ValueError("AI_PROVIDER must be one of: auto, nvidia, mock")
+    if configured == "auto":
+        return "nvidia" if settings.has_nvidia else "mock"
+    return configured
 
-    env_sandbox = os.getenv("SANDBOX_MODE")
-    if env_sandbox and env_sandbox.lower() == "local":
-        logger.info("SANDBOX_MODE=local (env): using MockAIClient")
-        return MockAIClient()
 
-    if getattr(settings, "SANDBOX_MODE", "docker") == "local":
-        logger.info("SANDBOX_MODE=local (settings): using MockAIClient")
-        return MockAIClient()
+def create_ai_client() -> AIClient:
+    """Factory — pick a concrete provider independently of sandbox mode."""
+    from app.ai.mock_client import MockAIClient
+    from app.ai.nim_client import NIMClient
+    from app.core.config import settings
 
-    # Otherwise, use the real NIM client when an API key is configured,
-    # fall back to the mock client if initialization fails.
-    try:
-        if settings.has_nvidia:
-            return NIMClient()
+    provider = selected_ai_provider()
+    if provider == "mock":
+        if settings.AI_PROVIDER.strip().lower() == "auto":
+            logger.warning(
+                "AI_PROVIDER=auto and NVIDIA_API_KEY is not configured; "
+                "using deterministic MockAIClient"
+            )
         else:
-            logger.warning("NVIDIA API key not configured; using MockAIClient")
-            return MockAIClient()
-    except Exception:
-        logger.exception("Failed to initialize NIMClient; using MockAIClient")
+            logger.warning("AI_PROVIDER=mock; using deterministic MockAIClient")
         return MockAIClient()
+
+    if not settings.has_nvidia:
+        logger.error(
+            "AI_PROVIDER=nvidia but NVIDIA_API_KEY is not configured; "
+            "provider requests will fail"
+        )
+    return NIMClient()

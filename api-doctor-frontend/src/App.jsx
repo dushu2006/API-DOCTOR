@@ -9,9 +9,20 @@ import CommandPalette from './components/CommandPalette';
 import { api } from './api';
 import './index.css';
 
+const ACTIVE_DIAGNOSIS_STATUSES = new Set([
+  'DETECTED',
+  'COLLECTING_CONTEXT',
+  'INVESTIGATING',
+  'ROOT_CAUSE_FOUND',
+  'FIX_PLANNED',
+  'SANDBOX_TESTING',
+  'VERIFYING',
+]);
+
 export default function App() {
   // Real Backend Data States
   const [isBackendConnected, setIsBackendConnected] = useState(false);
+  const [backendHealth, setBackendHealth] = useState(null);
   const [incidentsList, setIncidentsList] = useState([]);
   const [activeIncidentId, setActiveIncidentId] = useState(null);
   
@@ -26,7 +37,6 @@ export default function App() {
 
   // Layout & Visibility
   const [selectedFile, setSelectedFile] = useState('app/demo_api/bugs.py');
-  const [activeActivityTab, setActiveActivityTab] = useState('explorer');
   const [activeBottomTab, setActiveBottomTab] = useState('terminal');
   const [isExplorerOpen, setIsExplorerOpen] = useState(true);
   const [isDoctorOpen, setIsDoctorOpen] = useState(true);
@@ -43,6 +53,7 @@ export default function App() {
   const refreshBackendState = useCallback(async () => {
     try {
       const health = await api.getHealth();
+      setBackendHealth(health);
       setIsBackendConnected(health.status === 'ok');
 
       const incidents = await api.listIncidents();
@@ -52,7 +63,9 @@ export default function App() {
         setActiveIncidentId(incidents[0].id);
       }
     } catch (err) {
+      console.error('Failed to refresh backend state:', err);
       setIsBackendConnected(false);
+      setBackendHealth(null);
     }
   }, [activeIncidentId]);
 
@@ -76,7 +89,7 @@ export default function App() {
 
       if (inc.status === 'fulfilled') {
         setActiveIncident(inc.value);
-        setIsDiagnosing(!inc.value.status?.includes('VERIFIED') && !inc.value.status?.includes('PR') && !inc.value.status?.includes('FAILED') && inc.value.status !== 'REPAIR_LIMIT_REACHED');
+        setIsDiagnosing(ACTIVE_DIAGNOSIS_STATUSES.has(inc.value.status));
       }
       if (ctx.status === 'fulfilled') setIncidentContext(ctx.value);
       if (diff.status === 'fulfilled') setIncidentDiff(diff.value);
@@ -107,7 +120,7 @@ export default function App() {
         // Periodically refresh incident detail upon event
         fetchIncidentDetails(activeIncidentId);
       },
-      (err) => console.log('SSE Stream closed')
+      () => console.log('SSE stream closed')
     );
 
     return () => unsubscribe();
@@ -129,8 +142,15 @@ export default function App() {
     }
   };
 
-  const handleStopDiagnosis = () => {
-    setIsDiagnosing(false);
+  const handleStopDiagnosis = async () => {
+    if (!activeIncidentId) return;
+    try {
+      await api.cancelDiagnosis(activeIncidentId);
+      setIsDiagnosing(false);
+      await fetchIncidentDetails(activeIncidentId);
+    } catch (err) {
+      alert(`Failed to stop diagnosis: ${err.message}`);
+    }
   };
 
   const handleApproveFix = async (approved) => {
@@ -193,6 +213,7 @@ export default function App() {
         onStopDiagnosis={handleStopDiagnosis}
         isDiagnosing={isDiagnosing}
         isBackendConnected={isBackendConnected}
+        backendHealth={backendHealth}
       />
 
       {/* Main Workspace Canvas */}
@@ -202,8 +223,6 @@ export default function App() {
         <div style={{ flex: 1, display: 'flex', overflow: 'hidden', width: '100%' }}>
           
           <ActivityBar 
-            activeTab={activeActivityTab}
-            setActiveTab={setActiveActivityTab}
             isDoctorOpen={isDoctorOpen}
             setIsDoctorOpen={setIsDoctorOpen}
             isExplorerOpen={isExplorerOpen}
@@ -215,10 +234,14 @@ export default function App() {
             selectedFile={selectedFile}
             setSelectedFile={setSelectedFile}
             fileStatuses={{
-              [selectedFile]: isDiagnosing ? 'reading' : (incidentDiff?.present ? 'modified' : 'analyzed')
+              ...Object.fromEntries(
+                (incidentContext?.implicated_files || []).map(path => [path, isDiagnosing ? 'reading' : 'analyzed'])
+              ),
+              ...Object.fromEntries(
+                (incidentDiff?.files_changed || []).map(path => [path, 'modified'])
+              )
             }}
             explorerWidth={explorerWidth}
-            setExplorerWidth={setExplorerWidth}
             isExplorerOpen={isExplorerOpen}
           />
 
@@ -234,7 +257,6 @@ export default function App() {
 
           <EditorRegion 
             selectedFile={selectedFile}
-            setSelectedFile={setSelectedFile}
             incidentContext={incidentContext}
             incidentDiff={incidentDiff}
             isDiagnosing={isDiagnosing}
@@ -291,7 +313,6 @@ export default function App() {
           activeBottomTab={activeBottomTab}
           setActiveBottomTab={setActiveBottomTab}
           bottomHeight={bottomHeight}
-          setBottomHeight={setBottomHeight}
           isBottomCollapsed={isBottomCollapsed}
           setIsBottomCollapsed={setIsBottomCollapsed}
         />

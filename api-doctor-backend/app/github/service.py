@@ -50,9 +50,11 @@ class GitHubService:
         return self._pr_payload(pr, branch)
 
     async def pr_status(self, incident_id: str, pr_info: dict | None) -> dict[str, Any]:
-        if not pr_info or not pr_info.get("number"):
+        # ``repair`` stores the normalized key ``pr_number``. Accept the raw
+        # GitHub key as well for backwards compatibility with older records.
+        number = (pr_info or {}).get("pr_number") or (pr_info or {}).get("number")
+        if not number:
             return {"present": False}
-        number = pr_info["number"]
         pr = await self.client.get_pull_request(number)
         head_sha = pr["head"]["sha"]
         checks = await self.client.get_commit_checks(head_sha)

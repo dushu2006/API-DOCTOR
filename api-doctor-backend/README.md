@@ -101,6 +101,7 @@ curl http://localhost:8000/api/incidents/<id>/context   # retrieved context
 curl http://localhost:8000/api/incidents/<id>/diff      # proposed fix
 curl http://localhost:8000/api/incidents/<id>/sandbox   # sandbox verification
 curl http://localhost:8000/api/incidents/<id>/stream    # SSE live progress
+curl -X POST http://localhost:8000/api/incidents/<id>/cancel
 curl -X POST http://localhost:8000/api/incidents/<id>/approve
 curl -X POST http://localhost:8000/api/incidents/<id>/create-pr
 ```
@@ -124,8 +125,11 @@ All are deterministic and produce **real** Python tracebacks.
 
 NVIDIA NIM is the initial provider via an OpenAI-compatible HTTP API. Provider
 logic lives behind `app/ai.base.AIClient` so additional providers can be added
-without touching the orchestrator or agents. Model routing is purely
-configuration-driven (never hard-coded):
+without touching the orchestrator or agents. AI selection is independent of
+sandbox execution: `AI_PROVIDER=auto` uses NVIDIA when `NVIDIA_API_KEY` is set
+and otherwise reports that the deterministic mock is active; use
+`AI_PROVIDER=nvidia` or `AI_PROVIDER=mock` to make the choice explicit. Model
+routing is purely configuration-driven (never hard-coded):
 
 ```
 INVESTIGATOR_MODEL=nvidia/nemotron-3-ultra-550b-a55b   # root-cause analysis
@@ -195,6 +199,7 @@ fix is regenerated with sandbox feedback; after the limit the incident stops in
 | GET    | `/api/incidents/{id}`                 | incident detail                  |
 | POST   | `/api/incidents/trigger/{scenario}`   | detect + start a seeded failure  |
 | POST   | `/api/incidents/{id}/diagnose`        | start diagnosis                  |
+| POST   | `/api/incidents/{id}/cancel`          | cancel active diagnosis          |
 | GET    | `/api/incidents/{id}/status`          | live status + activity           |
 | GET    | `/api/incidents/{id}/context`         | retrieved context                |
 | GET    | `/api/incidents/{id}/diff`            | proposed fix diff                |

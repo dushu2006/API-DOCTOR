@@ -3,15 +3,12 @@ import {
   Stethoscope, 
   ChevronRight, 
   ChevronDown, 
-  CheckCircle2, 
-  XCircle, 
-  Clock, 
-  FileCode, 
-  GitPullRequest, 
-  ExternalLink, 
-  RefreshCw, 
-  AlertCircle, 
-  ShieldCheck, 
+  CheckCircle2,
+  XCircle,
+  Clock,
+  GitPullRequest,
+  ExternalLink,
+  ShieldCheck,
   Check, 
   ArrowUpRight,
   ChevronUp
@@ -39,16 +36,16 @@ export default function APIDoctorPanel({
   const [expandedFiles, setExpandedFiles] = useState(true);
   const [expandedFileDetails, setExpandedFileDetails] = useState({});
   const [historyOpen, setHistoryOpen] = useState(true);
+  const rootCause = activeIncident?.root_cause;
+  const confidence = Number.isFinite(Number(rootCause?.confidence))
+    ? Math.min(1, Math.max(0, Number(rootCause.confidence)))
+    : null;
+  const confidencePercent = confidence === null ? null : Math.round(confidence * 100);
 
   if (!isDoctorOpen) return null;
 
   const toggleFileDetail = (path) => {
     setExpandedFileDetails(prev => ({ ...prev, [path]: !prev[path] }));
-  };
-
-  const getCategoryColor = (reason) => {
-    if (!reason) return 'rgba(240, 96, 90, 0.15)';
-    return 'rgba(240, 96, 90, 0.15)';
   };
 
   return (
@@ -190,8 +187,8 @@ export default function APIDoctorPanel({
                             <span className="agent-dot" />
                           </div>
                         ) : (
-                          <div style={{ width: '16px', height: '16px', borderRadius: '50%', backgroundColor: 'var(--surface-1)', border: `1px solid ${ev.status === 'failed' ? 'var(--color-failure)' : 'var(--color-success)'}`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: ev.status === 'failed' ? 'var(--color-failure)' : 'var(--color-success)', background: 'var(--surface-1)' }}>
-                            <Check size={10} />
+                          <div style={{ width: '16px', height: '16px', borderRadius: '50%', backgroundColor: 'var(--surface-1)', border: `1px solid ${['failed', 'cancelled'].includes(ev.status) ? 'var(--color-failure)' : 'var(--color-success)'}`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: ['failed', 'cancelled'].includes(ev.status) ? 'var(--color-failure)' : 'var(--color-success)' }}>
+                            {['failed', 'cancelled'].includes(ev.status) ? <XCircle size={10} /> : <Check size={10} />}
                           </div>
                         )}
                         <div style={{ flex: 1, display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
@@ -199,7 +196,7 @@ export default function APIDoctorPanel({
                             {ev.step || ev.message || 'Processing investigation step'}
                           </span>
                           <span style={{ fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--text-muted)' }}>
-                            {ev.timestamp ? new Date(ev.timestamp).toLocaleTimeString() : ''}
+                            {ev.timestamp || ev.ts ? new Date(ev.timestamp || ev.ts * 1000).toLocaleTimeString() : ''}
                           </span>
                         </div>
                       </div>
@@ -273,33 +270,40 @@ export default function APIDoctorPanel({
                 <div style={{ fontSize: '10px', fontWeight: 700, color: 'var(--text-muted)', letterSpacing: '0.05em' }}>
                   ROOT CAUSE ANALYSIS
                 </div>
-                {incidentDiff?.reason && (
+                {rootCause?.category && (
                   <span style={{ backgroundColor: 'rgba(240, 96, 90, 0.15)', color: 'var(--color-failure)', padding: '2px 6px', borderRadius: '4px', fontSize: '10px', fontWeight: 700 }}>
-                    BUG DETECTED
+                    {rootCause.category.replaceAll('_', ' ')}
                   </span>
                 )}
               </div>
 
-              {!incidentDiff || !incidentDiff.present ? (
+              {!rootCause ? (
                 <div style={{ fontSize: '12px', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '6px' }}>
                   <Clock size={13} />
                   <span>Agent analyzing stack trace & context...</span>
                 </div>
               ) : (
                 <>
-                  <div style={{ marginBottom: '10px' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', marginBottom: '4px' }}>
-                      <span style={{ color: 'var(--text-muted)' }}>Confidence</span>
-                      <span style={{ color: 'var(--color-success)', fontWeight: 600, fontFamily: 'var(--font-mono)' }}>96%</span>
+                  {confidencePercent !== null && (
+                    <div style={{ marginBottom: '10px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', marginBottom: '4px' }}>
+                        <span style={{ color: 'var(--text-muted)' }}>Confidence</span>
+                        <span style={{ color: 'var(--color-success)', fontWeight: 600, fontFamily: 'var(--font-mono)' }}>{confidencePercent}%</span>
+                      </div>
+                      <div style={{ height: '4px', backgroundColor: 'var(--border-color)', borderRadius: '2px', overflow: 'hidden' }}>
+                        <div style={{ width: `${confidencePercent}%`, height: '100%', backgroundColor: 'var(--color-success)' }} />
+                      </div>
                     </div>
-                    <div style={{ height: '4px', backgroundColor: 'var(--border-color)', borderRadius: '2px', overflow: 'hidden' }}>
-                      <div style={{ width: '96%', height: '100%', backgroundColor: 'var(--color-success)' }} />
-                    </div>
-                  </div>
+                  )}
 
-                  <p style={{ fontSize: '12px', color: 'var(--text-primary)', marginBottom: '10px', lineHeight: 1.4 }}>
-                    {incidentDiff.reason || incidentDiff.summary || 'Root cause identified.'}
+                  <p style={{ fontSize: '12px', color: 'var(--text-primary)', marginBottom: '6px', lineHeight: 1.4 }}>
+                    {rootCause.root_cause || 'Root cause identified.'}
                   </p>
+                  {rootCause.reason && (
+                    <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '10px', lineHeight: 1.4 }}>
+                      {rootCause.reason}
+                    </p>
+                  )}
 
                   {incidentContext?.implicated_files?.[0] && (
                     <button 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 from app.agent.fix_agent import FixProposal
@@ -113,3 +114,46 @@ async def test_repair_limit_reached(monkeypatch):
     result = await orch.run_pipeline(inc.id)
     assert result.status == IncidentStatus.REPAIR_LIMIT_REACHED
     assert result.attempt_count == 2  # MAX_REPAIR_ATTEMPTS
+
+
+async def test_start_diagnosis_allows_only_one_active_task(monkeypatch):
+    orch = Orchestrator()
+    inc = incident_store.create(Incident())
+    pipeline_started = asyncio.Event()
+    release_pipeline = asyncio.Event()
+
+    async def slow_pipeline(incident_id: str):
+        pipeline_started.set()
+        await release_pipeline.wait()
+        return incident_store.get(incident_id)
+
+    monkeypatch.setattr(orch, "run_pipeline", slow_pipeline)
+
+    assert orch.start_diagnosis(inc.id) is True
+    await pipeline_started.wait()
+    assert orch.start_diagnosis(inc.id) is False
+
+    release_pipeline.set()
+    await orch._pipeline_tasks[inc.id]
+    await asyncio.sleep(0)
+    assert inc.id not in orch._pipeline_tasks
+
+
+async def test_cancel_diagnosis_sets_terminal_status(monkeypatch):
+    orch = Orchestrator()
+    inc = incident_store.create(Incident())
+    pipeline_started = asyncio.Event()
+
+    async def waiting_pipeline(incident_id: str):
+        pipeline_started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(orch, "run_pipeline", waiting_pipeline)
+
+    assert orch.start_diagnosis(inc.id) is True
+    await pipeline_started.wait()
+    assert await orch.cancel_diagnosis(inc.id) is True
+
+    assert inc.status == IncidentStatus.CANCELLED
+    assert inc.status.is_terminal
+    assert inc.activity[-1].status == "cancelled"

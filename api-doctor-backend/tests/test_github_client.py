@@ -137,3 +137,33 @@ async def test_service_repair_creates_pr(httpx_mock):
     assert info["pr_number"] == 7
     assert info["pr_url"] == "https://github.com/acme/demo/pull/7"
     assert info["branch"] == "api-doctor/fix/inc1"
+
+
+async def test_service_pr_status_uses_normalized_pr_number(httpx_mock):
+    client = GitHubClient()
+    service = GitHubService(client)
+    httpx_mock.add_response(
+        url="https://api.github.com/repos/acme/demo/pulls/7",
+        method="GET",
+        json={
+            "number": 7,
+            "html_url": "https://github.com/acme/demo/pull/7",
+            "state": "open",
+            "merged": False,
+            "head": {"sha": "commit1", "ref": "api-doctor/fix/inc1"},
+        },
+    )
+    httpx_mock.add_response(
+        url="https://api.github.com/repos/acme/demo/commits/commit1/check-runs",
+        method="GET",
+        json={"check_runs": [{"name": "tests", "conclusion": "success"}]},
+    )
+
+    status = await service.pr_status(
+        "inc1",
+        {"pr_number": 7, "pr_url": "https://github.com/acme/demo/pull/7"},
+    )
+
+    assert status["present"] is True
+    assert status["pr_number"] == 7
+    assert status["checks"]["success"] == 1

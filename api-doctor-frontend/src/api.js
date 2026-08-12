@@ -1,4 +1,7 @@
-const API_BASE = 'http://localhost:8000';
+// Empty by default so browser requests stay same-origin. The Vite dev server
+// proxies them to the backend; deployments can set VITE_API_BASE_URL when the
+// API is hosted on a separate origin.
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
 
 async function request(endpoint, options = {}) {
   try {
@@ -32,6 +35,7 @@ export const api = {
   
   triggerScenario: (scenario = 'null_pointer') => request(`/api/incidents/trigger/${scenario}`, { method: 'POST' }),
   diagnoseIncident: (id) => request(`/api/incidents/${id}/diagnose`, { method: 'POST' }),
+  cancelDiagnosis: (id) => request(`/api/incidents/${id}/cancel`, { method: 'POST' }),
   approveFix: (id, approved = true) => request(`/api/incidents/${id}/approve`, {
     method: 'POST',
     body: JSON.stringify({ approved })

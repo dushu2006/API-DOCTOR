@@ -1,5 +1,5 @@
 import React from 'react';
-import { Play, CheckCircle2, Stethoscope, GitPullRequest, Command } from 'lucide-react';
+import { Command } from 'lucide-react';
 
 export default function StateToolbar({ currentState, setCurrentState, onOpenCommandPalette }) {
   const states = [
