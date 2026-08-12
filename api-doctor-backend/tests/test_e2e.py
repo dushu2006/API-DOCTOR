@@ -29,7 +29,7 @@ FIXED_MARKER = (
 
 
 def _null_check_fix() -> FixProposal:
-    path = settings.REPO_ROOT + "/app/demo_api/router.py"
+    path = settings.INTERNAL_REPO_ROOT + "/app/demo_api/router.py"
     original = open(path).read()
     fixed = original.replace(ORIGINAL_MARKER, FIXED_MARKER, 1)
     diff = "\n".join(

@@ -390,6 +390,23 @@ async def connect_repository(req: ConnectProjectRequest, user: UserResponse = De
     return ConnectProjectResponse(status=created.status, message=created.message, project=created.project, steps_completed=steps)
 
 
+@router.get("/files/list")
+async def list_project_files(project_id: str | None = None, user: UserResponse = Depends(require_authenticated_user)) -> dict[str, Any]:
+    project, ws_path = _require_connected_workspace(user.id, project_id)
+    wm = WorkspaceManager(repo_root=ws_path)
+    return {"project_id": project.id, "files": wm.files(), "tree": wm.file_tree()}
+
+
+@router.get("/file-content")
+async def get_file_content(path: str = Query(...), project_id: str | None = None, user: UserResponse = Depends(require_authenticated_user)) -> dict[str, Any]:
+    _project, ws_path = _require_connected_workspace(user.id, project_id)
+    wm = WorkspaceManager(repo_root=ws_path)
+    content = wm.read_relative(None, path)
+    if content is None:
+        raise HTTPException(404, f"File {path!r} not found in workspace.")
+    return {"path": path, "content": content}
+
+
 @router.get("/{project_id}", response_model=Project)
 async def get_project(project_id: str, user: UserResponse = Depends(require_authenticated_user)) -> Project:
     project = project_store.get(project_id, user.id)
@@ -514,20 +531,3 @@ async def sync_project(project_id: str, user: UserResponse = Depends(require_aut
 async def list_project_incidents(project_id: str, user: UserResponse = Depends(require_authenticated_user)) -> list[dict[str, Any]]:
     _require_project(user.id, project_id)
     return [item.model_dump(mode="json") for item in incident_store.list_all(project_id)]
-
-
-@router.get("/files/list")
-async def list_project_files(project_id: str | None = None, user: UserResponse = Depends(require_authenticated_user)) -> dict[str, Any]:
-    project, ws_path = _require_connected_workspace(user.id, project_id)
-    wm = WorkspaceManager(repo_root=ws_path)
-    return {"project_id": project.id, "files": wm.files(), "tree": wm.file_tree()}
-
-
-@router.get("/file-content")
-async def get_file_content(path: str = Query(...), project_id: str | None = None, user: UserResponse = Depends(require_authenticated_user)) -> dict[str, Any]:
-    _project, ws_path = _require_connected_workspace(user.id, project_id)
-    wm = WorkspaceManager(repo_root=ws_path)
-    content = wm.read_relative(None, path)
-    if content is None:
-        raise HTTPException(404, f"File {path!r} not found in workspace.")
-    return {"path": path, "content": content}

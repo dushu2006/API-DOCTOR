@@ -11,8 +11,20 @@ from app.github.service import GitHubService
 from app.projects.models import Project
 
 
+def _github_client(**overrides) -> GitHubClient:
+    """Build a client with explicit project-scoped test credentials."""
+    config = {
+        "token": "test-token",
+        "owner": "acme",
+        "repo": "demo",
+        "default_branch": "main",
+    }
+    config.update(overrides)
+    return GitHubClient(**config)
+
+
 async def test_verify_credentials(httpx_mock):
-    client = GitHubClient()
+    client = _github_client()
     httpx_mock.add_response(
         url="https://api.github.com/user", method="GET",
         json={"login": "octocat", "id": 1, "name": "The Octocat"},
@@ -22,8 +34,57 @@ async def test_verify_credentials(httpx_mock):
     assert info["login"] == "octocat"
 
 
+async def test_list_accessible_repositories_uses_account_endpoint_and_paginates(httpx_mock):
+    client = _github_client()
+    first_page = [
+        {
+            "full_name": f"acme/repo-{index}",
+            "owner": {"login": "acme"},
+            "name": f"repo-{index}",
+            "private": False,
+        }
+        for index in range(100)
+    ]
+    httpx_mock.add_response(
+        url=re.compile(r"^https://api\.github\.com/user/repos(?:\?.*)?$"),
+        method="GET",
+        json=first_page,
+    )
+    httpx_mock.add_response(
+        url=re.compile(r"^https://api\.github\.com/user/repos(?:\?.*)?$"),
+        method="GET",
+        json=[
+            {
+                "full_name": "octo/private-repo",
+                "owner": {"login": "octo"},
+                "name": "private-repo",
+                "private": True,
+                "default_branch": "trunk",
+            }
+        ],
+    )
+
+    repos = await client.list_accessible_repositories()
+
+    assert len(repos) == 101
+    assert repos[-1] == {
+        "full_name": "octo/private-repo",
+        "owner": "octo",
+        "name": "private-repo",
+        "private": True,
+        "default_branch": "trunk",
+        "description": "",
+        "html_url": "",
+    }
+    requests = httpx_mock.get_requests()
+    assert len(requests) == 2
+    assert requests[0].url.params["page"] == "1"
+    assert requests[1].url.params["page"] == "2"
+    assert requests[0].url.params["affiliation"] == "owner,collaborator,organization_member"
+
+
 async def test_get_repo(httpx_mock):
-    client = GitHubClient()
+    client = _github_client()
     httpx_mock.add_response(
         url=re.compile(r"^https://api\.github\.com/repos/acme/demo/?$"), method="GET",
         json={"name": "demo", "default_branch": "main"},
@@ -33,7 +94,7 @@ async def test_get_repo(httpx_mock):
 
 
 async def test_create_branch(httpx_mock):
-    client = GitHubClient()
+    client = _github_client()
     httpx_mock.add_response(
         url="https://api.github.com/repos/acme/demo/branches/main", method="GET",
         json={"commit": {"sha": "abc123"}},
@@ -47,7 +108,7 @@ async def test_create_branch(httpx_mock):
 
 
 async def test_list_branches(httpx_mock):
-    client = GitHubClient()
+    client = _github_client()
     httpx_mock.add_response(
         url="https://api.github.com/repos/acme/demo/branches?per_page=100", method="GET",
         json=[{"name": "main"}, {"name": "dev"}],
@@ -59,7 +120,7 @@ async def test_list_branches(httpx_mock):
 async def test_read_file(httpx_mock):
     import base64
 
-    client = GitHubClient()
+    client = _github_client()
     content = base64.b64encode(b"def foo():\n    pass").decode()
     httpx_mock.add_response(
         url="https://api.github.com/repos/acme/demo/contents/app/x.py?ref=main",
@@ -70,13 +131,13 @@ async def test_read_file(httpx_mock):
 
 
 async def test_missing_token_raises():
-    client = GitHubClient(token="")
+    client = _github_client(token="")
     with pytest.raises(GitHubError):
-        await client.get_repo()
+        await client.verify_credentials()
 
 
 async def test_api_error_raises(httpx_mock):
-    client = GitHubClient()
+    client = _github_client()
     httpx_mock.add_response(
         url=re.compile(r"^https://api\.github\.com/repos/acme/demo/?$"), method="GET", status_code=404, json={}
     )
@@ -85,7 +146,7 @@ async def test_api_error_raises(httpx_mock):
 
 
 async def test_service_repair_creates_pr(httpx_mock):
-    client = GitHubClient()
+    client = _github_client()
     service = GitHubService(client)
 
     # list open PRs for branch -> none
@@ -151,7 +212,7 @@ async def test_service_repair_creates_pr(httpx_mock):
 
 
 async def test_service_pr_status_uses_normalized_pr_number(httpx_mock):
-    client = GitHubClient()
+    client = _github_client()
     service = GitHubService(client)
     httpx_mock.add_response(
         url="https://api.github.com/repos/acme/demo/pulls/7",

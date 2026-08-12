@@ -157,6 +157,7 @@ export const api = {
   syncRenderLogs: (serviceId, projectId) => request(`/api/incidents/sync-render${serviceId || projectId ? '?' : ''}${serviceId ? `service_id=${encodeURIComponent(serviceId)}` : ''}${serviceId && projectId ? '&' : ''}${projectId ? `project_id=${encodeURIComponent(projectId)}` : ''}`, {
     method: 'POST'
   }),
+  getRenderLogs: (projectId, limit = 200) => request(`/api/incidents/render-logs?limit=${encodeURIComponent(limit)}${projectId ? `&project_id=${encodeURIComponent(projectId)}` : ''}`),
   diagnoseIncident: (id) => request(`/api/incidents/${id}/diagnose`, { method: 'POST' }),
   cancelDiagnosis: (id) => request(`/api/incidents/${id}/cancel`, { method: 'POST' }),
   approveFix: (id, approved = true) => request(`/api/incidents/${id}/approve`, {

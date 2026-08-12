@@ -30,14 +30,19 @@ from app.projects.store import project_store
 from app.sandbox.workspace_manager import WorkspaceManager
 
 
-async def _request(method: str, path: str, json_body: dict | None = None) -> httpx.Response:
+async def _request(
+    method: str,
+    path: str,
+    json_body: dict | None = None,
+    headers: dict[str, str] | None = None,
+) -> httpx.Response:
     transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        return await client.request(method, path, json=json_body)
+        return await client.request(method, path, json=json_body, headers=headers)
 
 
 @pytest.mark.asyncio
-async def test_real_project_e2e_workflow(monkeypatch):
+async def test_real_project_e2e_workflow(monkeypatch, auth_headers, project_factory):
     with tempfile.TemporaryDirectory() as tmp_workspace:
         # Create a sample real project repo
         project_dir = Path(tmp_workspace) / "myorg" / "payments-api"
@@ -80,19 +85,14 @@ async def test_real_project_e2e_workflow(monkeypatch):
         profile = discover_project(project_dir)
         assert profile.language == "Python"
 
-        project = Project(
-            id="test-proj",
+        project = project_factory(
+            project_id="test-proj",
             name="myorg/payments-api",
             github_owner="myorg",
             github_repo="payments-api",
-            github_branch="main",
-            repo_root=str(project_dir),
             workspace_path=str(project_dir),
-            is_connected=True,
             profile=profile,
         )
-        project_store.create(project)
-        project_store.set_current("test-proj")
 
         # 2. Ingest real production log
         log_payload = {
@@ -108,7 +108,7 @@ async def test_real_project_e2e_workflow(monkeypatch):
             "project_id": "test-proj",
             "auto_diagnose": False,
         }
-        ingest_res = await _request("POST", "/api/incidents/ingest", json_body=log_payload)
+        ingest_res = await _request("POST", "/api/incidents/ingest", json_body=log_payload, headers=auth_headers)
         assert ingest_res.status_code == 200
         incident_id = ingest_res.json()["incident_id"]
 
@@ -151,12 +151,12 @@ async def test_real_project_e2e_workflow(monkeypatch):
         assert (services_dir / "payment.py").read_text() == original_code
 
         # 5. Check Diff endpoint
-        diff_res = await _request("GET", f"/api/incidents/{incident_id}/diff")
+        diff_res = await _request("GET", f"/api/incidents/{incident_id}/diff", headers=auth_headers)
         assert diff_res.status_code == 200
         assert diff_res.json()["present"] is True
         assert "app/services/payment.py" in diff_res.json()["files_changed"]
 
         # 6. Check Context endpoint
-        ctx_res = await _request("GET", f"/api/incidents/{incident_id}/context")
+        ctx_res = await _request("GET", f"/api/incidents/{incident_id}/context", headers=auth_headers)
         assert ctx_res.status_code == 200
         assert "app/services/payment.py" in ctx_res.json()["implicated_files"]

@@ -142,29 +142,42 @@ async def _apply_patch(diff: str, workspace_root: str | None = None) -> dict:
     return {"ok": True, "affected_files": affected}
 
 
-async def _create_branch(incident_id: str, project_id: str = "default") -> dict:
+def _github_service_for_project(project_id: str):
+    """Build a GitHub service from one project's stored integration credentials."""
     from app.github.client import GitHubClient
     from app.github.service import GitHubService
     from app.projects.store import project_store
 
     project = project_store.get(project_id)
-    client = GitHubClient()
-    service = GitHubService(client)
+    if not project:
+        raise ValueError(f"project not found: {project_id}")
+    github = project_store.resolve_github(project.id)
+    if not github.get("owner") or not github.get("repo") or not github.get("token"):
+        raise ValueError("GitHub integration is not configured for this project")
+    return project, GitHubService(
+        GitHubClient(
+            token=github["token"],
+            owner=github["owner"],
+            repo=github["repo"],
+            default_branch=github.get("branch") or "main",
+        )
+    )
+
+
+async def _create_branch(incident_id: str, project_id: str = "default") -> dict:
+    project, service = _github_service_for_project(project_id)
     branch = service._branch_name(incident_id)
-    base = project.github_branch if project else client.default_branch
-    branches = await client.list_branches()
+    base = project.github_branch or service.client.default_branch
+    branches = await service.client.list_branches()
     if branch not in branches:
-        await client.create_branch(branch, base)
+        await service.client.create_branch(branch, base)
     return {"ok": True, "branch": branch}
 
 
 async def _commit_changes(
     incident_id: str, message: str, files: list[dict], project_id: str = "default"
 ) -> dict:
-    from app.github.client import GitHubClient
-    from app.github.service import GitHubService
-
-    service = GitHubService(GitHubClient())
+    _project, service = _github_service_for_project(project_id)
     branch = service._branch_name(incident_id)
     sha = await service.client.create_commit(branch, message, files)
     return {"ok": True, "branch": branch, "commit": sha}
@@ -173,12 +186,7 @@ async def _commit_changes(
 async def _create_pull_request(
     incident_id: str, title: str, body: str, project_id: str = "default"
 ) -> dict:
-    from app.github.client import GitHubClient
-    from app.github.service import GitHubService
-    from app.projects.store import project_store
-
-    project = project_store.get(project_id)
-    service = GitHubService(GitHubClient())
+    project, service = _github_service_for_project(project_id)
     branch = service._branch_name(incident_id)
     pr = await service.client.create_pull_request(
         head=branch, title=title, body=body, base=project.github_branch

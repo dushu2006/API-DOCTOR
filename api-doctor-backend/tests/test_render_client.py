@@ -22,6 +22,17 @@ DEPLOYS_URL = re.compile(r"^https://api\.render\.com/v1/services/srv_test/deploy
 OLD_LOGS_URL = re.compile(r"^https://api\.render\.com/v1/services/srv_test/logs")
 
 
+def _render_client(**overrides) -> RenderClient:
+    """Build a client with explicit project-scoped test credentials."""
+    config = {
+        "api_key": "test-render-key",
+        "service_id": "srv_test",
+        "owner_id": "tea_owner",
+    }
+    config.update(overrides)
+    return RenderClient(**config)
+
+
 def _service_payload() -> dict:
     return {"id": "srv_test", "name": "demo", "ownerId": "tea_owner"}
 
@@ -44,7 +55,7 @@ def _logs_payload(messages: list[str], has_more: bool = False) -> dict:
 
 
 async def test_get_service(httpx_mock):
-    client = RenderClient()
+    client = _render_client()
     httpx_mock.add_response(url=SERVICE_URL, method="GET", json=_service_payload())
     service = await client.get_service()
     assert service["name"] == "demo"
@@ -52,7 +63,7 @@ async def test_get_service(httpx_mock):
 
 
 async def test_list_deployments_unwraps_cursor_items(httpx_mock):
-    client = RenderClient()
+    client = _render_client()
     httpx_mock.add_response(
         url=DEPLOYS_URL,
         method="GET",
@@ -63,7 +74,7 @@ async def test_list_deployments_unwraps_cursor_items(httpx_mock):
 
 
 async def test_get_deployment_status(httpx_mock):
-    client = RenderClient()
+    client = _render_client()
     httpx_mock.add_response(
         url=DEPLOYS_URL,
         method="GET",
@@ -81,14 +92,14 @@ async def test_missing_key_raises():
 
 
 async def test_error_raises(httpx_mock):
-    client = RenderClient()
+    client = _render_client()
     httpx_mock.add_response(url=SERVICE_URL, method="GET", status_code=500, json={})
     with pytest.raises(RenderError):
         await client.get_service()
 
 
 async def test_get_logs_uses_official_logs_endpoint(httpx_mock):
-    client = RenderClient()
+    client = _render_client()
     httpx_mock.add_response(url=SERVICE_URL, method="GET", json=_service_payload())
     httpx_mock.add_response(
         url=LOGS_URL,
@@ -107,7 +118,7 @@ async def test_get_logs_uses_official_logs_endpoint(httpx_mock):
 
 
 async def test_get_logs_does_not_swallow_404(httpx_mock):
-    client = RenderClient()
+    client = _render_client()
     httpx_mock.add_response(url=SERVICE_URL, method="GET", json=_service_payload())
     httpx_mock.add_response(url=LOGS_URL, method="GET", status_code=404, text="not found")
     with pytest.raises(RenderNotFoundError):
@@ -115,14 +126,14 @@ async def test_get_logs_does_not_swallow_404(httpx_mock):
 
 
 async def test_get_logs_auth_error(httpx_mock):
-    client = RenderClient()
+    client = _render_client()
     httpx_mock.add_response(url=SERVICE_URL, method="GET", status_code=401, text="unauthorized")
     with pytest.raises(RenderAuthError):
         await client.get_logs()
 
 
 async def test_get_logs_forbidden(httpx_mock):
-    client = RenderClient()
+    client = _render_client()
     httpx_mock.add_response(url=SERVICE_URL, method="GET", status_code=403, text="forbidden")
     with pytest.raises(RenderAuthError) as exc:
         await client.get_logs()
@@ -130,7 +141,7 @@ async def test_get_logs_forbidden(httpx_mock):
 
 
 async def test_get_logs_rate_limit(httpx_mock):
-    client = RenderClient()
+    client = _render_client()
     httpx_mock.add_response(url=SERVICE_URL, method="GET", json=_service_payload())
     httpx_mock.add_response(url=LOGS_URL, method="GET", status_code=429, text="slow down")
     httpx_mock.add_response(url=LOGS_URL, method="GET", status_code=429, text="slow down")
@@ -139,7 +150,7 @@ async def test_get_logs_rate_limit(httpx_mock):
 
 
 async def test_get_logs_empty_success(httpx_mock):
-    client = RenderClient()
+    client = _render_client()
     httpx_mock.add_response(url=SERVICE_URL, method="GET", json=_service_payload())
     httpx_mock.add_response(url=LOGS_URL, method="GET", json=_logs_payload([]))
     httpx_mock.add_response(url=LOGS_URL, method="GET", json=_logs_payload([]))
@@ -150,7 +161,7 @@ async def test_get_logs_empty_success(httpx_mock):
 
 
 async def test_get_logs_paginates(httpx_mock):
-    client = RenderClient()
+    client = _render_client()
     httpx_mock.add_response(url=SERVICE_URL, method="GET", json=_service_payload())
     httpx_mock.add_response(url=LOGS_URL, method="GET", json=_logs_payload(["line-1"], has_more=True))
     httpx_mock.add_response(url=LOGS_URL, method="GET", json=_logs_payload(["line-2"], has_more=False))
@@ -159,7 +170,7 @@ async def test_get_logs_paginates(httpx_mock):
 
 
 async def test_get_logs_invalid_service(httpx_mock):
-    client = RenderClient()
+    client = _render_client()
     httpx_mock.add_response(url=SERVICE_URL, method="GET", status_code=404, text="missing")
     with pytest.raises(RenderNotFoundError):
         await client.get_logs()
@@ -184,7 +195,7 @@ async def test_normalize_log_entry_from_labels():
 
 
 async def test_unexpected_logs_payload_raises(httpx_mock):
-    client = RenderClient()
+    client = _render_client()
     httpx_mock.add_response(url=SERVICE_URL, method="GET", json=_service_payload())
     httpx_mock.add_response(url=LOGS_URL, method="GET", json={"unexpected": True})
     with pytest.raises(RenderError, match="unexpected payload"):

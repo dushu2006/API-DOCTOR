@@ -12,46 +12,46 @@ from app.main import app
 from app.orchestrator import orchestrator
 
 
-async def _request(method: str, path: str) -> httpx.Response:
+async def _request(method: str, path: str, headers: dict[str, str]) -> httpx.Response:
     transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        return await client.request(method, path)
+        return await client.request(method, path, headers=headers)
 
 
-async def test_diagnose_returns_incident_status(monkeypatch):
+async def test_diagnose_returns_incident_status(monkeypatch, auth_headers):
     inc = incident_store.create(Incident())
     monkeypatch.setattr(orchestrator, "start_diagnosis", lambda incident_id: True)
 
-    response = await _request("POST", f"/api/incidents/{inc.id}/diagnose")
+    response = await _request("POST", f"/api/incidents/{inc.id}/diagnose", auth_headers)
 
     assert response.status_code == 200
     assert response.json()["incident_id"] == inc.id
     assert response.json()["status"] == "DETECTED"
 
 
-async def test_diagnose_rejects_duplicate_pipeline(monkeypatch):
+async def test_diagnose_rejects_duplicate_pipeline(monkeypatch, auth_headers):
     inc = incident_store.create(Incident())
     monkeypatch.setattr(orchestrator, "start_diagnosis", lambda incident_id: False)
 
-    response = await _request("POST", f"/api/incidents/{inc.id}/diagnose")
+    response = await _request("POST", f"/api/incidents/{inc.id}/diagnose", auth_headers)
 
     assert response.status_code == 409
     assert "already running" in response.json()["detail"]
 
 
-async def test_cancel_endpoint_calls_orchestrator(monkeypatch):
+async def test_cancel_endpoint_calls_orchestrator(monkeypatch, auth_headers):
     inc = incident_store.create(Incident())
     cancel = AsyncMock(return_value=True)
     monkeypatch.setattr(orchestrator, "cancel_diagnosis", cancel)
 
-    response = await _request("POST", f"/api/incidents/{inc.id}/cancel")
+    response = await _request("POST", f"/api/incidents/{inc.id}/cancel", auth_headers)
 
     assert response.status_code == 200
     assert response.json() == {"incident_id": inc.id, "cancelled": True}
     cancel.assert_awaited_once_with(inc.id)
 
 
-async def test_incident_response_exposes_root_cause():
+async def test_incident_response_exposes_root_cause(auth_headers):
     inc = Incident(
         root_cause={
             "root_cause": "missing null guard",
@@ -65,7 +65,7 @@ async def test_incident_response_exposes_root_cause():
     )
     incident_store.create(inc)
 
-    response = await _request("GET", f"/api/incidents/{inc.id}")
+    response = await _request("GET", f"/api/incidents/{inc.id}", auth_headers)
 
     assert response.status_code == 200
     assert response.json()["root_cause"]["confidence"] == 0.87
