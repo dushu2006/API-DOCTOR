@@ -216,13 +216,29 @@ class Orchestrator:
 
         # Determine the project and workspace
         project = project_store.get(inc.project_id) or project_store.get_current()
+        workspace_path = None
         if project and project.workspace_path and Path(project.workspace_path).is_dir():
             workspace_path = project.workspace_path
         elif settings.DEMO_MODE:
             workspace_path = settings.INTERNAL_REPO_ROOT
-        else:
-            raise RuntimeError("No synchronized workspace is available for the selected project.")
         profile = project.profile if project else None
+
+        if not workspace_path:
+            # No workspace to operate on. Fail the incident explicitly instead
+            # of raising out of the background task, which previously left the
+            # incident stuck in RECEIVED/DETECTED with no error surfaced. The
+            # user can retry once the project is connected (start_diagnosis
+            # permits restart from any non-PR_CREATED status).
+            inc.status = IncidentStatus.FAILED
+            inc.error_message = (
+                "No synchronized workspace is available for the selected project. "
+                "Connect the repository and try again."
+            )
+            inc.add_activity("pipeline", "failed", inc.error_message)
+            incident_store.update(inc)
+            await emit(incident_id, "pipeline", "failed", inc.error_message)
+            log_operation(logger, incident_id, "pipeline", "failed", error=inc.error_message)
+            return inc
 
         self.context_builder.set_repo_root(workspace_path)
         self.sandbox_runner.set_repo_root(workspace_path, profile)
@@ -423,6 +439,12 @@ class Orchestrator:
             except TypeError:
                 proposal = await self.fix_agent.generate_fix(analysis, files)
             inc.fix_proposal = proposal.model_dump()
+            if not (proposal.diff or "").strip():
+                # The coder model returned no patch. Surface this as a
+                # fix-generation failure instead of running the sandbox against
+                # an empty diff, which would only produce a confusing
+                # "Invalid diff: Empty diff" verification failure.
+                raise ValueError("coder model returned an empty diff; no patch to apply")
             inc.set_activity("fix_generated", "done", proposal.summary)
             log_operation(logger, inc.id, "fix_generation", "ok", duration=time.perf_counter() - t0)
             await emit(inc.id, "fix_generated", "done", proposal.summary)
@@ -605,7 +627,7 @@ class Orchestrator:
         inc = incident_store.get(incident_id)
         if not inc:
             raise ValueError(f"incident not found: {incident_id}")
-        if not inc.fix_proposal or inc.fix_proposal.get("diff") is None:
+        if not inc.fix_proposal or not inc.fix_proposal.get("diff"):
             raise ValueError("incident has no verified fix to open a PR for")
 
         # Check Repair Gate: must be verified
@@ -614,7 +636,17 @@ class Orchestrator:
                 raise ValueError("Cannot create PR: fix has not passed sandbox verification gates.")
 
         project = project_store.get(inc.project_id) or project_store.get_current()
-        github = project_store.resolve_github(project.id if project else None)
+        if not project or not project.workspace_path or not Path(project.workspace_path).is_dir():
+            raise ValueError("Cannot create PR: project workspace is not synchronized.")
+
+        # The orchestrator's context/sandbox runners are singletons whose
+        # repo_root is whatever project was diagnosed last. Re-bind them to
+        # THIS incident's project so _changes_from_diff reads the correct
+        # repository and commits the right file contents.
+        self.context_builder.set_repo_root(project.workspace_path)
+        self.sandbox_runner.set_repo_root(project.workspace_path, project.profile)
+
+        github = project_store.resolve_github(project.id)
         gh_client = GitHubClient(
             token=github.get("token", ""),
             owner=github.get("owner", ""),

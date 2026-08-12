@@ -267,7 +267,45 @@ export default function App() {
         api.getIncidentSandbox(id),
         api.getIncidentPR(id)
       ]);
-...
+
+      const incidentData = inc.status === 'fulfilled' ? inc.value : null;
+      const contextData = ctx.status === 'fulfilled' ? ctx.value : null;
+      const diffData = diff.status === 'fulfilled' ? diff.value : null;
+      const sandboxData = sb.status === 'fulfilled' ? sb.value : null;
+      const prData = pr.status === 'fulfilled' ? pr.value : null;
+
+      setActiveIncident(incidentData);
+      setIncidentContext(contextData);
+      setIncidentDiff(diffData);
+      setIncidentSandbox(sandboxData);
+      setIncidentPR(prData);
+
+      // Drive the diagnosing indicator off the canonical backend status so the
+      // UI stays in sync as the incident progresses (including SSE refetches).
+      setIsDiagnosing(
+        Boolean(incidentData?.status) && ACTIVE_DIAGNOSIS_STATUSES.has(incidentData.status)
+      );
+
+      // Highlight the offending line for the selected file in the editor. The
+      // callback depends on selectedFile precisely so this stays current.
+      let nextHighlightLine = null;
+      const snippetForFile = selectedFile
+        ? contextData?.code_snippets?.[selectedFile]
+        : null;
+      if (snippetForFile && typeof snippetForFile === 'object' && snippetForFile.error_line != null) {
+        nextHighlightLine = snippetForFile.error_line;
+      } else {
+        const firstSnippet = Object.values(contextData?.code_snippets || {}).find(
+          (snippet) => snippet && typeof snippet === 'object' && snippet.error_line != null
+        );
+        if (firstSnippet) nextHighlightLine = firstSnippet.error_line;
+      }
+      setHighlightLine(nextHighlightLine);
+
+      // Populate the failure callout with the most informative text available.
+      const rootCause = incidentData?.root_cause;
+      const reason = rootCause?.reason || rootCause?.root_cause || incidentData?.error_message || '';
+      setFailureReason(reason);
     } catch (err) {
       console.error('Failed to fetch incident details:', err);
     } finally {

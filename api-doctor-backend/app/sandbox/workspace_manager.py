@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -18,6 +19,24 @@ from typing import Any
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+_CRED_URL_RE = re.compile(r"(https?://)[^/@:]+(?::[^/@]*)?@", re.IGNORECASE)
+
+
+def _redact_git_secrets(text: str, token: str = "") -> str:
+    """Strip embedded credentials from git URLs/outputs before logging or raising.
+
+    Git echoes the clone URL (which may contain ``x-access-token:<TOKEN>@``) into
+    stderr on failure, so without redaction the token would leak into logs and
+    error messages returned to the caller.
+    """
+    if not text:
+        return text
+    redacted = _CRED_URL_RE.sub(r"\1***@", str(text))
+    if token:
+        redacted = redacted.replace(token, "***")
+    return redacted
 
 _IGNORE_PATTERNS = shutil.ignore_patterns(
     ".git",
@@ -131,7 +150,7 @@ class WorkspaceManager:
                 logger.warning(
                     "Git pull failed on existing workspace at %s (%s). Attempting reset.",
                     target_dir,
-                    exc.stderr or exc,
+                    _redact_git_secrets(exc.stderr or str(exc), token),
                 )
                 try:
                     subprocess.run(
@@ -158,7 +177,9 @@ class WorkspaceManager:
                 if res.returncode == 0:
                     cloned = True
                 else:
-                    last_error = (res.stderr or res.stdout or "branch clone failed").strip()
+                    last_error = _redact_git_secrets(
+                        (res.stderr or res.stdout or "branch clone failed").strip(), token
+                    )
                     logger.warning("Branch clone failed: %s. Trying default clone.", last_error)
                     res = subprocess.run(
                         ["git", "clone", "--depth", "50", clone_url, str(target_dir)],
@@ -176,10 +197,13 @@ class WorkspaceManager:
                             timeout=15,
                         )
                     else:
-                        last_error = (res.stderr or res.stdout or last_error or "git clone failed").strip()
+                        last_error = _redact_git_secrets(
+                            (res.stderr or res.stdout or last_error or "git clone failed").strip(),
+                            token,
+                        )
             except Exception as exc:
-                logger.warning("Git clone failed for %s/%s: %s", owner, repo, exc)
-                last_error = str(exc)
+                logger.warning("Git clone failed for %s/%s: %s", owner, repo, _redact_git_secrets(str(exc), token))
+                last_error = _redact_git_secrets(str(exc), token)
 
             if not cloned:
                 if target_dir.exists() and not (target_dir / ".git").is_dir():

@@ -309,3 +309,75 @@ async def test_start_diagnosis_recovers_stuck_collecting_context(monkeypatch):
     assert result is not None
     assert result.status == IncidentStatus.AWAITING_FIX_APPROVAL
 
+
+async def test_pipeline_fails_gracefully_when_no_workspace(monkeypatch):
+    """Regression: with no synchronized workspace and DEMO_MODE off, the pipeline
+    must mark the incident FAILED instead of raising out of the background task
+    and leaving it stuck in RECEIVED."""
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "DEMO_MODE", False)
+    # No project exists (autouse fixture reset projects), so no workspace resolves.
+    orch = Orchestrator()
+    inc = incident_store.create(Incident(stack_trace="t"))
+    assert inc.project_id == "default"
+
+    result = await orch.run_pipeline(inc.id)
+
+    persisted = incident_store.get(inc.id)
+    assert persisted is not None
+    assert persisted.status == IncidentStatus.FAILED
+    assert "workspace" in (persisted.error_message or "").lower()
+
+
+async def test_create_pull_request_requires_synchronized_workspace(monkeypatch):
+    """create_pull_request must refuse (clear error) when the project has no
+    workspace, and not read from a stale repo_root."""
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "DEMO_MODE", False)
+    orch = Orchestrator()
+    inc = incident_store.create(Incident(
+        status=IncidentStatus.FIX_VERIFIED,
+        stack_trace="t",
+        fix_proposal={
+            "summary": "fix",
+            "diff": "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n",
+            "files_changed": ["x"],
+        },
+        sandbox_result={"passed": True},
+    ))
+
+    import pytest
+
+    with pytest.raises(ValueError, match="workspace"):
+        await orch.create_pull_request(inc.id)
+
+
+async def test_empty_coder_diff_fails_fix_generation(monkeypatch):
+    """An empty diff from the coder model must surface as a fix-generation
+    failure, not proceed to a confusing sandbox verification failure."""
+    orch = Orchestrator()
+    monkeypatch.setattr(orch.context_builder, "build", lambda inc: _context())
+    monkeypatch.setattr(
+        orch.root_cause_agent, "analyze",
+        AsyncMock(return_value=RootCauseAnalysis(
+            root_cause="c", category="CODE_BUG", confidence=0.95,
+            affected_files=["app/demo_api/bugs.py"], affected_functions=["f"],
+            safe_to_repair=True, reason="r",
+        )),
+    )
+    monkeypatch.setattr(
+        orch.fix_agent, "generate_fix",
+        AsyncMock(return_value=FixProposal(
+            summary="s", files_changed=["f"], diff="", reason="r", risk="low",
+        )),
+    )
+    inc = Incident(request_snapshot=_context()["request_snapshot"], stack_trace="t")
+    incident_store.create(inc)
+    _preapprove_gates(inc.id)
+
+    result = await orch.run_pipeline(inc.id)
+    assert result.status == IncidentStatus.FIX_GENERATION_FAILED
+    assert "empty diff" in (result.error_message or "").lower()
+

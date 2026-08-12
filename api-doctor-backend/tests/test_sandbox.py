@@ -87,3 +87,21 @@ def test_sandbox_requires_valid_diff():
     result = runner.run_verification(bad, REQUEST)
     assert result.passed is False
     assert "Invalid diff" in result.error
+
+
+def test_redact_git_secrets_strips_token_from_clone_errors():
+    """Git clone failures echo the credential URL into stderr; ensure the token
+    never reaches logs or the raised error message."""
+    from app.sandbox.workspace_manager import _redact_git_secrets
+
+    token = "ghp_supersecrettoken123"
+    stderr = (
+        "fatal: repository "
+        "'https://x-access-token:" + token + "@github.com/acme/demo.git/' not found"
+    )
+    redacted = _redact_git_secrets(stderr, token)
+    assert token not in redacted
+    assert "x-access-token" not in redacted
+    assert "***@" in redacted
+    # repo identity is preserved for debugging
+    assert "acme/demo" in redacted

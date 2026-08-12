@@ -174,10 +174,11 @@ async def test_service_repair_creates_pr(httpx_mock):
         url="https://api.github.com/repos/acme/demo/git/blobs", method="POST",
         json={"sha": "blob1"},
     )
-    # branch sha again for commit base
+    # branch HEAD for commit base: commit SHA (parent) + nested tree SHA
+    # (base_tree in the git/trees call MUST be a tree object, not a commit).
     httpx_mock.add_response(
         url="https://api.github.com/repos/acme/demo/branches/api-doctor/fix/inc1", method="GET",
-        json={"commit": {"sha": "base"}},
+        json={"commit": {"sha": "base", "commit": {"tree": {"sha": "base-tree"}}}},
     )
     # tree
     httpx_mock.add_response(
@@ -239,3 +240,100 @@ async def test_service_pr_status_uses_normalized_pr_number(httpx_mock):
     assert status["present"] is True
     assert status["pr_number"] == 7
     assert status["checks"]["success"] == 1
+
+
+async def test_create_commit_uses_tree_sha_for_base_tree(httpx_mock):
+    """Regression: git/trees ``base_tree`` must be a tree SHA, not the commit SHA.
+
+    Passing the commit SHA made GitHub reject the tree creation with HTTP 422
+    "Invalid tree", silently breaking every repair commit.
+    """
+    import json
+
+    client = _github_client()
+    httpx_mock.add_response(
+        url="https://api.github.com/repos/acme/demo/branches/api-doctor/fix/inc1",
+        method="GET",
+        json={"commit": {"sha": "commit-sha", "commit": {"tree": {"sha": "tree-sha"}}}},
+    )
+    httpx_mock.add_response(
+        url="https://api.github.com/repos/acme/demo/git/blobs", method="POST",
+        json={"sha": "blob1"},
+    )
+    httpx_mock.add_response(
+        url="https://api.github.com/repos/acme/demo/git/trees", method="POST",
+        json={"sha": "new-tree"},
+    )
+    httpx_mock.add_response(
+        url="https://api.github.com/repos/acme/demo/git/commits", method="POST",
+        json={"sha": "new-commit"},
+    )
+    httpx_mock.add_response(
+        url="https://api.github.com/repos/acme/demo/git/refs/heads/api-doctor/fix/inc1",
+        method="PATCH", json={},
+    )
+
+    sha = await client.create_commit(
+        "api-doctor/fix/inc1", "fix bug", [{"path": "app/x.py", "content": "x = 1\n"}]
+    )
+    assert sha == "new-commit"
+
+    requests = httpx_mock.get_requests()
+    trees_post = next(
+        r for r in requests
+        if r.url.path.endswith("/git/trees") and r.method == "POST"
+    )
+    commits_post = next(
+        r for r in requests
+        if r.url.path.endswith("/git/commits") and r.method == "POST"
+    )
+    trees_body = json.loads(trees_post.content)
+    commits_body = json.loads(commits_post.content)
+
+    # base_tree must reference the tree object, not the commit.
+    assert trees_body["base_tree"] == "tree-sha"
+    assert trees_body["base_tree"] != "commit-sha"
+    # the new commit's parent is the branch HEAD commit.
+    assert commits_body["parents"] == ["commit-sha"]
+
+
+async def test_create_commit_recovers_tree_sha_when_branch_payload_stripped(httpx_mock):
+    """If the branch response omits the nested tree object, fall back to the
+    commit object endpoint to recover the tree SHA instead of failing."""
+    import json
+
+    client = _github_client()
+    httpx_mock.add_response(
+        url="https://api.github.com/repos/acme/demo/branches/api-doctor/fix/inc1",
+        method="GET", json={"commit": {"sha": "commit-sha"}},  # no nested tree
+    )
+    httpx_mock.add_response(
+        url="https://api.github.com/repos/acme/demo/git/commits/commit-sha",
+        method="GET", json={"sha": "commit-sha", "tree": {"sha": "tree-sha"}},
+    )
+    httpx_mock.add_response(
+        url="https://api.github.com/repos/acme/demo/git/blobs", method="POST",
+        json={"sha": "blob1"},
+    )
+    httpx_mock.add_response(
+        url="https://api.github.com/repos/acme/demo/git/trees", method="POST",
+        json={"sha": "new-tree"},
+    )
+    httpx_mock.add_response(
+        url="https://api.github.com/repos/acme/demo/git/commits", method="POST",
+        json={"sha": "new-commit"},
+    )
+    httpx_mock.add_response(
+        url="https://api.github.com/repos/acme/demo/git/refs/heads/api-doctor/fix/inc1",
+        method="PATCH", json={},
+    )
+
+    await client.create_commit(
+        "api-doctor/fix/inc1", "fix bug", [{"path": "app/x.py", "content": "x = 1\n"}]
+    )
+
+    trees_post = next(
+        r for r in httpx_mock.get_requests()
+        if r.url.path.endswith("/git/trees") and r.method == "POST"
+    )
+    assert json.loads(trees_post.content)["base_tree"] == "tree-sha"
