@@ -199,7 +199,23 @@ class GitHubClient:
         Uses the low-level git data API so multiple files commit atomically.
         Returns the new commit sha.
         """
-        base_sha = await self.get_branch_sha(branch)
+        # Resolve the branch HEAD once and pull both the commit SHA (the new
+        # commit's parent) AND its tree SHA. ``base_tree`` below MUST reference a
+        # tree object — passing the commit SHA here made GitHub reject the tree
+        # creation with HTTP 422 "Invalid tree", which broke every repair commit.
+        branch_info = await self._request("GET", self._repo_path("branches", branch))
+        base_commit_sha = branch_info["commit"]["sha"]
+        base_tree_sha = (
+            branch_info.get("commit", {}).get("commit", {}).get("tree", {}).get("sha")
+        )
+        if not base_tree_sha:
+            # Some proxies/mock responses strip the nested tree object; recover
+            # it from the commit object itself rather than failing the commit.
+            commit_obj = await self._request(
+                "GET", f"/repos/{self.owner}/{self.repo}/git/commits/{base_commit_sha}"
+            )
+            base_tree_sha = commit_obj["tree"]["sha"]
+
         repo = f"{self.owner}/{self.repo}"
 
         blobs = {}
@@ -213,7 +229,7 @@ class GitHubClient:
             blobs[path] = data["sha"]
 
         tree_payload = {
-            "base_tree": base_sha,
+            "base_tree": base_tree_sha,
             "tree": [
                 {"path": path, "mode": "100644", "type": "blob", "sha": sha}
                 for path, sha in blobs.items()
@@ -227,7 +243,7 @@ class GitHubClient:
             json={
                 "message": message,
                 "tree": tree_sha,
-                "parents": [base_sha],
+                "parents": [base_commit_sha],
             },
         )
         commit_sha = commit["sha"]
