@@ -27,11 +27,17 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("API Doctor backend starting up")
-    if not settings.has_nvidia:
+    from app.ai.base import selected_ai_provider
+
+    ai_provider = selected_ai_provider()
+    logger.info("API Doctor backend starting up (AI provider: %s)", ai_provider)
+    if ai_provider == "mock":
         logger.warning(
-            "NVIDIA_API_KEY is not set — AI agents will fail until it is configured."
+            "Deterministic mock AI is active. Set AI_PROVIDER=nvidia and "
+            "NVIDIA_API_KEY to run real model diagnosis."
         )
+    elif not settings.has_nvidia:
+        logger.error("NVIDIA_API_KEY is not set; NVIDIA AI requests will fail.")
     yield
     logger.info("API Doctor backend shutting down")
 
@@ -83,6 +89,8 @@ def _register_routes() -> None:
 
     @app.get("/health")
     async def health() -> dict:
+        from app.ai.base import selected_ai_provider
+
         docker_ok = False
         try:
             import docker  # type: ignore
@@ -95,6 +103,7 @@ def _register_routes() -> None:
             "status": "ok",
             "sandbox_mode": settings.SANDBOX_MODE,
             "docker": docker_ok,
+            "ai_provider": selected_ai_provider(),
             "ai_configured": settings.has_nvidia,
             "github_configured": settings.has_github,
             "render_configured": settings.has_render,

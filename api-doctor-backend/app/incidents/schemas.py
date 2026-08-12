@@ -57,6 +57,7 @@ class IncidentResponse(BaseModel):
     created_at: str
     updated_at: str
     detection: dict[str, Any]
+    root_cause: Optional[dict[str, Any]] = None
     error_message: Optional[str] = None
     attempt_count: int = 0
 
@@ -69,6 +70,7 @@ class IncidentResponse(BaseModel):
             created_at=m.created_at.isoformat(),
             updated_at=m.updated_at.isoformat(),
             detection=m.detection,
+            root_cause=m.root_cause,
             error_message=m.error_message,
             attempt_count=m.attempt_count,
         )

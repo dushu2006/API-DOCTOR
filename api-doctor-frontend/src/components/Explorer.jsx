@@ -1,68 +1,89 @@
-import React, { useState } from 'react';
-import { 
-  ChevronDown, 
-  ChevronRight, 
-  FileCode, 
-  FileText, 
-  FileLock, 
-  Folder, 
-  FolderOpen, 
-  RotateCw, 
-  FilePlus, 
-  Minimize2,
+import React, { useMemo, useState } from 'react';
+import {
+  ChevronDown,
+  ChevronRight,
+  FileCode,
+  FileText,
+  FileLock,
+  Folder,
+  FolderOpen,
   Search,
   CheckCircle2
 } from 'lucide-react';
 
+const BASE_FILE_PATHS = [
+  'app/main.py',
+  'app/orchestrator.py',
+  'app/agent/fix_agent.py',
+  'app/agent/llm_client.py',
+  'app/agent/root_cause_agent.py',
+  'app/demo_api/bugs.py',
+  'app/demo_api/models.py',
+  'app/demo_api/router.py',
+  'app/incidents/models.py',
+  'app/incidents/router.py',
+  'app/incidents/store.py',
+  '.env.example',
+  'README.md',
+  'requirements.txt'
+];
+
+function buildFileTree(paths) {
+  const root = [];
+  for (const path of paths) {
+    const parts = path.split('/').filter(Boolean);
+    let children = root;
+    let parentPath = '';
+    parts.forEach((name, index) => {
+      const itemPath = parentPath ? `${parentPath}/${name}` : name;
+      const isFile = index === parts.length - 1;
+      let item = children.find(child => child.name === name);
+      if (!item) {
+        item = isFile
+          ? { name, type: 'file', ext: name.split('.').pop(), path: itemPath }
+          : { name, type: 'folder', key: itemPath, children: [] };
+        children.push(item);
+      }
+      if (!isFile) children = item.children;
+      parentPath = itemPath;
+    });
+  }
+
+  const sortTree = items => items
+    .sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === 'folder' ? -1 : 1))
+    .map(item => item.type === 'folder' ? { ...item, children: sortTree(item.children) } : item);
+  return sortTree(root);
+}
+
 export default function Explorer({ 
   selectedFile, 
   setSelectedFile, 
-  fileStatuses, 
-  explorerWidth, 
-  setExplorerWidth,
-  isExplorerOpen 
+  fileStatuses,
+  explorerWidth,
+  isExplorerOpen
 }) {
   const [searchQuery, setSearchQuery] = useState('');
-  const [openFolders, setOpenFolders] = useState({ 'app': true, 'demo_api': true, 'routes': true });
+  const [openFolders, setOpenFolders] = useState({
+    app: true,
+    'app/agent': true,
+    'app/demo_api': true,
+    'app/incidents': true
+  });
   const [contextMenu, setContextMenu] = useState(null);
+  const fileTree = useMemo(
+    () => buildFileTree(Array.from(new Set([
+      ...BASE_FILE_PATHS,
+      ...Object.keys(fileStatuses || {}),
+      ...(selectedFile ? [selectedFile] : [])
+    ]))),
+    [fileStatuses, selectedFile]
+  );
 
   if (!isExplorerOpen) return null;
 
   const toggleFolder = (folderKey) => {
     setOpenFolders(prev => ({ ...prev, [folderKey]: !prev[folderKey] }));
   };
-
-  const fileTree = [
-    {
-      name: 'app',
-      type: 'folder',
-      key: 'app',
-      children: [
-        {
-          name: 'demo_api',
-          type: 'folder',
-          key: 'demo_api',
-          children: [
-            { name: 'bugs.py', type: 'file', ext: 'py', path: 'app/demo_api/bugs.py' },
-            { name: 'checkout.py', type: 'file', ext: 'py', path: 'app/demo_api/checkout.py' },
-            { name: 'main.py', type: 'file', ext: 'py', path: 'app/demo_api/main.py' },
-          ]
-        },
-        {
-          name: 'routes',
-          type: 'folder',
-          key: 'routes',
-          children: [
-            { name: 'orders.py', type: 'file', ext: 'py', path: 'app/routes/orders.py' },
-            { name: 'payments.py', type: 'file', ext: 'py', path: 'app/routes/payments.py' },
-          ]
-        }
-      ]
-    },
-    { name: '.env', type: 'file', ext: 'env', path: '.env' },
-    { name: 'README.md', type: 'file', ext: 'md', path: 'README.md' },
-    { name: 'requirements.txt', type: 'file', ext: 'txt', path: 'requirements.txt' }
-  ];
 
   const getFileIcon = (ext) => {
     switch (ext) {
@@ -113,14 +134,20 @@ export default function Explorer({
     });
   };
 
+  const matchesSearch = (item) => {
+    if (!searchQuery) return true;
+    if (item.type === 'file') {
+      return item.path.toLowerCase().includes(searchQuery.toLowerCase());
+    }
+    return item.children.some(matchesSearch);
+  };
+
   const renderTree = (items, depth = 0) => {
     return items.map((item) => {
-      if (searchQuery && item.type === 'file' && !item.name.toLowerCase().includes(searchQuery.toLowerCase())) {
-        return null;
-      }
+      if (!matchesSearch(item)) return null;
 
       if (item.type === 'folder') {
-        const isOpen = openFolders[item.key];
+        const isOpen = searchQuery ? true : openFolders[item.key];
         return (
           <div key={item.key}>
             <div
@@ -210,11 +237,9 @@ export default function Explorer({
         }}>
           EXPLORER
         </span>
-        <div style={{ display: 'flex', gap: '8px', color: 'var(--text-muted)' }}>
-          <FilePlus size={14} style={{ cursor: 'pointer' }} title="New File" />
-          <RotateCw size={14} style={{ cursor: 'pointer' }} title="Refresh" />
-          <Minimize2 size={14} style={{ cursor: 'pointer' }} title="Collapse Folders" />
-        </div>
+        <span style={{ fontSize: '10px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+          retrieved context
+        </span>
       </div>
 
       {/* Search Input */}
@@ -268,10 +293,12 @@ export default function Explorer({
           fontSize: '12px'
         }}>
           <div style={{ padding: '6px 12px', cursor: 'pointer' }} onClick={() => setSelectedFile(contextMenu.file.path)}>Open</div>
-          <div style={{ padding: '6px 12px', cursor: 'pointer' }}>Rename</div>
-          <div style={{ padding: '6px 12px', cursor: 'pointer' }}>Copy Path</div>
-          <div style={{ height: '1px', backgroundColor: 'var(--border-color)', margin: '4px 0' }} />
-          <div style={{ padding: '6px 12px', cursor: 'pointer', color: 'var(--color-failure)' }}>Delete</div>
+          <div
+            style={{ padding: '6px 12px', cursor: 'pointer' }}
+            onClick={() => navigator.clipboard.writeText(contextMenu.file.path)}
+          >
+            Copy Path
+          </div>
         </div>
       )}
     </div>

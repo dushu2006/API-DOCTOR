@@ -21,6 +21,7 @@ class IncidentStatus(str, Enum):
     FIX_VERIFIED = "FIX_VERIFIED"
     PR_CREATED = "PR_CREATED"
     AWAITING_REVIEW = "AWAITING_REVIEW"
+    CANCELLED = "CANCELLED"
 
     # Failure states
     INVESTIGATION_FAILED = "INVESTIGATION_FAILED"
@@ -36,6 +37,7 @@ class IncidentStatus(str, Enum):
             IncidentStatus.VERIFICATION_FAILED,
             IncidentStatus.REPAIR_LIMIT_REACHED,
             IncidentStatus.AWAITING_REVIEW,
+            IncidentStatus.CANCELLED,
         }
 
     @property
@@ -50,7 +52,7 @@ class IncidentStatus(str, Enum):
 
 class ProgressEvent(BaseModel):
     step: str
-    status: str  # pending | running | done | failed
+    status: str  # pending | running | done | failed | cancelled
     message: str = ""
     timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 

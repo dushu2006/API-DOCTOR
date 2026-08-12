@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { 
   Stethoscope, 
   GitBranch, 
@@ -11,14 +11,14 @@ import {
   X,
   Radio
 } from 'lucide-react';
-import { api } from '../api';
 
 export default function TopBar({ 
   activeIncident, 
   onStartDiagnosis, 
   onStopDiagnosis, 
   isDiagnosing,
-  isBackendConnected 
+  isBackendConnected,
+  backendHealth
 }) {
   const [showBranches, setShowBranches] = useState(false);
   const [showScenarioMenu, setShowScenarioMenu] = useState(false);
@@ -159,7 +159,16 @@ export default function TopBar({
             borderRadius: '50%', 
             backgroundColor: isBackendConnected ? 'var(--color-success)' : 'var(--color-failure)' 
           }} />
-          <span>{isBackendConnected ? 'Connected (localhost:8000)' : 'Backend Disconnected'}</span>
+          <span>{isBackendConnected ? 'Backend Connected' : 'Backend Disconnected'}</span>
+          {isBackendConnected && backendHealth?.ai_provider && (
+            <span style={{
+              color: backendHealth.ai_provider === 'mock' ? 'var(--color-warning)' : 'var(--color-success)',
+              fontFamily: 'var(--font-mono)',
+              fontSize: '10px'
+            }}>
+              AI: {backendHealth.ai_provider === 'mock' ? 'MOCK' : backendHealth.ai_provider.toUpperCase()}
+            </span>
+          )}
         </div>
 
         {/* Diagnosis Status Pill */}

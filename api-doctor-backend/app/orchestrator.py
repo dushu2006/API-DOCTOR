@@ -44,6 +44,11 @@ class Orchestrator:
         self.root_cause_agent = RootCauseAgent()
         self.fix_agent = FixAgent()
         self.sandbox_runner = SandboxRunner()
+        # The registry closes the small gap between accepting a diagnosis
+        # request and the background coroutine advancing the incident status.
+        # Without it, two requests in the same event-loop tick can launch two
+        # pipelines that mutate the same Incident instance concurrently.
+        self._pipeline_tasks: dict[str, asyncio.Task[Incident | None]] = {}
 
     # ------------------------------------------------------------------
     # Entry points
@@ -71,11 +76,77 @@ class Orchestrator:
         await emit(incident.id, "error_detected", "done", f"{method} {endpoint}")
         return incident
 
-    def start_diagnosis(self, incident_id: str) -> None:
-        """Kick off diagnosis as a background task (fire-and-forget)."""
-        import asyncio
+    def start_diagnosis(self, incident_id: str) -> bool:
+        """Start one background pipeline for an incident.
 
-        asyncio.create_task(self.run_pipeline(incident_id))
+        Returns ``False`` when a pipeline is already active or the incident is
+        in a completed state. Failed and cancelled incidents may be retried.
+        """
+        inc = incident_store.get(incident_id)
+        if not inc:
+            return False
+
+        existing = self._pipeline_tasks.get(incident_id)
+        if existing and not existing.done():
+            return False
+
+        retryable_states = {
+            IncidentStatus.DETECTED,
+            IncidentStatus.INVESTIGATION_FAILED,
+            IncidentStatus.FIX_GENERATION_FAILED,
+            IncidentStatus.VERIFICATION_FAILED,
+            IncidentStatus.REPAIR_LIMIT_REACHED,
+            IncidentStatus.CANCELLED,
+        }
+        if inc.status not in retryable_states:
+            return False
+
+        task = asyncio.create_task(
+            self.run_pipeline(incident_id),
+            name=f"api-doctor-pipeline-{incident_id}",
+        )
+        self._pipeline_tasks[incident_id] = task
+        task.add_done_callback(
+            lambda completed, iid=incident_id: self._pipeline_finished(iid, completed)
+        )
+        return True
+
+    def _pipeline_finished(
+        self, incident_id: str, task: asyncio.Task[Incident | None]
+    ) -> None:
+        if self._pipeline_tasks.get(incident_id) is task:
+            self._pipeline_tasks.pop(incident_id, None)
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            logger.info("Diagnosis pipeline cancelled for incident %s", incident_id)
+        except Exception:
+            # ``run_pipeline`` normally records its own errors. This protects
+            # against an exception outside that boundary and consumes the task
+            # result so asyncio does not emit an unhandled-task warning.
+            logger.exception("Unhandled diagnosis task failure for %s", incident_id)
+
+    async def cancel_diagnosis(self, incident_id: str) -> bool:
+        """Cancel an active pipeline and persist an explicit terminal state."""
+        task = self._pipeline_tasks.get(incident_id)
+        if not task or task.done():
+            return False
+
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        inc = incident_store.get(incident_id)
+        if not inc:
+            return False
+        inc.status = IncidentStatus.CANCELLED
+        inc.error_message = "Diagnosis cancelled by user"
+        inc.add_activity("pipeline", "cancelled", inc.error_message)
+        incident_store.update(inc)
+        await emit(incident_id, "pipeline", "cancelled", inc.error_message)
+        return True
 
     # ------------------------------------------------------------------
     # Pipeline

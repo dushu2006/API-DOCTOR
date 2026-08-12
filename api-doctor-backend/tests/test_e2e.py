@@ -88,7 +88,7 @@ async def test_e2e_null_pointer(monkeypatch):
 
 
 async def test_e2e_null_pointer_with_mock_ai():
-    """Full pipeline using MockAIClient (the SANDBOX_MODE=local path).
+    """Full pipeline using MockAIClient (the no-key AI_PROVIDER=auto path).
 
     This is the auto_trigger.py flow: detect the charge 500, generate a
     mock fix, apply it in the sandbox, and verify the crash is gone.

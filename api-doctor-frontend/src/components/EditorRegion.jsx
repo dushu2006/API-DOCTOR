@@ -1,17 +1,13 @@
 import React from 'react';
-import { 
-  X, 
-  Lock, 
-  FileCode, 
-  FileText, 
-  FileLock, 
-  Columns, 
+import {
+  Lock,
+  FileCode,
+  Columns,
   AlertTriangle 
 } from 'lucide-react';
 
-export default function EditorRegion({ 
-  selectedFile, 
-  setSelectedFile, 
+export default function EditorRegion({
+  selectedFile,
   incidentContext,
   incidentDiff,
   isDiagnosing,
@@ -20,52 +16,31 @@ export default function EditorRegion({
 }) {
   const openTabs = [
     { path: selectedFile || 'app/demo_api/bugs.py', name: selectedFile ? selectedFile.split('/').pop() : 'bugs.py', isAgentActive: isDiagnosing },
-    { path: 'README.md', name: 'README.md' },
   ];
 
-  const renderSyntaxHighlighted = (codeStr) => {
-    if (!codeStr) return '';
-    return codeStr
-      .replace(/(def|return|if|not|raise|import|from|try|except)/g, '<span style="color:#7C8CF8;font-weight:500;">$1</span>')
-      .replace(/(".*?"|'.*?')/g, '<span style="color:#3DD68C;">$1</span>')
-      .replace(/(#.*)/g, '<span style="color:#8B8D93;font-style:italic;">$1</span>');
-  };
+  // Context snippets are the only source shown in the editor. Never substitute
+  // another file or a fabricated sample under the selected filename.
+  const snippet = incidentContext?.code_snippets?.[selectedFile];
+  let rawCode = '';
+  let errorLine = null;
+  if (typeof snippet === 'string') {
+    rawCode = snippet;
+  } else if (snippet && typeof snippet === 'object') {
+    errorLine = snippet.error_line ?? null;
+    if (typeof snippet.content === 'string') rawCode = snippet.content;
+    else if (typeof snippet.code === 'string') rawCode = snippet.code;
+    else if (Array.isArray(snippet.lines)) rawCode = snippet.lines.join('\n');
+  }
+  if (!rawCode) {
+    rawCode = `# No retrieved source snippet is available for ${selectedFile}.\n# Select an implicated file after context collection completes.`;
+  }
 
-  // Extract snippet or raw code from backend context
-  const getCodeSnippet = () => {
-    if (incidentContext && incidentContext.code_snippets) {
-      const snip = incidentContext.code_snippets[selectedFile];
-      if (typeof snip === 'string') return snip;
-      if (snip && typeof snip === 'object') {
-        if (typeof snip.code === 'string') return snip.code;
-        if (Array.isArray(snip.lines)) return snip.lines.join('\n');
-        return JSON.stringify(snip, null, 2);
-      }
-      // If code_snippets has keys, grab first snippet code if selectedFile not found directly
-      const firstKey = Object.keys(incidentContext.code_snippets)[0];
-      if (firstKey) {
-        const firstSnip = incidentContext.code_snippets[firstKey];
-        if (typeof firstSnip === 'string') return firstSnip;
-        if (firstSnip && typeof firstSnip.code === 'string') return firstSnip.code;
-      }
-    }
-    // Fallback real bug sample if file selected matches bugs.py
-    return `def process_checkout(request_data):
-    """Process API checkout order and validate payload"""
-    user_id = request_data.get("user_id")
-    order_amount = request_data.get("amount")
-    payment_method = request_data.get("payment_method")
-
-    # Issue: payment_method can be NoneType when missing from request
-    payment_token = payment_method.token  # Line 122: UNSAFE ACCESS
-    
-    logger.info(f"Processing order for user {user_id} with token {payment_token}")
-    return {"status": "success", "token": payment_token}`;
-  };
-
-  const rawCode = getCodeSnippet();
-  const safeCodeStr = typeof rawCode === 'string' ? rawCode : String(rawCode || '');
-  const lines = safeCodeStr.split('\n');
+  const lines = rawCode.split('\n').map((rawLine, index) => {
+    const numbered = rawLine.match(/^\s*(\d+)\s+\|\s?(.*)$/);
+    return numbered
+      ? { number: Number(numbered[1]), text: numbered[2] }
+      : { number: index + 1, text: rawLine };
+  });
 
   return (
     <div style={{
@@ -93,7 +68,6 @@ export default function EditorRegion({
             return (
               <div 
                 key={tab.path}
-                onClick={() => setSelectedFile(tab.path)}
                 style={{
                   height: '100%',
                   padding: '0 14px',
@@ -114,7 +88,6 @@ export default function EditorRegion({
                 <FileCode size={13} style={{ color: '#3572A5' }} />
                 <span>{tab.name}</span>
                 {tab.isAgentActive && <span className="agent-dot" style={{ width: '6px', height: '6px' }} />}
-                <X size={12} style={{ opacity: 0.6, cursor: 'pointer' }} />
               </div>
             );
           })}
@@ -182,9 +155,10 @@ export default function EditorRegion({
         ) : (
           /* STANDARD CODE VIEW WITH REAL STACK TRACE FAILURE CALLOUT */
           <div style={{ flex: 1, overflowY: 'auto', padding: '12px 0' }}>
-            {lines.map((lineText, idx) => {
-              const lineNum = idx + 115;
-              const isFailureLine = lineText.includes('payment_method.token') || lineText.includes('UNSAFE');
+            {lines.map((line, idx) => {
+              const lineNum = line.number;
+              const lineText = line.text;
+              const isFailureLine = errorLine !== null && lineNum === errorLine;
               return (
                 <React.Fragment key={idx}>
                   <div 
@@ -200,9 +174,9 @@ export default function EditorRegion({
                     <div style={{ width: '50px', textAlign: 'right', paddingRight: '14px', color: 'var(--text-muted)', userSelect: 'none' }}>
                       {lineNum}
                     </div>
-                    <div style={{ flex: 1, paddingLeft: '8px', whiteSpace: 'pre' }}
-                      dangerouslySetInnerHTML={{ __html: renderSyntaxHighlighted(lineText) }}
-                    />
+                    <div style={{ flex: 1, paddingLeft: '8px', whiteSpace: 'pre' }}>
+                      {lineText}
+                    </div>
                   </div>
 
                   {/* Inline Failure Callout Card */}

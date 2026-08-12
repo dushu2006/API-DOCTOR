@@ -131,15 +131,28 @@ async def trigger_scenario(scenario: str) -> DiagnoseResponse:
         raise HTTPException(400, f"unknown scenario {scenario!r}; choose from {sorted(SCENARIOS)}")
     method, path, payload = SCENARIOS[scenario]
     incident = await orchestrator.detect_and_create(path, method, payload)
-    orchestrator.start_diagnosis(incident.id)
+    if not orchestrator.start_diagnosis(incident.id):
+        raise HTTPException(409, "diagnosis could not be started")
     return DiagnoseResponse(incident_id=incident.id, status=incident.status)
 
 
 @router.post("/{incident_id}/diagnose", response_model=DiagnoseResponse)
 async def diagnose(incident_id: str, req: DiagnoseRequest | None = None) -> DiagnoseResponse:
     inc = _get_or_404(incident_id)
-    orchestrator.start_diagnosis(incident_id)
-    return DiagnoseResponse(incident_id=incident_id, status=incident.status)
+    if not orchestrator.start_diagnosis(incident_id):
+        raise HTTPException(
+            409,
+            f"diagnosis is already running or cannot start from status {inc.status.value}",
+        )
+    return DiagnoseResponse(incident_id=incident_id, status=inc.status)
+
+
+@router.post("/{incident_id}/cancel")
+async def cancel_diagnosis(incident_id: str) -> dict:
+    _get_or_404(incident_id)
+    if not await orchestrator.cancel_diagnosis(incident_id):
+        raise HTTPException(409, "no active diagnosis to cancel")
+    return {"incident_id": incident_id, "cancelled": True}
 
 
 @router.post("/{incident_id}/approve")
