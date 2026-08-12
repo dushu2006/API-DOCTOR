@@ -23,6 +23,7 @@ class UserRecord(Base):
     password_hash: Mapped[str] = mapped_column(Text, nullable=False)
     full_name: Mapped[str] = mapped_column(String(255), default="")
     gender: Mapped[str] = mapped_column(String(64), default="")
+    date_of_birth: Mapped[str] = mapped_column(String(64), default="")
     age: Mapped[int | None] = mapped_column(Integer, nullable=True)
     avatar_data: Mapped[str] = mapped_column(Text, default="")
     current_project_id: Mapped[str | None] = mapped_column(String(64), nullable=True)

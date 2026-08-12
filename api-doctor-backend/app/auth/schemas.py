@@ -7,6 +7,7 @@ class UserResponse(BaseModel):
     username: str
     full_name: str = ""
     gender: str = ""
+    date_of_birth: str = ""
     age: int | None = None
     avatar_data: str = ""
     current_project_id: str | None = None
@@ -20,6 +21,7 @@ class RegisterRequest(BaseModel):
     password: str = Field(min_length=6, max_length=200)
     full_name: str = ""
     gender: str = ""
+    date_of_birth: str = ""
     age: int | None = Field(default=None, ge=1, le=150)
     avatar_data: str = ""
 
@@ -34,6 +36,7 @@ class UpdateProfileRequest(BaseModel):
     username: str | None = Field(default=None, min_length=3, max_length=50)
     full_name: str | None = None
     gender: str | None = None
+    date_of_birth: str | None = None
     age: int | None = Field(default=None, ge=1, le=150)
     avatar_data: str | None = None
 

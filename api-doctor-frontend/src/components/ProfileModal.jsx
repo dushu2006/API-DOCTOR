@@ -40,6 +40,7 @@ export default function ProfileModal({
       username: user.username || '',
       full_name: user.full_name || '',
       gender: user.gender || '',
+      date_of_birth: user.date_of_birth || '',
       age: user.age || '',
       avatar_data: user.avatar_data || '',
     });
@@ -66,6 +67,7 @@ export default function ProfileModal({
         username: form.username,
         full_name: form.full_name,
         gender: form.gender,
+        date_of_birth: form.date_of_birth,
         age: form.age ? Number(form.age) : null,
         avatar_data: form.avatar_data,
       });
@@ -149,8 +151,17 @@ export default function ProfileModal({
               </div>
               <Field label="Full name"><input value={form.full_name} onChange={e => setForm(prev => ({ ...prev, full_name: e.target.value }))} style={inputStyle} /></Field>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-                <Field label="Gender"><input value={form.gender} onChange={e => setForm(prev => ({ ...prev, gender: e.target.value }))} style={inputStyle} /></Field>
-                <Field label="Age"><input type="number" min="1" max="150" value={form.age} onChange={e => setForm(prev => ({ ...prev, age: e.target.value }))} style={inputStyle} /></Field>
+                <Field label="Gender">
+                  <select value={form.gender} onChange={e => setForm(prev => ({ ...prev, gender: e.target.value }))} style={inputStyle}>
+                    <option value="">Select gender</option>
+                    <option value="Male">Male</option>
+                    <option value="Female">Female</option>
+                    <option value="Others">Others</option>
+                  </select>
+                </Field>
+                <Field label="Date of Birth">
+                  <input type="date" value={form.date_of_birth} onChange={e => setForm(prev => ({ ...prev, date_of_birth: e.target.value }))} style={inputStyle} />
+                </Field>
               </div>
               <div>
                 <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: 'var(--text-muted)', marginBottom: '6px' }}>Avatar</label>

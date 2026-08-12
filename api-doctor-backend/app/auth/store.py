@@ -19,6 +19,18 @@ def _iso(value: datetime) -> str:
     return value.isoformat()
 
 
+def _calc_age(dob_str: str | None) -> int | None:
+    if not dob_str:
+        return None
+    try:
+        dt = datetime.strptime(dob_str.strip(), "%Y-%m-%d")
+        today = datetime.now()
+        age = today.year - dt.year - ((today.month, today.day) < (dt.month, dt.day))
+        return age if age >= 0 else None
+    except Exception:
+        return None
+
+
 def _user_response(row: UserRecord) -> UserResponse:
     return UserResponse(
         id=row.id,
@@ -26,6 +38,7 @@ def _user_response(row: UserRecord) -> UserResponse:
         username=row.username,
         full_name=row.full_name or "",
         gender=row.gender or "",
+        date_of_birth=getattr(row, "date_of_birth", "") or "",
         age=row.age,
         avatar_data=row.avatar_data or "",
         current_project_id=row.current_project_id,
@@ -48,13 +61,16 @@ class AuthStore:
                 raise ValueError("An account with that email or username already exists.")
 
             now = _utcnow()
+            dob = (payload.date_of_birth or "").strip()
+            age_val = payload.age if payload.age is not None else _calc_age(dob)
             row = UserRecord(
                 email=payload.email.lower(),
                 username=payload.username.strip(),
                 password_hash=hash_password(payload.password),
                 full_name=payload.full_name.strip(),
                 gender=payload.gender.strip(),
-                age=payload.age,
+                date_of_birth=dob,
+                age=age_val,
                 avatar_data=payload.avatar_data or "",
                 created_at=now,
                 updated_at=now,
@@ -139,6 +155,11 @@ class AuthStore:
                 row.full_name = payload.full_name.strip()
             if payload.gender is not None:
                 row.gender = payload.gender.strip()
+            if payload.date_of_birth is not None:
+                row.date_of_birth = payload.date_of_birth.strip()
+                calculated = _calc_age(payload.date_of_birth)
+                if calculated is not None:
+                    row.age = calculated
             if payload.age is not None:
                 row.age = payload.age
             if payload.avatar_data is not None:

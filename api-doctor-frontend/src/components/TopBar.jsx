@@ -78,11 +78,11 @@ export default function TopBar({
       zIndex: 50
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-primary)', fontWeight: 600, fontSize: '13px' }}>
-          <div style={{ width: '24px', height: '24px', borderRadius: '4px', background: 'var(--color-accent)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-primary)', fontWeight: 700, fontSize: '13px' }}>
+          <div style={{ width: '24px', height: '24px', borderRadius: 'var(--radius-sm)', background: 'var(--color-accent)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#0A0E14', boxShadow: '0 0 10px var(--color-accent-glow)' }}>
             <Stethoscope size={14} />
           </div>
-          <span style={{ fontFamily: 'var(--font-heading)', letterSpacing: '0.02em' }}>API DOCTOR</span>
+          <span style={{ fontFamily: 'var(--font-heading)', letterSpacing: '0.04em', fontWeight: 700 }}>API DOCTOR</span>
         </div>
 
         <div style={{ width: '1px', height: '16px', backgroundColor: 'var(--border-color)' }} />

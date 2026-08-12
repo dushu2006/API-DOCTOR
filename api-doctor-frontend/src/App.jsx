@@ -34,10 +34,13 @@ export default function App() {
   const [isBootstrapping, setIsBootstrapping] = useState(true);
   const [isBackendConnected, setIsBackendConnected] = useState(false);
   const [backendHealth, setBackendHealth] = useState(null);
+  const [currentUser, setCurrentUser] = useState(null);
   const [projects, setProjects] = useState([]);
   const [currentProject, setCurrentProject] = useState(null);
   const [showProjectWizard, setShowProjectWizard] = useState(false);
   const [showProjectSelector, setShowProjectSelector] = useState(false);
+  const [showProfileModal, setShowProfileModal] = useState(false);
+  const [showProjectSettings, setShowProjectSettings] = useState(false);
   const selectedProjectOnce = useRef(false);
 
   const [projectFiles, setProjectFiles] = useState({ files: [], tree: [] });
@@ -117,7 +120,7 @@ export default function App() {
       try {
         user = await api.getCurrentUser();
       } catch (err) {
-        if (err.status === 401) {
+        if (err.status === 401 || err.response?.status === 401 || String(err.message).includes('401')) {
           setCurrentUser(null);
           setProjects([]);
           setCurrentProject(null);

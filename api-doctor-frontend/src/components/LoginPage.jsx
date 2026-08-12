@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { api } from '../api';
-import { Loader2, LockKeyhole, ShieldCheck, Sparkles } from 'lucide-react';
+import { Eye, EyeOff, Loader2, LockKeyhole, ShieldCheck, Sparkles } from 'lucide-react';
 
 const inputStyle = {
   width: '100%',
@@ -13,8 +13,24 @@ const inputStyle = {
   outline: 'none',
 };
 
+function calculateAgeFromDOB(dobString) {
+  if (!dobString) return null;
+  const dob = new Date(dobString);
+  if (isNaN(dob.getTime())) return null;
+  const today = new Date();
+  let age = today.getFullYear() - dob.getFullYear();
+  const monthDiff = today.getMonth() - dob.getMonth();
+  if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < dob.getDate())) {
+    age--;
+  }
+  return age >= 0 ? age : null;
+}
+
 export default function LoginPage({ onAuthenticated }) {
   const [mode, setMode] = useState('login');
+  const [showLoginPassword, setShowLoginPassword] = useState(false);
+  const [showRegisterPassword, setShowRegisterPassword] = useState(false);
+
   const [loginForm, setLoginForm] = useState({ identifier: '', password: '' });
   const [registerForm, setRegisterForm] = useState({
     email: '',
@@ -22,6 +38,7 @@ export default function LoginPage({ onAuthenticated }) {
     password: '',
     full_name: '',
     gender: '',
+    date_of_birth: '',
     age: '',
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -41,6 +58,16 @@ export default function LoginPage({ onAuthenticated }) {
     }
   };
 
+  const handleDOBChange = (e) => {
+    const dobValue = e.target.value;
+    const computedAge = calculateAgeFromDOB(dobValue);
+    setRegisterForm(prev => ({
+      ...prev,
+      date_of_birth: dobValue,
+      age: computedAge !== null ? String(computedAge) : ''
+    }));
+  };
+
   const submitRegister = async (e) => {
     e.preventDefault();
     setError('');
@@ -52,6 +79,7 @@ export default function LoginPage({ onAuthenticated }) {
         password: registerForm.password,
         full_name: registerForm.full_name,
         gender: registerForm.gender,
+        date_of_birth: registerForm.date_of_birth,
         age: registerForm.age ? Number(registerForm.age) : null,
       });
       onAuthenticated?.(res.user);
@@ -63,37 +91,37 @@ export default function LoginPage({ onAuthenticated }) {
   };
 
   return (
-    <div style={{ minHeight: '100vh', width: '100vw', background: 'radial-gradient(circle at top, rgba(124,140,248,0.18), transparent 42%), #0b1020', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '28px' }}>
-      <div style={{ width: 'min(980px, 96vw)', minHeight: 'min(720px, 92vh)', backgroundColor: 'var(--surface-1)', border: '1px solid var(--border-color)', borderRadius: '16px', overflow: 'hidden', boxShadow: '0 24px 70px rgba(0,0,0,0.45)', display: 'flex' }}>
-        <div style={{ width: '44%', background: 'linear-gradient(180deg, rgba(124,140,248,0.18), rgba(124,140,248,0.05))', borderRight: '1px solid var(--border-color)', padding: '34px 30px', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+    <div style={{ minHeight: '100vh', width: '100vw', background: 'radial-gradient(circle at 30% 20%, rgba(240, 169, 58, 0.12), transparent 45%), #0A0E14', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px' }}>
+      <div style={{ width: 'min(960px, 96vw)', minHeight: 'min(680px, 92vh)', backgroundColor: 'var(--surface-1)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-lg)', overflow: 'hidden', boxShadow: 'var(--shadow-elevation)', display: 'flex' }}>
+        <div style={{ width: '42%', background: 'linear-gradient(180deg, rgba(240, 169, 58, 0.08), rgba(27, 36, 50, 0.4))', borderRight: '1px solid var(--border-color)', padding: '36px 32px', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
           <div>
-            <div style={{ display: 'inline-flex', width: '48px', height: '48px', borderRadius: '14px', alignItems: 'center', justifyContent: 'center', background: 'linear-gradient(135deg, var(--color-accent), #8b5cf6)', color: '#fff', marginBottom: '18px' }}>
-              <Sparkles size={20} />
+            <div style={{ display: 'inline-flex', width: '44px', height: '44px', borderRadius: 'var(--radius-md)', alignItems: 'center', justifyContent: 'center', background: 'var(--color-accent)', color: '#0A0E14', marginBottom: '20px', boxShadow: '0 4px 14px rgba(240, 169, 58, 0.3)' }}>
+              <Sparkles size={22} />
             </div>
-            <div style={{ fontSize: '11px', letterSpacing: '0.08em', color: 'var(--text-muted)', fontWeight: 700, marginBottom: '10px' }}>API DOCTOR ACCESS</div>
-            <div style={{ fontSize: '34px', lineHeight: 1.15, fontWeight: 700, color: 'var(--text-primary)', marginBottom: '14px' }}>
-              Sign in to your AI incident command center.
-            </div>
-            <div style={{ fontSize: '13px', color: 'var(--text-muted)', lineHeight: 1.7 }}>
-              Use email or username plus password to unlock API Doctor. New users can register a local account with profile details and continue directly into the workspace.
+            <div style={{ fontSize: '11px', letterSpacing: '0.08em', color: 'var(--text-muted)', fontWeight: 700, marginBottom: '10px', fontFamily: 'var(--font-heading)' }}>API DOCTOR // AUTHENTICATION</div>
+            <h1 style={{ fontSize: '28px', lineHeight: 1.2, fontWeight: 700, color: 'var(--text-primary)', marginBottom: '14px', fontFamily: 'var(--font-heading)' }}>
+              Automated production failure diagnosis & code repair.
+            </h1>
+            <div style={{ fontSize: '13px', color: 'var(--text-muted)', lineHeight: 1.6 }}>
+              Enter your credentials to open the API Doctor workspace. Authenticate to ingest stack traces, inspect incident contexts, and generate pull requests.
             </div>
           </div>
           <div style={{ display: 'grid', gap: '12px' }}>
             {[
-              'Project-aware workspace and onboarding',
-              'Saved profile credentials for return visits',
-              'Local session logic for simple hackathon auth',
+              'Context-aware repository analysis',
+              'Deterministic stack trace diagnosis',
+              'Automated sandbox verification & PR patch creation',
             ].map(item => (
               <div key={item} style={{ display: 'flex', alignItems: 'center', gap: '10px', color: 'var(--text-primary)', fontSize: '12px' }}>
-                <ShieldCheck size={14} style={{ color: 'var(--color-success)' }} />
+                <ShieldCheck size={15} style={{ color: 'var(--color-success)' }} />
                 <span>{item}</span>
               </div>
             ))}
           </div>
         </div>
 
-        <div style={{ flex: 1, padding: '34px 34px 30px', display: 'flex', flexDirection: 'column' }}>
-          <div style={{ display: 'flex', gap: '8px', marginBottom: '26px' }}>
+        <div style={{ flex: 1, padding: '36px 36px 30px', display: 'flex', flexDirection: 'column' }}>
+          <div style={{ display: 'flex', gap: '8px', marginBottom: '28px' }}>
             <button type="button" onClick={() => setMode('login')} className={mode === 'login' ? 'btn-primary' : 'btn-outline'}>
               <LockKeyhole size={14} />
               <span>Login</span>
@@ -108,11 +136,40 @@ export default function LoginPage({ onAuthenticated }) {
             <form onSubmit={submitLogin} style={{ display: 'grid', gap: '16px', maxWidth: '420px' }}>
               <div>
                 <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: 'var(--text-muted)', marginBottom: '6px' }}>Email or username</label>
-                <input value={loginForm.identifier} onChange={e => setLoginForm(prev => ({ ...prev, identifier: e.target.value }))} placeholder="you@example.com or doctor_user" style={inputStyle} />
+                <input value={loginForm.identifier} onChange={e => setLoginForm(prev => ({ ...prev, identifier: e.target.value }))} placeholder="you@example.com or doctor_user" style={inputStyle} required />
               </div>
               <div>
                 <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: 'var(--text-muted)', marginBottom: '6px' }}>Password</label>
-                <input type="password" value={loginForm.password} onChange={e => setLoginForm(prev => ({ ...prev, password: e.target.value }))} placeholder="Enter password" style={inputStyle} />
+                <div style={{ position: 'relative', width: '100%' }}>
+                  <input
+                    type={showLoginPassword ? 'text' : 'password'}
+                    value={loginForm.password}
+                    onChange={e => setLoginForm(prev => ({ ...prev, password: e.target.value }))}
+                    placeholder="Enter password"
+                    style={{ ...inputStyle, paddingRight: '36px' }}
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowLoginPassword(prev => !prev)}
+                    style={{
+                      position: 'absolute',
+                      right: '10px',
+                      top: '50%',
+                      transform: 'translateY(-50%)',
+                      background: 'none',
+                      border: 'none',
+                      color: 'var(--text-muted)',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      padding: '2px'
+                    }}
+                    title={showLoginPassword ? 'Hide password' : 'Show password'}
+                  >
+                    {showLoginPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
+                </div>
               </div>
               {error && <div style={{ color: 'var(--color-failure)', fontSize: '12px' }}>{error}</div>}
               <button type="submit" disabled={isSubmitting} className="btn-primary" style={{ justifyContent: 'center', padding: '10px 16px' }}>
@@ -125,11 +182,11 @@ export default function LoginPage({ onAuthenticated }) {
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
                 <div>
                   <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: 'var(--text-muted)', marginBottom: '6px' }}>Email</label>
-                  <input value={registerForm.email} onChange={e => setRegisterForm(prev => ({ ...prev, email: e.target.value }))} placeholder="you@example.com" style={inputStyle} />
+                  <input value={registerForm.email} onChange={e => setRegisterForm(prev => ({ ...prev, email: e.target.value }))} placeholder="you@example.com" style={inputStyle} required />
                 </div>
                 <div>
                   <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: 'var(--text-muted)', marginBottom: '6px' }}>Username</label>
-                  <input value={registerForm.username} onChange={e => setRegisterForm(prev => ({ ...prev, username: e.target.value }))} placeholder="doctor_user" style={inputStyle} />
+                  <input value={registerForm.username} onChange={e => setRegisterForm(prev => ({ ...prev, username: e.target.value }))} placeholder="doctor_user" style={inputStyle} required />
                 </div>
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
@@ -139,17 +196,60 @@ export default function LoginPage({ onAuthenticated }) {
                 </div>
                 <div>
                   <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: 'var(--text-muted)', marginBottom: '6px' }}>Password</label>
-                  <input type="password" value={registerForm.password} onChange={e => setRegisterForm(prev => ({ ...prev, password: e.target.value }))} placeholder="Create password" style={inputStyle} />
+                  <div style={{ position: 'relative', width: '100%' }}>
+                    <input
+                      type={showRegisterPassword ? 'text' : 'password'}
+                      value={registerForm.password}
+                      onChange={e => setRegisterForm(prev => ({ ...prev, password: e.target.value }))}
+                      placeholder="Create password"
+                      style={{ ...inputStyle, paddingRight: '36px' }}
+                      required
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowRegisterPassword(prev => !prev)}
+                      style={{
+                        position: 'absolute',
+                        right: '10px',
+                        top: '50%',
+                        transform: 'translateY(-50%)',
+                        background: 'none',
+                        border: 'none',
+                        color: 'var(--text-muted)',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        padding: '2px'
+                      }}
+                      title={showRegisterPassword ? 'Hide password' : 'Show password'}
+                    >
+                      {showRegisterPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                    </button>
+                  </div>
                 </div>
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
                 <div>
                   <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: 'var(--text-muted)', marginBottom: '6px' }}>Gender</label>
-                  <input value={registerForm.gender} onChange={e => setRegisterForm(prev => ({ ...prev, gender: e.target.value }))} placeholder="Optional" style={inputStyle} />
+                  <select
+                    value={registerForm.gender}
+                    onChange={e => setRegisterForm(prev => ({ ...prev, gender: e.target.value }))}
+                    style={inputStyle}
+                  >
+                    <option value="">Select gender</option>
+                    <option value="Male">Male</option>
+                    <option value="Female">Female</option>
+                    <option value="Others">Others</option>
+                  </select>
                 </div>
                 <div>
-                  <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: 'var(--text-muted)', marginBottom: '6px' }}>Age</label>
-                  <input type="number" min="1" max="150" value={registerForm.age} onChange={e => setRegisterForm(prev => ({ ...prev, age: e.target.value }))} placeholder="Optional" style={inputStyle} />
+                  <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: 'var(--text-muted)', marginBottom: '6px' }}>Date of Birth</label>
+                  <input
+                    type="date"
+                    value={registerForm.date_of_birth}
+                    onChange={handleDOBChange}
+                    style={inputStyle}
+                  />
                 </div>
               </div>
               {error && <div style={{ color: 'var(--color-failure)', fontSize: '12px' }}>{error}</div>}
