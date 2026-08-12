@@ -40,6 +40,34 @@ def _scrub(obj: Any) -> Any:
     return obj
 
 
+# LogRecord attributes we never treat as structured extras.
+_RESERVED_RECORD_ATTRS = {
+    "name",
+    "msg",
+    "args",
+    "levelname",
+    "levelno",
+    "pathname",
+    "filename",
+    "module",
+    "exc_info",
+    "exc_text",
+    "stack_info",
+    "lineno",
+    "funcName",
+    "created",
+    "msecs",
+    "relativeCreated",
+    "thread",
+    "threadName",
+    "processName",
+    "process",
+    "taskName",
+    "message",
+    "asctime",
+}
+
+
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         log_obj: dict[str, Any] = {
@@ -51,10 +79,17 @@ class JsonFormatter(logging.Formatter):
             "funcName": record.funcName,
             "lineno": record.lineno,
         }
-        # Merge structured extras.
+        # Merge structured extras passed as extra={"extra": {...}} (our
+        # log_operation convention) *and* fields attached directly via
+        # extra={...} so operation/status/error actually appear in JSON.
         extra = getattr(record, "extra", None)
         if isinstance(extra, dict):
             log_obj.update(_scrub(extra))
+        for key, val in record.__dict__.items():
+            if key in _RESERVED_RECORD_ATTRS or key.startswith("_") or key == "extra":
+                continue
+            if key not in log_obj:
+                log_obj[key] = _scrub(val)
         if record.exc_info:
             log_obj["exc_info"] = self.formatException(record.exc_info)
         return json.dumps(log_obj)
@@ -101,4 +136,7 @@ def log_operation(
         record["error"] = error
     record.update(extra)
     level = logging.ERROR if status in ("failed", "error") else logging.INFO
-    logger.log(level, operation, extra=record)
+    # Attach the payload as record.extra so JsonFormatter can merge it.
+    # Passing the dict itself as extra= would set incident_id/status/error as
+    # LogRecord attributes and the formatter would drop them.
+    logger.log(level, operation, extra={"extra": record})

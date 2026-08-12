@@ -179,10 +179,21 @@ class LLMClient:
                     # fast if there is none.
                     break
 
-                content = data["choices"][0]["message"]["content"]
+                content = _choice_content(data)
+                if not content:
+                    last_error = (
+                        "Empty assistant content (reasoning-only or truncated response)"
+                    )
+                    logger.warning(
+                        "Structured response empty content (attempt %s/%s) model=%s",
+                        attempt + 1,
+                        attempt_budget,
+                        try_model,
+                    )
+                    continue
                 try:
                     parsed = _parse_json(content)
-                except (json.JSONDecodeError, ValueError, SyntaxError) as exc:
+                except (json.JSONDecodeError, ValueError, SyntaxError, TypeError) as exc:
                     last_error = f"Malformed JSON: {exc}"
                     logger.warning(
                         "Structured response failed JSON parsing (attempt %s/%s): %s\n"
@@ -258,6 +269,37 @@ class LLMClient:
         raise AIProviderError(
             f"Could not obtain a valid {response_model.__name__} after {attempts} attempts"
         )
+
+
+def _choice_content(data: dict) -> str:
+    """Best-effort assistant text from an OpenAI-shaped chat response.
+
+    Reasoning models often return ``content: null`` and put the answer in
+    ``reasoning_content`` / ``reasoning``. Never raise on a missing field —
+    an empty string is a retryable parse failure, not a pipeline crash.
+    """
+    if not isinstance(data, dict):
+        return ""
+    choices = data.get("choices") or []
+    if not choices or not isinstance(choices[0], dict):
+        return ""
+    message = choices[0].get("message") or choices[0].get("delta") or {}
+    if not isinstance(message, dict):
+        return ""
+    for key in ("content", "reasoning_content", "reasoning"):
+        val = message.get(key)
+        if isinstance(val, str) and val.strip():
+            return val
+        if isinstance(val, list):
+            parts = [
+                part.get("text", "")
+                for part in val
+                if isinstance(part, dict) and part.get("text")
+            ]
+            joined = "".join(parts)
+            if joined.strip():
+                return joined
+    return ""
 
 
 def _extract_json_candidates(content: str) -> list[str]:
@@ -385,7 +427,15 @@ def _parse_object(value: str) -> dict | None:
 
 
 def _parse_json(content: str) -> dict:
+    if not isinstance(content, str):
+        content = "" if content is None else str(content)
     content = _THINK_BLOCK.sub("", content).strip()
+    # Truncated reasoning traces leave an unclosed <think> ... with the JSON
+    # object after it (or nothing). Drop the dangling prefix so candidates
+    # can still be recovered.
+    content = re.sub(
+        r"<think>.*?(?=\{|$)", "", content, flags=re.DOTALL | re.IGNORECASE
+    ).strip()
     content = _repair_html_entities(content)
 
     # 1. Direct JSON parse (fast path & preserves embedded markdown fences)

@@ -60,6 +60,19 @@ class RootCauseAnalysis(BaseModel):
             elif not cat and not cls_field:
                 data["classification"] = "CODE_BUG"
                 data["category"] = "CODE_BUG"
+
+            # Models often emit confidence as a percentage (95 or "95%").
+            conf = data.get("confidence")
+            if isinstance(conf, str):
+                stripped = conf.strip().rstrip("%")
+                try:
+                    conf = float(stripped)
+                except ValueError:
+                    conf = None
+                else:
+                    data["confidence"] = conf
+            if isinstance(conf, (int, float)) and conf > 1.0:
+                data["confidence"] = conf / 100.0 if conf <= 100.0 else 1.0
         return data
 
 

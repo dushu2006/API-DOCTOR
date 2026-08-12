@@ -78,6 +78,11 @@ class Settings(BaseSettings):
     AI_MAX_RETRIES: int = 3
     AI_TEMPERATURE: float = 0.1
     AI_MODEL_FALLBACK: bool = True
+    # Reasoning models (Nemotron 3.5 Lightning, etc.) think by default and
+    # spend the whole max_tokens budget on a reasoning_content trace, leaving
+    # message.content null. Structured JSON calls disable thinking so the
+    # model returns parseable JSON inside the existing token budget.
+    AI_DISABLE_THINKING: bool = True
 
     # ------------------------------------------------------------------
     # AI cache
