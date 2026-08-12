@@ -133,6 +133,67 @@ def _parse_unified_diff(diff: str) -> list[dict[str, Any]]:
     return patches
 
 
+def _hunk_old_contents(hunk: dict[str, Any]) -> list[str]:
+    """Old-file lines referenced by a hunk (context + removals)."""
+    old: list[str] = []
+    for hline in hunk["lines"]:
+        if hline and hline[0] in (" ", "-"):
+            old.append(hline[1:])
+    return old
+
+
+def _lines_equal(left: str, right: str) -> bool:
+    # Tolerate trailing whitespace / CRLF differences that LLMs often introduce.
+    return left.rstrip() == right.rstrip()
+
+
+def _match_old_at(orig_lines: list[str], old_contents: list[str], idx: int) -> bool:
+    if idx < 0 or idx + len(old_contents) > len(orig_lines):
+        return False
+    return all(
+        _lines_equal(orig_lines[idx + offset], old)
+        for offset, old in enumerate(old_contents)
+    )
+
+
+def _locate_hunk(orig_lines: list[str], hunk: dict[str, Any], current_index: int) -> int:
+    """Find where a hunk applies.
+
+    Prefer the ``@@`` header line number. If that context does not match
+    (generated diffs frequently have slightly-off line numbers), search the
+    file for the hunk's old lines — the same idea as GNU patch's fuzz factor.
+    """
+    claimed = max(0, int(hunk["old_start"]) - 1)
+    old_contents = _hunk_old_contents(hunk)
+
+    if not old_contents:
+        if current_index <= claimed <= len(orig_lines):
+            return claimed
+        return current_index
+
+    if claimed >= current_index and _match_old_at(orig_lines, old_contents, claimed):
+        return claimed
+
+    search_from = current_index
+    search_to = len(orig_lines) - len(old_contents) + 1
+    matches = [
+        idx
+        for idx in range(search_from, max(search_from, search_to))
+        if _match_old_at(orig_lines, old_contents, idx)
+    ]
+    if not matches:
+        matches = [
+            idx
+            for idx in range(0, min(current_index, max(0, search_to)))
+            if _match_old_at(orig_lines, old_contents, idx)
+        ]
+    if not matches:
+        raise PatchError(
+            f"Patch failed to apply cleanly: context mismatch at line {claimed + 1}"
+        )
+    return min(matches, key=lambda idx: abs(idx - claimed))
+
+
 def _apply_file_patch(patch: dict[str, Any], workspace_root: Path) -> None:
     old_path = patch["old_path"]
     new_path = patch["new_path"]
@@ -143,17 +204,14 @@ def _apply_file_patch(patch: dict[str, Any], workspace_root: Path) -> None:
         old_file = workspace_root / rel_old
         if not old_file.exists():
             raise PatchError(f"Original file not found: {rel_old}")
-        orig_lines = old_file.read_text().splitlines()
+        orig_lines = old_file.read_text(encoding="utf-8", errors="replace").splitlines()
 
     rel_new = _strip_prefix(new_path)
     result_lines = []
     current_index = 0
 
     for hunk in patch["hunks"]:
-        old_start = hunk["old_start"] - 1
-        old_count = hunk["old_count"]
-        if old_start < current_index or old_start > len(orig_lines):
-            raise PatchError("Hunk location out of range")
+        old_start = _locate_hunk(orig_lines, hunk, current_index)
         result_lines.extend(orig_lines[current_index:old_start])
         idx = old_start
         for hline in hunk["lines"]:
@@ -162,14 +220,14 @@ def _apply_file_patch(patch: dict[str, Any], workspace_root: Path) -> None:
             opcode = hline[0]
             content = hline[1:]
             if opcode == " ":
-                if idx >= len(orig_lines) or orig_lines[idx] != content:
+                if idx >= len(orig_lines) or not _lines_equal(orig_lines[idx], content):
                     raise PatchError(
                         f"Patch failed to apply cleanly: context mismatch at line {idx + 1}"
                     )
-                result_lines.append(content)
+                result_lines.append(orig_lines[idx])
                 idx += 1
             elif opcode == "-":
-                if idx >= len(orig_lines) or orig_lines[idx] != content:
+                if idx >= len(orig_lines) or not _lines_equal(orig_lines[idx], content):
                     raise PatchError(
                         f"Patch failed to apply cleanly: removal mismatch at line {idx + 1}"
                     )
@@ -189,7 +247,10 @@ def _apply_file_patch(patch: dict[str, Any], workspace_root: Path) -> None:
         return
     target_file = workspace_root / rel_new
     target_file.parent.mkdir(parents=True, exist_ok=True)
-    target_file.write_text("\n".join(result_lines) + ("\n" if result_lines and not result_lines[-1].endswith("\n") else ""))
+    text = "\n".join(result_lines)
+    if result_lines:
+        text += "\n"
+    target_file.write_text(text, encoding="utf-8")
 
 
 def _strip_prefix(path: str) -> str:

@@ -311,35 +311,28 @@ asyncio.run(main())
 
     @staticmethod
     def _generate_test_script(request_snapshot: dict) -> str:
-        """Run a targeted pytest that replays the request and asserts it is fixed.
+        """Replay the failing request and assert the crash is gone.
 
-        The test file is written to the workspace root (not under ``tests/``) so
-        the project's own test suite is not executed inside the sandbox.
+        Runs as a plain Python script (not pytest) so the copied workspace's
+        pytest.ini / pytest-asyncio settings cannot break Windows event loops.
         """
         method = (request_snapshot.get("method") or "GET").upper()
         path = request_snapshot.get("path") or "/"
         body_src = json.dumps(request_snapshot.get("body")) if request_snapshot.get("body") is not None else "None"
-        test_file = f"""
-import httpx
+        return f"""
+import sys
 from app.main import app
+import httpx, asyncio
 
-def test_fix_resolves_crash():
-    async def run():
-        transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
-        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
-            resp = await client.request("{method}", "{path}", json={body_src})
-        return resp.status_code
-    import asyncio
-    status = asyncio.run(run())
-    assert status < 500, f"expected crash resolved, got status {{status}}"
+async def main():
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+        resp = await client.request("{method}", "{path}", json={body_src})
+    print("TEST_STATUS", resp.status_code)
+    print("TEST_BODY", resp.text[:500])
+    ok = resp.status_code < 500
+    print("TEST_OK", ok)
+    sys.exit(0 if ok else 1)
+
+asyncio.run(main())
 """
-        script = (
-            "import sys, subprocess, pathlib\n"
-            "pathlib.Path('test_fix_repro.py').write_text(" + repr(test_file) + ")\n"
-            "r = subprocess.run([sys.executable, '-m', 'pytest', 'test_fix_repro.py', '-q'], "
-            "capture_output=True, text=True)\n"
-            "print(r.stdout[-1500:])\n"
-            "print(r.stderr[-1500:])\n"
-            "sys.exit(r.returncode)"
-        )
-        return script
