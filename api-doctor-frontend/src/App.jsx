@@ -181,7 +181,12 @@ export default function App() {
         }
       }
     } catch (err) {
-      console.error('Failed to bootstrap application:', err);
+      // A restarting backend is an expected, self-healing condition: mark the
+      // UI disconnected and let the next poll reconnect, without logging an
+      // error for every retry.
+      if (!err?.isNetworkError) {
+        console.error('Failed to bootstrap application:', err);
+      }
       setIsBackendConnected(false);
       setBackendHealth(null);
     } finally {
@@ -228,7 +233,11 @@ export default function App() {
         clearProjectWorkspace();
       }
     } catch (err) {
-      console.error('Failed to refresh project data:', err);
+      // Keep the last known project state on a transient outage so the
+      // workspace does not blank out while the backend restarts.
+      if (!err?.isNetworkError) {
+        console.error('Failed to refresh project data:', err);
+      }
     }
   }, [clearProjectWorkspace, loadProjectFiles]);
 

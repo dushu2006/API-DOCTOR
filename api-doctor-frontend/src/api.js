@@ -34,7 +34,13 @@ async function request(endpoint, options = {}) {
     }
     return await res.json();
   } catch (err) {
-    if (!suppressErrorLog) {
+    // `fetch` rejects with a bare TypeError when the dev-server proxy cannot
+    // reach the API (backend restarting). Flag it so callers can treat it as a
+    // transient outage instead of a real API error.
+    if (err instanceof TypeError) {
+      err.isNetworkError = true;
+    }
+    if (!suppressErrorLog && !err.isNetworkError) {
       console.error(`API Error on ${endpoint}:`, err);
     }
     throw err;
@@ -179,25 +185,56 @@ export const api = {
     body: JSON.stringify({ approved: true })
   }),
 
+  // Subscribes to an incident's activity stream and keeps the subscription
+  // alive across backend restarts. A dropped connection previously closed the
+  // EventSource for good, so the timeline stayed frozen until a full page
+  // reload; the stream is now re-established with capped exponential backoff.
   subscribeIncidentStream: (id, onEvent, onError) => {
-    const token = getSessionToken();
-    const url = `${API_BASE}/api/incidents/${id}/stream${token ? `?session_token=${encodeURIComponent(token)}` : ''}`;
-    const eventSource = new EventSource(url);
+    let eventSource = null;
+    let retryTimer = null;
+    let attempt = 0;
+    let stopped = false;
 
-    eventSource.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        onEvent(data);
-      } catch (e) {
-        console.error('Failed to parse SSE data', e);
-      }
+    const connect = () => {
+      if (stopped) return;
+      const token = getSessionToken();
+      const url = `${API_BASE}/api/incidents/${id}/stream${token ? `?session_token=${encodeURIComponent(token)}` : ''}`;
+      eventSource = new EventSource(url);
+
+      eventSource.onopen = () => {
+        attempt = 0;
+      };
+
+      eventSource.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          onEvent(data);
+        } catch (e) {
+          console.error('Failed to parse SSE data', e);
+        }
+      };
+
+      eventSource.onerror = (err) => {
+        if (onError) onError(err);
+        if (eventSource) {
+          eventSource.close();
+          eventSource = null;
+        }
+        if (stopped) return;
+        // 1s, 2s, 4s ... capped at 15s so a restarting backend is picked up
+        // quickly without hammering it while it is still booting.
+        const delay = Math.min(1000 * 2 ** attempt, 15000);
+        attempt += 1;
+        retryTimer = setTimeout(connect, delay);
+      };
     };
 
-    eventSource.onerror = (err) => {
-      if (onError) onError(err);
-      eventSource.close();
-    };
+    connect();
 
-    return () => eventSource.close();
+    return () => {
+      stopped = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      if (eventSource) eventSource.close();
+    };
   }
 };

@@ -611,6 +611,10 @@ async def stream_incident(incident_id: str, request: Request) -> StreamingRespon
     queue = event_hub.subscribe(incident_id)
 
     async def gen():
+        # An exception escaping this generator aborts the response mid-body,
+        # which the browser reports as ERR_CONNECTION_RESET rather than a clean
+        # stream close. Errors are logged and the stream is ended politely so a
+        # single bad event can never look like a dead server.
         try:
             inc = incident_store.get(incident_id)
             if inc:
@@ -624,9 +628,26 @@ async def stream_incident(incident_id: str, request: Request) -> StreamingRespon
                     break
                 try:
                     payload = await asyncio.wait_for(queue.get(), timeout=15.0)
-                    yield _sse(json.loads(payload))
                 except asyncio.TimeoutError:
                     yield ": keepalive\n\n"
+                    continue
+                try:
+                    event = json.loads(payload)
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "Dropping malformed event on incident %s stream", incident_id
+                    )
+                    continue
+                yield _sse(event)
+        except asyncio.CancelledError:
+            # Normal client disconnect / server shutdown.
+            raise
+        except Exception:  # noqa: BLE001
+            logger.exception("Incident %s activity stream failed", incident_id)
+            try:
+                yield _sse({"type": "stream_error"})
+            except Exception:  # noqa: BLE001
+                pass
         finally:
             event_hub.unsubscribe(incident_id, queue)
 
