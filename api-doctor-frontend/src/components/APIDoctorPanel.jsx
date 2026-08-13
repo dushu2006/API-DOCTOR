@@ -14,7 +14,8 @@ import {
   ChevronUp,
   Server,
   FileText,
-  History
+  History,
+  RefreshCw
 } from 'lucide-react';
 
 const STEP_LABELS = {
@@ -28,6 +29,7 @@ const STEP_LABELS = {
   project_discovered: 'Project discovered',
   logs_retrieved: 'Logs retrieved',
   error_detected: 'Error detected',
+  rediagnosis_requested: 'Fresh diagnosis requested',
   stack_trace_parsed: 'Stack trace parsed',
   relevant_source_identified: 'Relevant files identified',
   files_to_read: 'Files identified for reading',
@@ -221,6 +223,7 @@ export default function APIDoctorPanel({
   onKeepChanges,
   onRejectChanges,
   onApplyFix,
+  onRediagnose,
   onCommitChanges,
   onCreatePR,
   onApproveFileRead,
@@ -257,6 +260,16 @@ export default function APIDoctorPanel({
   const isAwaitingFix = activeIncident?.status === 'AWAITING_FIX_APPROVAL';
   const isVerified = Boolean(incidentSandbox?.passed);
   const wasRolledBack = timelineRows.some(r => r.step === 'changes_rolled_back');
+  const applyFailure = [...timelineRows].reverse().find(
+    row => row.step === 'changes_applied' && row.status === 'failed'
+  ) || [...(activeIncident?.activity || [])].reverse().find(
+    event => event.step === 'changes_applied' && event.status === 'failed'
+  );
+  const verificationFailed = Boolean(incidentSandbox?.present && incidentSandbox.passed === false);
+  const needsFreshDiagnosis = appliedFiles.length === 0 && (
+    Boolean(applyFailure)
+    || (!isAwaitingFix && (verificationFailed || wasRolledBack))
+  );
 
   const historyItems = (incidentsList || []).filter(inc => inc.id !== activeIncident?.id);
 
@@ -643,7 +656,7 @@ export default function APIDoctorPanel({
                       Review Diff
                     </button>
                   </div>
-                ) : isAwaitingFix ? (
+                ) : isAwaitingFix && !needsFreshDiagnosis ? (
                   /* Awaiting user decision */
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                     <button disabled={isIncidentActionPending} onClick={() => onKeepChanges(true)} className="btn-success" style={{ justifyContent: 'center', width: '100%' }}>
@@ -665,13 +678,46 @@ export default function APIDoctorPanel({
                       </button>
                     </div>
                   </div>
-                ) : (
-                  /* Proposal exists but was not applied (legacy / failed path) */
+                ) : needsFreshDiagnosis ? (
+                  /* A failed/stale proposal is reviewable history, never an
+                      actionable patch. Regenerate it from the live workspace. */
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                    {onApplyFix && (
-                      <button onClick={() => onApplyFix()} className="btn-success" style={{ justifyContent: 'center', width: '100%' }}>
+                    <div style={{
+                      padding: '8px',
+                      borderRadius: '4px',
+                      backgroundColor: 'rgba(244, 63, 94, 0.08)',
+                      color: 'var(--color-failure)',
+                      fontSize: '11px',
+                      lineHeight: 1.45
+                    }}>
+                      {applyFailure?.message || 'This patch did not pass verification and cannot be applied safely.'}
+                    </div>
+                    {onRediagnose && (
+                      <button
+                        disabled={isIncidentActionPending}
+                        onClick={() => onRediagnose()}
+                        className="btn-primary"
+                        style={{ justifyContent: 'center', width: '100%' }}
+                      >
+                        <RefreshCw size={14} />
+                        <span>{isIncidentActionPending ? 'Starting…' : 'Re-run Diagnosis'}</span>
+                      </button>
+                    )}
+                    <button
+                      onClick={() => setIsDiffMode(true)}
+                      style={{ background: 'none', border: 'none', color: 'var(--color-accent)', cursor: 'pointer', fontSize: '11px', textDecoration: 'underline' }}
+                    >
+                      Review Previous Diff
+                    </button>
+                  </div>
+                ) : (
+                  /* A sandbox-verified legacy proposal can still be applied to
+                      the workspace. Unverified proposals never reach this path. */
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    {onApplyFix && isVerified && (
+                      <button disabled={isIncidentActionPending} onClick={() => onApplyFix()} className="btn-success" style={{ justifyContent: 'center', width: '100%' }}>
                         <Check size={14} />
-                        <span>Apply to Workspace</span>
+                        <span>{isIncidentActionPending ? 'Applying…' : 'Apply to Workspace'}</span>
                       </button>
                     )}
                     <button

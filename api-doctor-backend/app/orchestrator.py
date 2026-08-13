@@ -36,7 +36,14 @@ from app.events.hub import emit
 from app.incidents.models import Incident, IncidentStatus
 from app.incidents.store import incident_store
 from app.projects.store import project_store
-from app.sandbox.patch_utils import PatchError, apply_patch, resolve_diff_paths, validate_diff
+from app.sandbox.patch_utils import (
+    PatchError,
+    apply_patch,
+    apply_patch_idempotent,
+    resolve_diff_paths,
+    reverse_applied_files,
+    validate_diff,
+)
 from app.sandbox.sandbox_runner import SandboxResult, SandboxRunner
 from app.security.sanitizer import redact_text, sanitize
 
@@ -72,6 +79,10 @@ class Orchestrator:
         self._pipeline_tasks: dict[str, asyncio.Task[Incident | None]] = {}
         # incident_id -> Keep-Changes application state (backup location, files)
         self._workspace_apply: dict[str, dict[str, Any]] = {}
+        # Applying a patch is a read/check/write transaction. Serialize it so a
+        # duplicate click (or two incidents targeting the same workspace) can
+        # never race between the context check and the metadata update.
+        self._workspace_apply_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Entry points
@@ -173,6 +184,48 @@ class Orchestrator:
         await emit(incident.id, "logs_retrieved", "done", "Logs retrieved")
         await emit(incident.id, "error_detected", "done", "Error detected")
         return incident
+
+    async def rediagnose(self, incident_id: str) -> Incident:
+        """Create and start a fresh incident from an existing incident's input.
+
+        A stale patch must never be forced onto changed source.  This gives the
+        UI a one-click recovery that retains the original sanitized logs and
+        request snapshot while deliberately discarding every cached source
+        read, root cause, patch, approval, and sandbox result.
+        """
+        original = incident_store.get(incident_id)
+        if not original:
+            raise ValueError(f"incident not found: {incident_id}")
+        if self.has_active_pipeline(incident_id):
+            raise ValueError("Cannot re-run diagnosis while the original diagnosis is still running.")
+
+        # Database payloads are JSON-compatible; a JSON round trip gives the
+        # new incident independent nested dictionaries/lists without carrying
+        # mutable references from the historical record.
+        detection = json.loads(json.dumps(original.detection or {}))
+        detection["rediagnosis_of"] = original.id
+        request_snapshot = json.loads(json.dumps(original.request_snapshot or {}))
+        fresh = Incident(
+            project_id=original.project_id,
+            status=IncidentStatus.RECEIVED,
+            detection=detection,
+            request_snapshot=request_snapshot,
+            stack_trace=original.stack_trace,
+        )
+        fresh.add_activity(
+            "rediagnosis_requested",
+            "done",
+            f"Fresh diagnosis requested from incident {original.id[:8]}",
+        )
+        fresh.add_activity("logs_retrieved", "done", "Reusing sanitized incident logs")
+        fresh.add_activity("error_detected", "done", "Error detected")
+        fresh = incident_store.create(fresh)
+        if not self.start_diagnosis(fresh.id):
+            fresh.status = IncidentStatus.FAILED
+            fresh.error_message = "Fresh diagnosis could not be started."
+            incident_store.update(fresh)
+            raise ValueError(fresh.error_message)
+        return fresh
 
     def has_active_pipeline(self, incident_id: str) -> bool:
         task = self._pipeline_tasks.get(incident_id)
@@ -504,13 +557,20 @@ class Orchestrator:
                         detail = f"Read {rel} · {read_info['lines']} lines"
                     await emit(inc.id, "file_read", "done", detail)
 
-                # Assemble the full context bundle for the investigator.
+                # Assemble the full context bundle for the investigator. Keep
+                # the exact approved source snapshot alongside the sanitized
+                # retrieval payload.  Replacing ``inc.context`` here used to
+                # discard ``file_contents`` immediately after reading it, so a
+                # later apply could not distinguish a genuinely changed file
+                # from a malformed or already-applied patch.
+                file_contents = dict(inc.context.get("file_contents") or {})
                 try:
                     context = self.context_builder.build(inc, project_profile=profile)
                 except TypeError:
                     context = self.context_builder.build(inc)
                 if not context.get("affected_files"):
                     context["affected_files"] = affected_files
+                context["file_contents"] = file_contents
                 context["_complete"] = True
                 inc.context = context
                 incident_store.update(inc)
@@ -876,11 +936,17 @@ class Orchestrator:
         return project, ws
 
     async def stage_workspace_apply(self, incident_id: str) -> dict[str, Any]:
+        """Apply one incident patch as a serialized workspace transaction."""
+        async with self._workspace_apply_lock:
+            return await self._stage_workspace_apply_locked(incident_id)
+
+    async def _stage_workspace_apply_locked(self, incident_id: str) -> dict[str, Any]:
         """Apply the proposed patch to the REAL project workspace.
 
         Called when the user chooses "Keep Changes". A pre-apply snapshot is
         kept so sandbox verification can still reproduce the original failure
         and so the workspace can be rolled back if verification fails.
+        The public wrapper serializes this method to make retries idempotent.
         """
         inc = incident_store.get(incident_id)
         if not inc:
@@ -900,10 +966,22 @@ class Orchestrator:
 
         project, ws = self._resolve_project_workspace(inc)
         if ws is None:
+            if settings.DEMO_MODE:
+                return {
+                    "applied": False,
+                    "skipped": True,
+                    "reason": "demo workspace is read-only",
+                }
             return {"applied": False, "reason": "Project workspace is not synchronized."}
         if ws.resolve() == Path(settings.INTERNAL_REPO_ROOT).resolve():
-            # Never modify API Doctor's own source tree in demo mode.
-            return {"applied": False, "reason": "demo workspace is read-only"}
+            # Never modify API Doctor's own source tree in demo mode. The
+            # approval route may still continue with isolated sandbox-only
+            # verification when this explicit skip marker is present.
+            return {
+                "applied": False,
+                "skipped": True,
+                "reason": "demo workspace is read-only",
+            }
 
         def _do() -> dict[str, Any]:
             from app.sandbox.patch_utils import _parse_unified_diff, _strip_prefix
@@ -911,22 +989,10 @@ class Orchestrator:
 
             try:
                 resolved, mapping = resolve_diff_paths(diff, ws)
-                validate_diff(resolved, allowed_roots=[str(ws)])
+                affected_paths = validate_diff(resolved, allowed_roots=[str(ws)])
                 file_patches = _parse_unified_diff(resolved)
             except PatchError as exc:
                 return {"applied": False, "reason": f"Invalid patch: {exc}"}
-
-            # Refuse to touch anything unless every original file exists in the
-            # workspace — this is the guard behind "Original file not found".
-            for patch in file_patches:
-                if patch["old_path"] == "/dev/null":
-                    continue  # new file, no original needed
-                rel_old = _strip_prefix(patch["old_path"])
-                if not (ws / rel_old).is_file():
-                    return {
-                        "applied": False,
-                        "reason": f"Original file not found in workspace: {rel_old}",
-                    }
 
             backup_root = _apply_backups_root() / incident_id
             backup = backup_root / "workspace"
@@ -938,17 +1004,69 @@ class Orchestrator:
             except Exception as exc:  # noqa: BLE001
                 return {"applied": False, "reason": f"Could not create safety backup: {exc}"}
 
+            def _restore_affected_from_backup() -> None:
+                """Best-effort rollback for an unexpected filesystem error."""
+                for rel in affected_paths:
+                    src = backup / rel
+                    dst = ws / rel
+                    try:
+                        if src.is_file():
+                            dst.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(src, dst)
+                        elif dst.exists():
+                            dst.unlink(missing_ok=True)
+                    except Exception:
+                        logger.warning("Failed to restore %s after patch apply error", rel)
+
             try:
-                affected = apply_patch(resolved, ws)
+                # Unlike the strict sandbox applicator, the real-workspace path
+                # is idempotent.  It recognizes an exact post-image left by a
+                # request whose response/metadata write was interrupted.
+                affected, already_applied = apply_patch_idempotent(resolved, ws)
+
+                # The safety copy must represent the source *before* this fix.
+                # If a retry discovered that some files were already patched,
+                # reverse only those files in the copy. Verification can then
+                # still reproduce the original failure and apply the full diff.
+                if already_applied:
+                    reverse_applied_files(resolved, backup, already_applied)
             except PatchError as exc:
+                _restore_affected_from_backup()
                 shutil.rmtree(backup_root, ignore_errors=True)
                 message = str(exc)
-                if "mismatch" in message:
+                stale_files: list[str] = []
+                diagnosed = (inc.context or {}).get("file_contents") or {}
+                for patch in file_patches:
+                    if patch["old_path"] == "/dev/null":
+                        continue
+                    rel_old = _strip_prefix(patch["old_path"])
+                    if rel_old not in diagnosed:
+                        continue
+                    current_file = ws / rel_old
+                    current = (
+                        current_file.read_text(encoding="utf-8", errors="replace")
+                        if current_file.is_file()
+                        else None
+                    )
+                    if current != diagnosed[rel_old] and rel_old not in stale_files:
+                        stale_files.append(rel_old)
+
+                if "mismatch" in message or stale_files:
+                    changed = f" ({', '.join(stale_files)})" if stale_files else ""
                     message = (
-                        "File changed since diagnosis — patch refused for safety. "
+                        f"File changed since diagnosis{changed} — patch refused for safety. "
                         "Re-run the diagnosis to generate a fresh patch."
                     )
-                return {"applied": False, "reason": message}
+                return {
+                    "applied": False,
+                    "reason": message,
+                    "conflict": "workspace_changed" if stale_files else "patch_mismatch",
+                    "stale_files": stale_files,
+                }
+            except Exception as exc:  # noqa: BLE001
+                _restore_affected_from_backup()
+                shutil.rmtree(backup_root, ignore_errors=True)
+                return {"applied": False, "reason": f"Could not apply patch safely: {exc}"}
 
             state = {
                 "backup": str(backup),
@@ -956,13 +1074,19 @@ class Orchestrator:
                 "resolved_diff": resolved,
                 "mapping": mapping,
                 "workspace": str(ws),
+                "already_applied_files": already_applied,
             }
             try:
                 (backup_root / "state.json").write_text(json.dumps(state), encoding="utf-8")
             except Exception:
                 logger.warning("Could not persist apply state for %s", incident_id)
             self._workspace_apply[incident_id] = state
-            return {"applied": True, "files": affected, "mapping": mapping}
+            return {
+                "applied": True,
+                "files": affected,
+                "mapping": mapping,
+                "already_applied": bool(already_applied),
+            }
 
         outcome = await asyncio.to_thread(_do)
         if outcome.get("applied"):
@@ -1159,7 +1283,8 @@ class Orchestrator:
             if rel not in affected:
                 affected.append(rel)
         for rel in affected:
-            if cached.get(rel):
+            # Empty source files are still a valid cached snapshot.
+            if rel in cached:
                 files[rel] = cached[rel]
                 continue
             full = self.sandbox_runner.repo_root / rel

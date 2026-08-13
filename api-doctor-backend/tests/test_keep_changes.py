@@ -15,7 +15,7 @@ from app.incidents.models import Incident, IncidentStatus
 from app.incidents.store import incident_store
 from app.orchestrator import Orchestrator
 from app.projects.discovery import discover_project
-from app.sandbox.patch_utils import PatchError, normalize_diff, resolve_diff_paths
+from app.sandbox.patch_utils import PatchError, apply_patch, normalize_diff, resolve_diff_paths
 from app.sandbox.sandbox_runner import SandboxResult, SandboxStep
 
 
@@ -186,6 +186,41 @@ async def test_keep_changes_applies_patch_and_keeps_it_after_verification(
     assert duplicate == {"applied": True, "files": ["app/services/payment.py"]}
 
 
+async def test_stage_apply_recovers_when_patch_is_already_on_disk(
+    tmp_path, authenticated_user, project_factory
+):
+    """A lost response/restart after the write must be an idempotent success.
+
+    The incident metadata intentionally says "not applied" while the workspace
+    already contains the exact post-image. The safety copy is reconstructed to
+    the original source so a subsequent verification can still reproduce it.
+    """
+    ws = _make_project_workspace(tmp_path)
+    project_factory(project_id="kp-retry", workspace_path=str(ws), profile=discover_project(ws))
+    orch = Orchestrator()
+    inc = _incident_with_proposal("kp-retry")
+    inc.context["file_contents"] = {"app/services/payment.py": _BUGGY}
+    incident_store.update(inc)
+
+    # Simulate a process dying after the workspace write and before
+    # fix_proposal.applied_files was persisted.
+    apply_patch(_DIFF, ws)
+    assert not (incident_store.get(inc.id).fix_proposal or {}).get("applied_files")
+
+    outcome = await orch.stage_workspace_apply(inc.id)
+
+    assert outcome["applied"] is True
+    assert outcome["already_applied"] is True
+    assert "raise ValueError('no payment method')" in (
+        ws / "app" / "services" / "payment.py"
+    ).read_text()
+    persisted = incident_store.get(inc.id)
+    assert persisted.fix_proposal["applied_files"] == ["app/services/payment.py"]
+    state = orch._load_apply_state(inc.id)
+    assert state is not None
+    assert (Path(state["backup"]) / "app" / "services" / "payment.py").read_text() == _BUGGY
+
+
 async def test_keep_changes_rolls_back_when_verification_fails(
     tmp_path, monkeypatch, authenticated_user, project_factory
 ):
@@ -231,6 +266,31 @@ async def test_stage_apply_refuses_missing_original_file(
     assert "Original file not found" in outcome["reason"]
     # Nothing was touched.
     assert (ws / "unrelated.py").read_text() == "x = 1\n"
+
+
+async def test_stage_apply_reports_genuine_workspace_change(
+    tmp_path, authenticated_user, project_factory
+):
+    ws = _make_project_workspace(tmp_path)
+    project_factory(project_id="kp-stale", workspace_path=str(ws), profile=discover_project(ws))
+    orch = Orchestrator()
+    inc = _incident_with_proposal("kp-stale")
+    inc.context["file_contents"] = {"app/services/payment.py": _BUGGY}
+    incident_store.update(inc)
+
+    changed = _BUGGY.replace(
+        "token = user.payment_method.token",
+        "token = user.primary_payment_method.token",
+    )
+    (ws / "app" / "services" / "payment.py").write_text(changed)
+
+    outcome = await orch.stage_workspace_apply(inc.id)
+
+    assert outcome["applied"] is False
+    assert outcome["conflict"] == "workspace_changed"
+    assert outcome["stale_files"] == ["app/services/payment.py"]
+    assert "File changed since diagnosis" in outcome["reason"]
+    assert (ws / "app" / "services" / "payment.py").read_text() == changed
 
 
 async def test_stage_apply_relocates_misnamed_patch_paths(

@@ -455,6 +455,21 @@ async def diagnose(incident_id: str, req: DiagnoseRequest | None = None) -> Diag
     return DiagnoseResponse(incident_id=incident_id, status=inc.status)
 
 
+@router.post("/{incident_id}/rediagnose", response_model=DiagnoseResponse)
+async def rediagnose(incident_id: str) -> DiagnoseResponse:
+    """Start a new diagnosis from this incident using a fresh source snapshot."""
+    _get_or_404(incident_id)
+    try:
+        fresh = await orchestrator.rediagnose(incident_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return DiagnoseResponse(
+        incident_id=fresh.id,
+        status=fresh.status,
+        message="Fresh diagnosis started from the current workspace state.",
+    )
+
+
 @router.post("/{incident_id}/cancel")
 async def cancel_diagnosis(incident_id: str) -> dict:
     inc = _get_or_404(incident_id)
@@ -544,10 +559,12 @@ async def approve_fix(incident_id: str, req: ApproveRequest) -> dict:
         return {"incident_id": incident_id, "approved": False}
 
     # Keep Changes: apply to the real workspace, then resume into sandbox
-    # verification (which runs against the pre-apply snapshot). When the
-    # workspace cannot be used (not synced / demo mode) this is a no-op and the
-    # classic sandbox-only verification still runs.
-    await orchestrator.stage_workspace_apply(incident_id)
+    # verification (which runs against the pre-apply snapshot). Never approve
+    # after an unexpected workspace failure; the only exception is the
+    # explicit read-only demo skip, which remains sandbox-only by design.
+    outcome = await orchestrator.stage_workspace_apply(incident_id)
+    if not outcome.get("applied") and not outcome.get("skipped"):
+        raise HTTPException(409, outcome.get("reason") or "Patch could not be applied.")
 
     success = await orchestrator.resume_fix(incident_id)
     if not success:

@@ -212,7 +212,8 @@ fix is regenerated with sandbox feedback; after the limit the incident stops in
 | POST   | `/api/incidents/sync-render`          | fetch Render entries + detect    |
 | GET    | `/api/incidents/{id}`                 | incident detail                  |
 | POST   | `/api/incidents/trigger/{scenario}`   | detect + start a seeded failure  |
-| POST   | `/api/incidents/{id}/diagnose`        | start diagnosis                  |
+| POST   | `/api/incidents/{id}/diagnose`        | start/resume diagnosis           |
+| POST   | `/api/incidents/{id}/rediagnose`      | start fresh from current source  |
 | POST   | `/api/incidents/{id}/cancel`          | cancel active diagnosis          |
 | GET    | `/api/incidents/{id}/status`          | live status + activity           |
 | GET    | `/api/incidents/{id}/context`         | retrieved context                |
@@ -221,6 +222,8 @@ fix is regenerated with sandbox feedback; after the limit the incident stops in
 | GET    | `/api/incidents/{id}/pr`              | PR information                   |
 | GET    | `/api/incidents/{id}/pr-status`       | PR + checks status               |
 | POST   | `/api/incidents/{id}/approve`         | human approve / reject           |
+| POST   | `/api/incidents/{id}/apply-fix`       | idempotently apply verified fix  |
+| POST   | `/api/incidents/{id}/commit`          | commit applied workspace change  |
 | POST   | `/api/incidents/{id}/create-pr`       | open the repair PR               |
 | GET    | `/api/incidents/{id}/stream`          | SSE live agent activity          |
 | GET    | `/api/projects` / `/{id}`             | project mapping                  |

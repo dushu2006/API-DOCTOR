@@ -116,7 +116,9 @@ async def test_approve_file_read_is_idempotent_after_resume(auth_headers):
 
 async def test_approve_fix_calls_resume(monkeypatch, auth_headers):
     inc = incident_store.create(Incident(status=IncidentStatus.AWAITING_FIX_APPROVAL))
+    stage = AsyncMock(return_value={"applied": True, "files": ["main.py"]})
     resume = AsyncMock(return_value=True)
+    monkeypatch.setattr(orchestrator, "stage_workspace_apply", stage)
     monkeypatch.setattr(orchestrator, "resume_fix", resume)
 
     transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
@@ -129,5 +131,70 @@ async def test_approve_fix_calls_resume(monkeypatch, auth_headers):
 
     assert response.status_code == 200
     assert response.json() == {"incident_id": inc.id, "approved": True}
+    stage.assert_awaited_once_with(inc.id)
     resume.assert_awaited_once_with(inc.id)
+
+
+async def test_approve_fix_allows_explicit_read_only_demo_skip(
+    monkeypatch, auth_headers
+):
+    inc = incident_store.create(Incident(status=IncidentStatus.AWAITING_FIX_APPROVAL))
+    stage = AsyncMock(return_value={
+        "applied": False,
+        "skipped": True,
+        "reason": "demo workspace is read-only",
+    })
+    resume = AsyncMock(return_value=True)
+    monkeypatch.setattr(orchestrator, "stage_workspace_apply", stage)
+    monkeypatch.setattr(orchestrator, "resume_fix", resume)
+
+    response = await _request(
+        "POST",
+        f"/api/incidents/{inc.id}/approve-fix",
+        auth_headers,
+        json={"approved": True},
+    )
+
+    assert response.status_code == 200
+    resume.assert_awaited_once_with(inc.id)
+
+
+async def test_approve_fix_does_not_resume_when_workspace_apply_fails(
+    monkeypatch, auth_headers
+):
+    inc = incident_store.create(Incident(status=IncidentStatus.AWAITING_FIX_APPROVAL))
+    stage = AsyncMock(return_value={
+        "applied": False,
+        "reason": "File changed since diagnosis — patch refused for safety.",
+    })
+    resume = AsyncMock(return_value=True)
+    monkeypatch.setattr(orchestrator, "stage_workspace_apply", stage)
+    monkeypatch.setattr(orchestrator, "resume_fix", resume)
+
+    response = await _request(
+        "POST",
+        f"/api/incidents/{inc.id}/approve-fix",
+        auth_headers,
+        json={"approved": True},
+    )
+
+    assert response.status_code == 409
+    assert "File changed since diagnosis" in response.json()["detail"]
+    resume.assert_not_awaited()
+
+
+async def test_rediagnose_returns_fresh_incident(monkeypatch, auth_headers):
+    original = incident_store.create(Incident(status=IncidentStatus.FIX_VERIFIED))
+    fresh = Incident(project_id=original.project_id, status=IncidentStatus.RECEIVED)
+    rediagnose = AsyncMock(return_value=fresh)
+    monkeypatch.setattr(orchestrator, "rediagnose", rediagnose)
+
+    response = await _request(
+        "POST", f"/api/incidents/{original.id}/rediagnose", auth_headers
+    )
+
+    assert response.status_code == 200
+    assert response.json()["incident_id"] == fresh.id
+    assert response.json()["status"] == "RECEIVED"
+    rediagnose.assert_awaited_once_with(original.id)
 

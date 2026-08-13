@@ -331,6 +331,41 @@ async def test_pipeline_fails_gracefully_when_no_workspace(monkeypatch):
     assert "workspace" in (persisted.error_message or "").lower()
 
 
+async def test_rediagnose_creates_fresh_incident_without_stale_outputs(monkeypatch):
+    orch = Orchestrator()
+    original = incident_store.create(Incident(
+        project_id="fresh-project",
+        status=IncidentStatus.FIX_VERIFIED,
+        detection={"endpoint": "/orders", "nested": {"value": 1}},
+        request_snapshot={"method": "GET", "path": "/orders"},
+        stack_trace="ValueError: stale",
+        context={"file_contents": {"db.py": "old"}, "_complete": True},
+        root_cause={"root_cause": "old"},
+        fix_proposal={"diff": "old"},
+        sandbox_result={"passed": True},
+    ))
+    started: list[str] = []
+    monkeypatch.setattr(
+        orch, "start_diagnosis", lambda incident_id: started.append(incident_id) or True
+    )
+
+    fresh = await orch.rediagnose(original.id)
+
+    assert fresh.id != original.id
+    assert fresh.status == IncidentStatus.RECEIVED
+    assert fresh.project_id == original.project_id
+    assert fresh.stack_trace == original.stack_trace
+    assert fresh.context is None
+    assert fresh.root_cause is None
+    assert fresh.fix_proposal is None
+    assert fresh.sandbox_result is None
+    assert fresh.detection["rediagnosis_of"] == original.id
+    assert started == [fresh.id]
+    # Nested input data is independent from the historical incident.
+    fresh.detection["nested"]["value"] = 2
+    assert incident_store.get(original.id).detection["nested"]["value"] == 1
+
+
 async def test_create_pull_request_requires_synchronized_workspace(monkeypatch):
     """create_pull_request must refuse (clear error) when the project has no
     workspace, and not read from a stale repo_root."""
