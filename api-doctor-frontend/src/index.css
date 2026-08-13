@@ -151,6 +151,145 @@ html, body, #root {
   background: var(--color-accent);
 }
 
+/* ----------------------------------------------------------------------- */
+/* Editor tab strip (VS Code semantics: click to open, x to close,          */
+/* middle-click closes; 150–200ms transitions only)                         */
+/* ----------------------------------------------------------------------- */
+.tabstrip {
+  display: flex;
+  height: 100%;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-color) transparent;
+}
+
+.tabstrip-tab {
+  height: 100%;
+  padding: 0 8px 0 12px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-shrink: 0;
+  max-width: 190px;
+  background: transparent;
+  border-right: 1px solid var(--border-color);
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.tabstrip-tab:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.tabstrip-tab.is-active {
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  border-bottom-color: var(--color-accent);
+}
+
+.tabstrip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tabstrip-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.tabstrip-tab:hover .tabstrip-close,
+.tabstrip-tab.is-active .tabstrip-close,
+.tabstrip-close:focus-visible {
+  opacity: 1;
+}
+
+.tabstrip-close:hover {
+  background: var(--surface-2);
+  color: var(--text-primary);
+}
+
+/* ----------------------------------------------------------------------- */
+/* Auth layout responsiveness (register card collapses to one column)       */
+/* ----------------------------------------------------------------------- */
+
+/* Back-to-login escape hatch on the register form (top-left of the form
+   column). Ghost button: quiet until hovered, amber focus ring comes from
+   the global :focus-visible rule. */
+.auth-back {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.auth-back:hover {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+  background: var(--surface-hover);
+}
+
+.auth-shell {
+  display: flex;
+}
+
+.auth-aside {
+  width: 42%;
+}
+
+.auth-main {
+  flex: 1;
+  min-width: 0;
+}
+
+@media (max-width: 860px) {
+  .auth-shell {
+    flex-direction: column;
+    min-height: auto;
+  }
+
+  .auth-aside {
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--border-color);
+    padding: 24px 24px 20px;
+  }
+
+  .auth-main {
+    padding: 24px;
+  }
+}
+
 /* Monospace text helper */
 .font-mono {
   font-family: var(--font-mono);

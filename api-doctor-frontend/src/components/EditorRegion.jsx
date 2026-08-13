@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Lock,
   FileCode,
@@ -22,10 +22,19 @@ export default function EditorRegion({
   onApproveFix,
   highlightLine = null,
   failureReason = '',
-  isProjectConnected = false
+  isProjectConnected = false,
+  openFiles = [],
+  onSelectTab,
+  onCloseTab
 }) {
   const [activeDiffPath, setActiveDiffPath] = useState('');
   const [calloutDismissed, setCalloutDismissed] = useState(false);
+  const activeTabRef = useRef(null);
+
+  // Keep the active tab visible when the strip overflows horizontally.
+  useEffect(() => {
+    activeTabRef.current?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }, [selectedFile, openFiles.length]);
 
   const diffFiles = useMemo(
     () => (incidentDiff?.present && Array.isArray(incidentDiff.files) ? incidentDiff.files : []),
@@ -48,13 +57,14 @@ export default function EditorRegion({
     setCalloutDismissed(false);
   }, [selectedFile, highlightLine]);
 
-  const openTabs = selectedFile ? [
-    {
-      path: selectedFile,
-      name: selectedFile.split('/').pop(),
-      isAgentActive: isDiagnosing
-    },
-  ] : [];
+  // VS Code-style persistent tabs come from App state; while an older bundle
+  // or edge path supplies none, fall back to showing just the current file.
+  const openTabs = (openFiles.length ? openFiles : (selectedFile ? [selectedFile] : []))
+    .map(path => ({
+      path,
+      name: path.split('/').pop(),
+      isAgentActive: isDiagnosing && path === selectedFile
+    }));
 
   // Determine code to display: prioritize real fileContent from workspace,
   // then snippet from incidentContext.
@@ -101,32 +111,52 @@ export default function EditorRegion({
         justifyContent: 'space-between',
         paddingRight: '12px'
       }}>
-        <div style={{ display: 'flex', height: '100%' }}>
+        <div className="tabstrip" role="tablist" aria-label="Open files">
           {openTabs.map(tab => {
             const isActive = selectedFile === tab.path;
             return (
               <div
                 key={tab.path}
-                style={{
-                  height: '100%',
-                  padding: '0 14px',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '8px',
-                  backgroundColor: isActive ? 'var(--bg-canvas)' : 'transparent',
-                  borderRight: '1px solid var(--border-color)',
-                  borderBottom: isActive
-                    ? (tab.isAgentActive ? '2px solid var(--color-accent)' : '2px solid #ffffff')
-                    : 'none',
-                  cursor: 'pointer',
-                  color: isActive ? 'var(--text-primary)' : 'var(--text-muted)',
-                  fontSize: '12px',
-                  fontFamily: 'var(--font-mono)'
+                role="tab"
+                aria-selected={isActive}
+                tabIndex={0}
+                ref={isActive ? activeTabRef : undefined}
+                className={`tabstrip-tab${isActive ? ' is-active' : ''}`}
+                title={tab.path}
+                onClick={() => onSelectTab ? onSelectTab(tab.path) : undefined}
+                onMouseDown={(e) => {
+                  // VS Code: middle-click a tab closes it.
+                  if (e.button === 1 && onCloseTab) {
+                    e.preventDefault();
+                    onCloseTab(tab.path);
+                  }
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    onSelectTab?.(tab.path);
+                  } else if (e.key === 'Delete' && onCloseTab) {
+                    e.preventDefault();
+                    onCloseTab(tab.path);
+                  }
                 }}
               >
-                <FileCode size={13} style={{ color: '#3572A5' }} />
-                <span>{tab.name}</span>
-                {tab.isAgentActive && <span className="agent-dot" style={{ width: '6px', height: '6px' }} />}
+                <FileCode size={13} style={{ color: '#3572A5', flexShrink: 0 }} />
+                <span className="tabstrip-name">{tab.name}</span>
+                {tab.isAgentActive && <span className="agent-dot" style={{ width: '6px', height: '6px', flexShrink: 0 }} />}
+                <button
+                  type="button"
+                  className="tabstrip-close"
+                  title={`Close ${tab.name}`}
+                  aria-label={`Close ${tab.name}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onCloseTab?.(tab.path);
+                  }}
+                  onMouseDown={(e) => e.stopPropagation()}
+                >
+                  <X size={12} />
+                </button>
               </div>
             );
           })}
