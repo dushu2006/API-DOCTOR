@@ -18,19 +18,28 @@ import {
   History,
   RefreshCw,
   AlertTriangle,
-  BadgeCheck
+  BadgeCheck,
+  Siren,
+  Zap,
+  FolderSearch,
+  Search,
+  Wrench,
+  FlaskConical
 } from 'lucide-react';
 import './doctor.css';
 
 /* ---------------------------------------------------------------------------
  * API Doctor agent panel — retro operator console.
  * Visual language mirrors the reference diagnosis report: thin framed cards,
- * sunken consoles, circled status checks, beveled CTAs, tracked kickers.
+ * sunken consoles, circled status checks, beveled CTAs, tracked kickers —
+ * and the agent's work is presented as a numbered STEP-BY-STEP ANALYSIS:
+ * one phase after the other, each filling in live as the pipeline runs.
  * All behaviour (props/handlers) is unchanged from the previous panel.
  * ------------------------------------------------------------------------- */
 
 const STEP_LABELS = {
   pipeline: 'Diagnosis pipeline',
+  pipeline_error: 'Pipeline error',
   repository_check: 'Verifying repository workspace',
   repository_connected: 'Repository connected',
   github_connected: 'Repository connected',
@@ -40,6 +49,7 @@ const STEP_LABELS = {
   project_discovered: 'Project discovered',
   logs_retrieved: 'Logs retrieved',
   error_detected: 'Error detected',
+  duplicate_suppressed: 'Duplicate incident suppressed',
   rediagnosis_requested: 'Fresh diagnosis requested',
   stack_trace_parsed: 'Stack trace parsed',
   relevant_source_identified: 'Relevant files identified',
@@ -53,6 +63,7 @@ const STEP_LABELS = {
   fix_generated: 'Generating fix',
   fix_regenerating: 'Regenerating fix',
   fix_approval: 'Fix approval',
+  fix_rejected: 'Patch rejected',
   diff_ready: 'Proposed diff ready',
   changes_applied: 'Applying changes to workspace',
   changes_rolled_back: 'Workspace rollback',
@@ -61,33 +72,114 @@ const STEP_LABELS = {
   tests_started: 'Running tests',
   test_passed: 'Tests passed',
   fix_verified: 'Fix verified',
+  human_review: 'Human review',
+  reproduce_failure: 'Reproduce failure',
+  apply_patch: 'Apply patch',
+  run_tests: 'Run test suite',
+  run_build: 'Build / syntax check',
+  health_check: 'Service health check',
+  verify_fix: 'Verify fix',
   local_commit: 'Local commit',
   branch_created: 'Repair branch created',
   commit_created: 'Commit created',
-  pr_created: 'Pull request created',
-  fix_rejected: 'Patch rejected'
+  pr_created: 'Pull request created'
 };
+
+/* ---------------------------------------------------------------------------
+ * The agent pipeline, as a fixed ordered sequence of phases. Each phase maps
+ * the real backend events (SSE / incident activity) into ONE numbered block,
+ * rendered one after the other — the step-by-step analysis structure.
+ * ------------------------------------------------------------------------- */
+const PHASES = [
+  {
+    id: 'detect',
+    title: 'Failure Detection',
+    icon: Siren,
+    steps: ['logs_retrieved', 'error_detected', 'duplicate_suppressed', 'rediagnosis_requested']
+  },
+  {
+    id: 'workspace',
+    title: 'Workspace & Repository',
+    icon: GitBranch,
+    steps: [
+      'repository_check',
+      'repository_connected',
+      'github_connected',
+      'repository_verified',
+      'repository_synced',
+      'repository_synchronized',
+      'project_discovered'
+    ]
+  },
+  {
+    id: 'trace',
+    title: 'Stack Trace Analysis',
+    icon: Zap,
+    steps: ['stack_trace_parsed']
+  },
+  {
+    id: 'files',
+    title: 'Relevant File Identification',
+    icon: FolderSearch,
+    steps: ['collecting_context', 'relevant_source_identified', 'files_to_read', 'file_read_approval']
+  },
+  {
+    id: 'read',
+    title: 'Source Reading',
+    icon: FileText,
+    steps: ['file_read']
+  },
+  {
+    id: 'root',
+    title: 'Root Cause Investigation',
+    icon: Search,
+    steps: ['investigating', 'investigation_started', 'root_cause_identified']
+  },
+  {
+    id: 'fix',
+    title: 'Fix Generation',
+    icon: Wrench,
+    steps: ['fix_generated', 'fix_regenerating', 'fix_approval', 'fix_rejected', 'diff_ready']
+  },
+  {
+    id: 'verify',
+    title: 'Sandbox Verification',
+    icon: FlaskConical,
+    steps: [
+      'sandbox_started',
+      'tests_started',
+      'reproduce_failure',
+      'apply_patch',
+      'run_tests',
+      'run_build',
+      'health_check',
+      'verify_fix',
+      'test_passed',
+      'fix_verified',
+      'changes_applied',
+      'changes_rolled_back',
+      'workspace_updated',
+      'pipeline_error'
+    ]
+  },
+  {
+    id: 'deliver',
+    title: 'Delivery',
+    icon: GitPullRequest,
+    steps: ['local_commit', 'branch_created', 'commit_created', 'pr_created', 'human_review']
+  }
+];
 
 // Steps that repeat with a different target per event (one row per file).
 const REPEATING_STEPS = new Set(['file_read']);
 
-const AGENT_ROLES = [
-  { id: 'detector', name: 'Failure detector', steps: ['error_detected', 'logs_retrieved', 'stack_trace_parsed'], glyph: '◈' },
-  { id: 'file-determiner', name: 'File determiner', steps: ['relevant_source_identified', 'files_to_read', 'file_read', 'collecting_context'], glyph: '⌁' },
-  { id: 'investigator', name: 'Investigator', steps: ['investigating', 'root_cause_identified'], glyph: '◉' },
-  { id: 'coder', name: 'Coder', steps: ['fix_generated', 'diff_ready', 'fix_approval'], glyph: '⌘' },
-  { id: 'tester', name: 'Tester', steps: ['sandbox_started', 'tests_started', 'test_passed', 'fix_verified'], glyph: '✓' }
-];
-
-function agentState(role, rows) {
-  const relevant = rows.filter(row => role.steps.includes(row.step));
-  if (!relevant.length) return { state: 'idle', detail: 'Waiting to start' };
-  const running = relevant.find(row => row.status === 'running' || row.status === 'pending' || row.status === 'paused');
-  const failed = relevant.find(row => row.status === 'failed' || row.status === 'cancelled');
-  const completed = [...relevant].reverse().find(row => row.status === 'done');
-  if (running) return { state: 'working', detail: running.message || 'Working' };
-  if (failed) return { state: 'failed', detail: failed.message || 'Stage failed' };
-  return { state: 'done', detail: completed?.message || 'Completed' };
+function phaseState(rows) {
+  if (!rows.length) return 'idle';
+  const failed = rows.some(r => r.status === 'failed' || r.status === 'cancelled');
+  const working = rows.some(r => r.status === 'running' || r.status === 'pending' || r.status === 'paused');
+  if (failed) return 'failed';
+  if (working) return 'working';
+  return 'done';
 }
 
 function normalizeFileReadMessage(message = '') {
@@ -178,56 +270,28 @@ function StatusDot({ tone }) {
   );
 }
 
-function TimelineRow({ row }) {
+function PhaseRow({ row }) {
   const isRunning = row.status === 'running';
   const isPending = row.status === 'pending' || row.status === 'paused';
   const isFailed = row.status === 'failed' || row.status === 'cancelled';
   const detail = row.message && row.message !== row.label ? row.message : '';
   const tone = isRunning ? 'run' : isPending ? 'wait' : isFailed ? 'bad' : 'ok';
-  const rowClass = isFailed ? 'dr-event dr-event-failed' : isRunning ? 'dr-event dr-event-running' : 'dr-event';
+  const rowClass = isFailed
+    ? 'dr-phase-row dr-phase-row-failed'
+    : isRunning
+      ? 'dr-phase-row dr-phase-row-running'
+      : 'dr-phase-row';
 
   return (
     <div className={rowClass}>
       <StatusDot tone={tone} />
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'baseline' }}>
-          <span className="dr-event-label">
-            {row.label}{isRunning && !detail ? '…' : ''}
-          </span>
-          <span className="dr-event-time">{row.time ? row.time.toLocaleTimeString() : ''}</span>
-        </div>
-        {detail && <div className="dr-event-detail">{detail}</div>}
+      <div className="dr-phase-row-main">
+        <span className="dr-phase-row-label">
+          {row.label}{isRunning && !detail ? '…' : ''}
+        </span>
+        {detail && <span className="dr-phase-row-detail">{detail}</span>}
       </div>
-    </div>
-  );
-}
-
-function AgentTeam({ rows }) {
-  return (
-    <div>
-      <Kicker>AGENT TEAM</Kicker>
-      <div className="dr-agent-grid" style={{ marginTop: 8 }}>
-        {AGENT_ROLES.map(role => {
-          const { state, detail } = agentState(role, rows);
-          const color =
-            state === 'working' ? 'var(--dr-amber)'
-            : state === 'failed' ? 'var(--dr-red)'
-            : state === 'done' ? 'var(--dr-green)'
-            : 'var(--dr-faint)';
-          return (
-            <div key={role.id} title={detail} className="dr-agent-tile dr-well">
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, color }}>
-                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, width: 14, textAlign: 'center' }}>{role.glyph}</span>
-                <span className="dr-agent-name" style={{ color: 'var(--dr-text)' }}>{role.name}</span>
-                {state === 'working' && <span className="dr-pulse" style={{ marginLeft: 'auto', width: 7, height: 7 }} />}
-              </div>
-              <div className="dr-agent-state" style={{ color }}>
-                {state === 'idle' ? 'Not started' : state === 'working' ? 'In progress' : state === 'failed' ? 'Failed' : 'Complete'}
-              </div>
-            </div>
-          );
-        })}
-      </div>
+      <span className="dr-phase-row-time">{row.time ? row.time.toLocaleTimeString() : ''}</span>
     </div>
   );
 }
@@ -259,12 +323,23 @@ export default function APIDoctorPanel({
   isDoctorOpen = true,
   setIsDoctorOpen,
   setSelectedFile,
-  setIsDiffMode
+  setIsDiffMode,
+  demoMode = false,
+  onRunDemoScenario,
+  isDemoPending = false
 }) {
-  const [expandedFiles, setExpandedFiles] = useState(true);
   const [historyOpen, setHistoryOpen] = useState(false);
 
   const timelineRows = useMemo(() => buildTimeline(timelineEvents), [timelineEvents]);
+
+  const phases = useMemo(
+    () =>
+      PHASES.map(def => {
+        const rows = timelineRows.filter(row => def.steps.includes(row.step));
+        return { ...def, rows, state: phaseState(rows) };
+      }),
+    [timelineRows]
+  );
 
   const rootCause = activeIncident?.root_cause;
   const confidence = Number.isFinite(Number(rootCause?.confidence))
@@ -274,18 +349,16 @@ export default function APIDoctorPanel({
 
   /* ----- chat-style auto-scroll ------------------------------------------
    * The panel behaves like an AI chat console: while the agent streams,
-   * the view is pinned to the newest output so the latest response is
-   * always visible. Scrolling up releases the pin (reading history is
-   * never yanked away); scrolling back near the bottom — or clicking the
-   * "new activity" pill — re-pins it. Starting a diagnosis always re-pins
-   * and jumps to the live edge, like sending a chat message.
+   * the view is pinned to the newest output so the latest step is always
+   * visible. Scrolling up releases the pin (reading history is never yanked
+   * away); scrolling back near the bottom — or clicking the "new activity"
+   * pill — re-pins it. Starting a diagnosis always re-pins and jumps to the
+   * live edge, like sending a chat message.
    * ---------------------------------------------------------------------- */
   const bodyRef = useRef(null);
-  const timelineRef = useRef(null);
   const actionCardRef = useRef(null);
   const [pinned, setPinned] = useState(true); // body follows the live output
   const stickRef = useRef(true);              // instant mirror of `pinned` for handlers/effects
-  const wellStickRef = useRef(true);          // separate stick flag for the timeline console
   const lastIncidentId = useRef(null);
   const wasDiagnosing = useRef(false);
 
@@ -303,10 +376,6 @@ export default function APIDoctorPanel({
     const el = bodyRef.current;
     if (el) el.scrollTo({ top: el.scrollHeight, behavior });
   };
-  const tailWell = () => {
-    const el = timelineRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  };
 
   // Statuses that mean "the agent is (or may still be) working right now"
   // — those incidents open pinned to the live edge instead of the top.
@@ -318,10 +387,9 @@ export default function APIDoctorPanel({
     // (chat behaviour); a finished one opens at the top of its report.
     if (activeIncident?.id !== lastIncidentId.current) {
       lastIncidentId.current = activeIncident?.id || null;
-      wellStickRef.current = true;
       if (activeIncident && (isDiagnosing || isLiveStatus(activeIncident.status))) {
         setStick(true);
-        requestAnimationFrame(() => { tailBody(); tailWell(); });
+        requestAnimationFrame(() => { tailBody(); });
       } else {
         setStick(false);
         if (bodyRef.current) bodyRef.current.scrollTop = 0;
@@ -334,19 +402,15 @@ export default function APIDoctorPanel({
     // A diagnosis run starting (including a re-run on the same incident)
     // always re-pins and jumps to the live stream.
     if (isDiagnosing && !wasDiagnosing.current) {
-      wellStickRef.current = true;
       setStick(true);
-      requestAnimationFrame(() => { tailBody(); tailWell(); });
+      requestAnimationFrame(() => { tailBody(); });
     }
     wasDiagnosing.current = Boolean(isDiagnosing);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isDiagnosing]);
 
   useEffect(() => {
-    // New agent output arrived: follow it only while pinned. The timeline
-    // console keeps its own stick flag so reading old events inside it
-    // never fights the outer follow behaviour.
-    if (wellStickRef.current) tailWell();
+    // New agent output arrived: follow it only while pinned.
     if (stickRef.current) tailBody();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [streamSignature]);
@@ -376,15 +440,8 @@ export default function APIDoctorPanel({
     if (!el) return;
     setStick(el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX);
   };
-  const handleTimelineScroll = () => {
-    const el = timelineRef.current;
-    if (!el) return;
-    wellStickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-  };
   const jumpToLatest = () => {
-    wellStickRef.current = true;
     setStick(true);
-    tailWell();
     tailBody('smooth');
   };
   const streamLive = Boolean(isDiagnosing) || lastRow?.status === 'running' ||
@@ -443,6 +500,318 @@ export default function APIDoctorPanel({
 
   const historyItems = (incidentsList || []).filter(inc => inc.id !== activeIncident?.id);
   const showGitOps = Boolean(branchName || commitSha || prPresent || (isVerified && appliedFiles.length && !commitSha) || (isVerified && !prPresent));
+  const implicatedFiles = incidentContext?.implicated_files?.length
+    ? incidentContext.implicated_files
+    : (activeIncident?.context?.affected_files || []);
+
+  const phaseColor = state =>
+    state === 'working' ? 'var(--dr-amber)'
+      : state === 'failed' ? 'var(--dr-red)'
+        : state === 'done' ? 'var(--dr-green)'
+          : 'var(--dr-faint)';
+
+  const phaseStateLabel = {
+    idle: 'Not started',
+    working: 'In progress',
+    done: 'Completed',
+    failed: 'Failed'
+  };
+
+  /* ----- per-phase analysis results (rendered inside each step) --------- */
+  const renderPhaseExtras = (phaseId) => {
+    switch (phaseId) {
+      case 'files': {
+        if (isAwaitingFileRead) {
+          return (
+            <div ref={actionCardRef} className="dr-step-inset dr-step-inset-gate">
+              <Kicker><span style={{ color: 'var(--dr-amber)' }}>APPROVAL REQUIRED — NOTHING READ YET</span></Kicker>
+              <p style={{ fontSize: 11, color: 'var(--dr-dim)', margin: '8px 0 10px', lineHeight: 1.5 }}>
+                The agent identified these files and wants to read them. Nothing is read until you approve.
+              </p>
+              <div className="dr-well dr-scroll-thin" style={{ padding: '6px 8px', marginBottom: 12, maxHeight: 120, overflowY: 'auto' }}>
+                {implicatedFiles.map(filePath => (
+                  <div key={filePath} style={{ padding: '2px 0', fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--dr-text)' }}>
+                    <ChevronRight size={10} style={{ marginRight: 4, verticalAlign: 'middle', color: 'var(--dr-amber)' }} />
+                    {filePath}
+                  </div>
+                ))}
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button disabled={isIncidentActionPending} onClick={() => onApproveFileRead(true)} className="dr-btn dr-btn-green" style={{ flex: 1, padding: '7px 10px' }}>
+                  <Check size={13} strokeWidth={3} />
+                  <span>{isIncidentActionPending ? 'Recording…' : 'Approve Reading'}</span>
+                </button>
+                <button disabled={isIncidentActionPending} onClick={() => onApproveFileRead(false)} className="dr-btn" style={{ flex: 1, padding: '7px 10px' }}>
+                  Deny
+                </button>
+              </div>
+            </div>
+          );
+        }
+        if (implicatedFiles.length > 0) {
+          return (
+            <div className="dr-well" style={{ marginTop: 2 }}>
+              {implicatedFiles.map(filePath => (
+                <div key={filePath} className="dr-file-row" onClick={() => setSelectedFile(filePath)}>
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 6, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    <Check size={11} strokeWidth={3} style={{ color: 'var(--dr-green)', flexShrink: 0 }} />
+                    <span>{filePath}</span>
+                  </span>
+                  <ChevronRight size={11} style={{ color: 'var(--dr-faint)', flexShrink: 0 }} />
+                </div>
+              ))}
+            </div>
+          );
+        }
+        return null;
+      }
+
+      case 'root': {
+        if (!rootCause) return null;
+        return (
+          <div className="dr-step-inset">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: confidencePercent !== null ? 10 : 0 }}>
+              <span style={{ fontSize: 10, color: 'var(--dr-dim)', fontFamily: 'var(--font-heading)', letterSpacing: '0.04em', fontWeight: 700 }}>
+                {classification ? classification.replace(/_/g, ' ') : 'ROOT CAUSE'}
+              </span>
+              {confidencePercent !== null && (
+                <span style={{ color: 'var(--dr-green)', fontWeight: 700, fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+                  {confidencePercent}% confidence
+                </span>
+              )}
+            </div>
+            {confidencePercent !== null && (
+              <div className="dr-meter" style={{ marginBottom: 10 }}>
+                <div className="dr-meter-fill" style={{ width: `${confidencePercent}%` }} />
+              </div>
+            )}
+            <p style={{ fontSize: 12, lineHeight: 1.5, marginBottom: 6 }}>
+              {rootCause.root_cause || 'Root cause identified.'}
+            </p>
+            {rootCause.reason && (
+              <p style={{ fontSize: 11, color: 'var(--dr-dim)', lineHeight: 1.5, marginBottom: 8 }}>
+                {rootCause.reason}
+              </p>
+            )}
+            {rootCause.recommended_action && (
+              <div className="dr-notice dr-notice-amber" style={{ marginBottom: 10 }}>
+                <strong>Action:</strong> {rootCause.recommended_action}
+              </div>
+            )}
+            {rootCause.affected_files?.[0] && (
+              <button onClick={() => setSelectedFile(rootCause.affected_files[0])} className="dr-btn dr-btn-block" style={{ padding: '7px 10px' }}>
+                <span>Open {rootCause.affected_files[0]}</span>
+                <ArrowUpRight size={12} />
+              </button>
+            )}
+          </div>
+        );
+      }
+
+      case 'fix': {
+        if (!incidentDiff || !incidentDiff.present) return null;
+        return (
+          <div
+            ref={isAwaitingFix && !needsFreshDiagnosis ? actionCardRef : undefined}
+            className={`dr-step-inset${isAwaitingFix && !needsFreshDiagnosis ? ' dr-step-inset-gate' : ''}`}
+          >
+            <div style={{ fontSize: 10, color: 'var(--dr-faint)', fontFamily: 'var(--font-mono)' }}>
+              {incidentDiff.files_changed?.length || 1} file(s) changed
+            </div>
+            <p style={{ fontSize: 12, margin: '6px 0 10px', lineHeight: 1.45 }}>{incidentDiff.summary}</p>
+
+            {appliedFiles.length > 0 ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 7, color: 'var(--dr-green)', fontSize: 12, fontWeight: 700 }}>
+                  <StatusDot tone="ok" />
+                  <span>Changes applied to workspace</span>
+                </div>
+                <div className="dr-well" style={{ padding: '6px 10px', fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--dr-dim)' }}>
+                  {appliedFiles.map(f => <div key={f}>• {f}</div>)}
+                </div>
+                <button onClick={() => setIsDiffMode(true)} className="dr-link" style={{ alignSelf: 'flex-start' }}>
+                  Review Diff
+                </button>
+              </div>
+            ) : isAwaitingFix && !needsFreshDiagnosis ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <Kicker><span style={{ color: 'var(--dr-amber)' }}>REVIEW REQUIRED</span></Kicker>
+                <button disabled={isIncidentActionPending} onClick={() => onKeepChanges()} className="dr-btn dr-btn-green dr-btn-block" style={{ padding: '8px 10px' }}>
+                  <Check size={13} strokeWidth={3} />
+                  <span>{isIncidentActionPending ? 'Applying…' : 'Keep Changes'}</span>
+                </button>
+                <div style={{ fontSize: 10, color: 'var(--dr-faint)', lineHeight: 1.5 }}>
+                  Applies the patch to your workspace, then verifies it in an isolated sandbox copy. If verification fails, the workspace is restored automatically.
+                </div>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                  <button disabled={isIncidentActionPending} onClick={() => onRejectChanges()} className="dr-btn" style={{ flex: 1, padding: '7px 10px' }}>
+                    Reject
+                  </button>
+                  <button onClick={() => setIsDiffMode(true)} className="dr-link">
+                    Review Diff
+                  </button>
+                </div>
+              </div>
+            ) : needsFreshDiagnosis ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <div className="dr-notice dr-notice-red">
+                  {applyFailure?.message || 'This patch did not pass verification and cannot be applied safely.'}
+                </div>
+                {onRediagnose && (
+                  <button disabled={isIncidentActionPending} onClick={() => onRediagnose()} className="dr-btn dr-btn-blue dr-btn-block" style={{ padding: '8px 10px' }}>
+                    <RefreshCw size={13} />
+                    <span>{isIncidentActionPending ? 'Starting…' : 'Re-run Diagnosis'}</span>
+                  </button>
+                )}
+                <button onClick={() => setIsDiffMode(true)} className="dr-link" style={{ alignSelf: 'flex-start' }}>
+                  Review Previous Diff
+                </button>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {onApplyFix && isVerified && (
+                  <button disabled={isIncidentActionPending} onClick={() => onApplyFix()} className="dr-btn dr-btn-green dr-btn-block" style={{ padding: '8px 10px' }}>
+                    <Check size={13} strokeWidth={3} />
+                    <span>{isIncidentActionPending ? 'Applying…' : 'Apply to Workspace'}</span>
+                  </button>
+                )}
+                <button onClick={() => setIsDiffMode(true)} className="dr-link" style={{ alignSelf: 'flex-start' }}>
+                  Review Diff
+                </button>
+              </div>
+            )}
+          </div>
+        );
+      }
+
+      case 'verify': {
+        if (!incidentSandbox || !incidentSandbox.present) {
+          if (wasRolledBack) {
+            return (
+              <div className="dr-notice dr-notice-red">
+                Verification failed — your workspace was restored to the original code. Re-run the diagnosis to generate a fresh patch.
+              </div>
+            );
+          }
+          return null;
+        }
+        return (
+          <div className="dr-step-inset">
+            {wasRolledBack && (
+              <div className="dr-notice dr-notice-red" style={{ marginBottom: 10 }}>
+                Verification failed — your workspace was restored to the original code. Re-run the diagnosis to generate a fresh patch.
+              </div>
+            )}
+            <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
+              <span style={{ fontSize: 11, fontWeight: 600, color: '#c8ccd4', fontFamily: 'var(--font-heading)', letterSpacing: '0.03em' }}>
+                Test Suite Result
+              </span>
+              <span style={{ fontSize: 12, fontWeight: 700, color: failedCount === 0 && incidentSandbox.passed ? 'var(--dr-green)' : 'var(--dr-red)', fontFamily: 'var(--font-mono)' }}>
+                {suiteTotal ? `${passedCount} passed · ${failedCount} failed` : incidentSandbox.passed ? 'All checks passed' : 'Checks failed'}
+              </span>
+            </div>
+            <div className="dr-meter" style={{ marginTop: 10 }}>
+              <div className={`dr-meter-fill ${failedCount ? 'dr-meter-fill-bad' : ''}`} style={{ width: `${suitePercent}%` }} />
+            </div>
+            <hr className="dr-rule" style={{ margin: '10px 0' }} />
+            <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 11 }}>
+              <BadgeCheck size={13} style={{ color: regressionPassed ? 'var(--dr-green)' : 'var(--dr-red)' }} />
+              <span style={{ color: 'var(--dr-dim)' }}>Regression:</span>
+              <span style={{ fontWeight: 700, color: regressionPassed ? 'var(--dr-green)' : 'var(--dr-red)' }}>
+                {regressionPassed ? 'Passed' : 'Failed'}
+              </span>
+            </div>
+            {suiteTotal > 0 && (
+              <div className="dr-well" style={{ marginTop: 10, padding: '7px 10px', display: 'flex', flexDirection: 'column', gap: 4 }}>
+                {sandboxSteps.map(step => (
+                  <div key={step.name} style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--dr-dim)' }}>
+                    {step.passed
+                      ? <Check size={11} strokeWidth={3} style={{ color: 'var(--dr-green)' }} />
+                      : <XCircle size={11} style={{ color: 'var(--dr-red)' }} />}
+                    <span>{String(step.name).replace(/_/g, ' ')}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {!incidentSandbox.passed && incidentSandbox.error && (
+              <div className="dr-notice dr-notice-red" style={{ marginTop: 10, fontFamily: 'var(--font-mono)' }}>
+                {incidentSandbox.error}
+              </div>
+            )}
+          </div>
+        );
+      }
+
+      case 'deliver': {
+        if (!showGitOps) return null;
+        return (
+          <div className="dr-step-inset" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {branchName && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
+                <StatusDot tone="ok" />
+                <span style={{ color: 'var(--dr-dim)' }}>Branch created:</span>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--dr-text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{branchName}</span>
+              </div>
+            )}
+            {commitSha ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
+                <StatusDot tone="ok" />
+                <span style={{ color: 'var(--dr-dim)' }}>Changes committed</span>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--dr-text)' }}>({String(commitSha).slice(0, 7)})</span>
+              </div>
+            ) : isVerified && appliedFiles.length > 0 && onCommitChanges ? (
+              <button disabled={isIncidentActionPending} onClick={onCommitChanges} className="dr-btn dr-btn-block" style={{ padding: '7px 10px' }}>
+                <GitCommit size={13} />
+                <span>{isIncidentActionPending ? 'Committing…' : 'Commit Changes'}</span>
+              </button>
+            ) : null}
+
+            {(prPresent || (isVerified && onCreatePR)) && (
+              <div className="dr-card" style={{ background: 'var(--dr-surface-2)', padding: 13 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, fontFamily: 'var(--font-heading)', letterSpacing: '0.02em', marginBottom: 3 }}>
+                  {fixTitle}
+                </div>
+                <div style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--dr-faint)', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 5 }}>
+                  <GitBranch size={11} />
+                  <span>{branchName || `api-doctor/fix/${activeIncident.id.slice(0, 8)}`}</span>
+                </div>
+
+                {prPresent && (
+                  <div style={{ marginBottom: 12 }}>
+                    <span className="dr-chip dr-chip-amber">
+                      <AlertTriangle size={10} />
+                      {incidentPR.status ? String(incidentPR.status) : 'Awaiting human review'}
+                    </span>
+                  </div>
+                )}
+
+                {prPresent ? (
+                  <a
+                    href={prUrl || '#'}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="dr-btn dr-btn-blue dr-btn-block"
+                    style={{ padding: '9px 10px', textDecoration: 'none', fontSize: 12 }}
+                  >
+                    <ArrowUpRight size={14} />
+                    <span>Open Pull Request</span>
+                  </a>
+                ) : (
+                  <button disabled={isIncidentActionPending} onClick={onCreatePR} className="dr-btn dr-btn-blue dr-btn-block" style={{ padding: '9px 10px', fontSize: 12 }}>
+                    <GitPullRequest size={14} />
+                    <span>{isIncidentActionPending ? 'Creating…' : 'Create Pull Request'}</span>
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      }
+
+      default:
+        return null;
+    }
+  };
 
   return (
     <div
@@ -505,7 +874,7 @@ export default function APIDoctorPanel({
         ref={bodyRef}
         onScroll={handleBodyScroll}
         className="dr-scroll-thin"
-        style={{ flex: 1, overflowY: 'auto', padding: '14px 12px', display: 'flex', flexDirection: 'column', gap: 16 }}
+        style={{ flex: 1, overflowY: 'auto', padding: '14px 12px', display: 'flex', flexDirection: 'column', gap: 14 }}
       >
         {/* ------------------------------------------------ idle state --- */}
         {!activeIncident && (
@@ -534,6 +903,18 @@ export default function APIDoctorPanel({
                 <FileText size={13} />
                 <span>Ingest Production Log / Error</span>
               </button>
+              {demoMode && onRunDemoScenario && (
+                <button
+                  onClick={() => onRunDemoScenario('external_api')}
+                  disabled={isDemoPending}
+                  className="dr-btn dr-btn-blue dr-btn-block"
+                  style={{ padding: '8px 12px' }}
+                  title="Run the full step-by-step diagnosis against the built-in demo API with a deterministic bug"
+                >
+                  <FlaskConical size={13} />
+                  <span>{isDemoPending ? 'Starting…' : 'Run Demo Diagnosis'}</span>
+                </button>
+              )}
             </div>
           </div>
         )}
@@ -578,332 +959,54 @@ export default function APIDoctorPanel({
               )}
             </div>
 
-            {/* File-read approval gate */}
-            {isAwaitingFileRead && (
-              <div ref={actionCardRef} className="dr-card" style={{ padding: 12, borderColor: 'rgba(245,165,36,0.45)' }}>
-                <Kicker><span style={{ color: 'var(--dr-amber)' }}>FILES TO READ — APPROVAL REQUIRED</span></Kicker>
-                <p style={{ fontSize: 11, color: 'var(--dr-dim)', margin: '8px 0 10px', lineHeight: 1.5 }}>
-                  The agent identified these files and wants to read them. Nothing is read until you approve.
-                </p>
-                <div className="dr-well dr-scroll-thin" style={{ padding: '6px 8px', marginBottom: 12, maxHeight: 120, overflowY: 'auto' }}>
-                  {(incidentContext?.implicated_files?.length
-                    ? incidentContext.implicated_files
-                    : activeIncident.context?.affected_files || []
-                  ).map(filePath => (
-                    <div key={filePath} style={{ padding: '2px 0', fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--dr-text)' }}>
-                      <ChevronRight size={10} style={{ marginRight: 4, verticalAlign: 'middle', color: 'var(--dr-amber)' }} />
-                      {filePath}
-                    </div>
-                  ))}
-                </div>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <button disabled={isIncidentActionPending} onClick={() => onApproveFileRead(true)} className="dr-btn dr-btn-green" style={{ flex: 1, padding: '7px 10px' }}>
-                    <Check size={13} strokeWidth={3} />
-                    <span>{isIncidentActionPending ? 'Recording…' : 'Approve Reading'}</span>
-                  </button>
-                  <button disabled={isIncidentActionPending} onClick={() => onApproveFileRead(false)} className="dr-btn" style={{ flex: 1, padding: '7px 10px' }}>
-                    Deny
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* Proposed patch gate / review */}
-            {incidentDiff && incidentDiff.present && (
-              <div
-                ref={isAwaitingFix && !needsFreshDiagnosis ? actionCardRef : undefined}
-                className="dr-card"
-                style={{ padding: 12, borderColor: isAwaitingFix && !needsFreshDiagnosis ? 'rgba(245,165,36,0.45)' : undefined }}
-              >
-                <Kicker>
-                  <span style={{ color: isAwaitingFix && !needsFreshDiagnosis ? 'var(--dr-amber)' : undefined }}>
-                    {isAwaitingFix && !needsFreshDiagnosis ? 'AI PROPOSED PATCH — REVIEW REQUIRED' : 'AI PROPOSED PATCH'}
-                  </span>
-                </Kicker>
-                <div style={{ fontSize: 10, color: 'var(--dr-faint)', marginTop: 6, fontFamily: 'var(--font-mono)' }}>
-                  {incidentDiff.files_changed?.length || 1} file(s) changed
-                </div>
-                <p style={{ fontSize: 12, margin: '8px 0 12px', lineHeight: 1.45 }}>{incidentDiff.summary}</p>
-
-                {appliedFiles.length > 0 ? (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 7, color: 'var(--dr-green)', fontSize: 12, fontWeight: 700 }}>
-                      <StatusDot tone="ok" />
-                      <span>Changes applied to workspace</span>
-                    </div>
-                    <div className="dr-well" style={{ padding: '6px 10px', fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--dr-dim)' }}>
-                      {appliedFiles.map(f => <div key={f}>• {f}</div>)}
-                    </div>
-                    <button onClick={() => setIsDiffMode(true)} className="dr-link" style={{ alignSelf: 'flex-start' }}>
-                      Review Diff
-                    </button>
-                  </div>
-                ) : isAwaitingFix && !needsFreshDiagnosis ? (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                    <button disabled={isIncidentActionPending} onClick={() => onKeepChanges()} className="dr-btn dr-btn-green dr-btn-block" style={{ padding: '8px 10px' }}>
-                      <Check size={13} strokeWidth={3} />
-                      <span>{isIncidentActionPending ? 'Applying…' : 'Keep Changes'}</span>
-                    </button>
-                    <div style={{ fontSize: 10, color: 'var(--dr-faint)', lineHeight: 1.5 }}>
-                      Applies the patch to your workspace, then verifies it in an isolated sandbox copy. If verification fails, the workspace is restored automatically.
-                    </div>
-                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                      <button disabled={isIncidentActionPending} onClick={() => onRejectChanges()} className="dr-btn" style={{ flex: 1, padding: '7px 10px' }}>
-                        Reject
-                      </button>
-                      <button onClick={() => setIsDiffMode(true)} className="dr-link">
-                        Review Diff
-                      </button>
-                    </div>
-                  </div>
-                ) : needsFreshDiagnosis ? (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                    <div className="dr-notice dr-notice-red">
-                      {applyFailure?.message || 'This patch did not pass verification and cannot be applied safely.'}
-                    </div>
-                    {onRediagnose && (
-                      <button disabled={isIncidentActionPending} onClick={() => onRediagnose()} className="dr-btn dr-btn-blue dr-btn-block" style={{ padding: '8px 10px' }}>
-                        <RefreshCw size={13} />
-                        <span>{isIncidentActionPending ? 'Starting…' : 'Re-run Diagnosis'}</span>
-                      </button>
-                    )}
-                    <button onClick={() => setIsDiffMode(true)} className="dr-link" style={{ alignSelf: 'flex-start' }}>
-                      Review Previous Diff
-                    </button>
-                  </div>
-                ) : (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                    {onApplyFix && isVerified && (
-                      <button disabled={isIncidentActionPending} onClick={() => onApplyFix()} className="dr-btn dr-btn-green dr-btn-block" style={{ padding: '8px 10px' }}>
-                        <Check size={13} strokeWidth={3} />
-                        <span>{isIncidentActionPending ? 'Applying…' : 'Apply to Workspace'}</span>
-                      </button>
-                    )}
-                    <button onClick={() => setIsDiffMode(true)} className="dr-link" style={{ alignSelf: 'flex-start' }}>
-                      Review Diff
-                    </button>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Rollback notice */}
-            {wasRolledBack && (
-              <div className="dr-notice dr-notice-red">
-                Verification failed — your workspace was restored to the original code. Re-run the diagnosis to generate a fresh patch.
-              </div>
-            )}
-
-            {/* Test suite result card (reference layout) */}
-            {incidentSandbox && incidentSandbox.present && (
-              <div className="dr-card" style={{ padding: 12 }}>
-                <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
-                  <span style={{ fontSize: 12, fontWeight: 600, color: '#c8ccd4', fontFamily: 'var(--font-heading)', letterSpacing: '0.03em' }}>
-                    Test Suite Result
-                  </span>
-                  <span style={{ fontSize: 12, fontWeight: 700, color: failedCount === 0 && incidentSandbox.passed ? 'var(--dr-green)' : 'var(--dr-red)', fontFamily: 'var(--font-mono)' }}>
-                    {suiteTotal ? `${passedCount} passed · ${failedCount} failed` : incidentSandbox.passed ? 'All checks passed' : 'Checks failed'}
-                  </span>
-                </div>
-                <div className="dr-meter" style={{ marginTop: 10 }}>
-                  <div className={`dr-meter-fill ${failedCount ? 'dr-meter-fill-bad' : ''}`} style={{ width: `${suitePercent}%` }} />
-                </div>
-                <hr className="dr-rule" style={{ margin: '10px 0' }} />
-                <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 11 }}>
-                  <BadgeCheck size={13} style={{ color: regressionPassed ? 'var(--dr-green)' : 'var(--dr-red)' }} />
-                  <span style={{ color: 'var(--dr-dim)' }}>Regression:</span>
-                  <span style={{ fontWeight: 700, color: regressionPassed ? 'var(--dr-green)' : 'var(--dr-red)' }}>
-                    {regressionPassed ? 'Passed' : 'Failed'}
-                  </span>
-                </div>
-                {suiteTotal > 0 && (
-                  <div className="dr-well" style={{ marginTop: 10, padding: '7px 10px', display: 'flex', flexDirection: 'column', gap: 4 }}>
-                    {sandboxSteps.map(step => (
-                      <div key={step.name} style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--dr-dim)' }}>
-                        {step.passed
-                          ? <Check size={11} strokeWidth={3} style={{ color: 'var(--dr-green)' }} />
-                          : <XCircle size={11} style={{ color: 'var(--dr-red)' }} />}
-                        <span>{String(step.name).replace(/_/g, ' ')}</span>
+            {/* ---- STEP-BY-STEP ANALYSIS: one phase after the other ---- */}
+            <div>
+              <Kicker>STEP-BY-STEP ANALYSIS</Kicker>
+              <div className="dr-steps" style={{ marginTop: 8 }}>
+                {phases.map((phase, index) => {
+                  const Icon = phase.icon;
+                  const color = phaseColor(phase.state);
+                  const num = String(index + 1).padStart(2, '0');
+                  const extras = renderPhaseExtras(phase.id);
+                  return (
+                    <div key={phase.id} className="dr-step">
+                      <div className="dr-step-rail">
+                        <span className={`dr-step-num dr-step-num-${phase.state}`}>{num}</span>
+                        {phase.state !== 'idle' && (
+                          <span className={`dr-step-connector dr-step-connector-${phase.state}`} />
+                        )}
+                        {phase.state === 'idle' && <span className="dr-step-connector" />}
                       </div>
-                    ))}
-                  </div>
-                )}
-                {!incidentSandbox.passed && incidentSandbox.error && (
-                  <div className="dr-notice dr-notice-red" style={{ marginTop: 10, fontFamily: 'var(--font-mono)' }}>
-                    {incidentSandbox.error}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* GitHub operations (branch / commit / PR card) */}
-            {showGitOps && (
-              <div>
-                <Kicker>GITHUB OPERATIONS</Kicker>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 9 }}>
-                  {branchName && (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
-                      <StatusDot tone="ok" />
-                      <span style={{ color: 'var(--dr-dim)' }}>Branch created:</span>
-                      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--dr-text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{branchName}</span>
-                    </div>
-                  )}
-                  {commitSha ? (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
-                      <StatusDot tone="ok" />
-                      <span style={{ color: 'var(--dr-dim)' }}>Changes committed</span>
-                      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--dr-text)' }}>({String(commitSha).slice(0, 7)})</span>
-                    </div>
-                  ) : isVerified && appliedFiles.length > 0 && onCommitChanges ? (
-                    <button disabled={isIncidentActionPending} onClick={onCommitChanges} className="dr-btn dr-btn-block" style={{ padding: '7px 10px' }}>
-                      <GitCommit size={13} />
-                      <span>{isIncidentActionPending ? 'Committing…' : 'Commit Changes'}</span>
-                    </button>
-                  ) : null}
-
-                  {/* PR card — exactly the reference arrangement */}
-                  {(prPresent || (isVerified && onCreatePR)) && (
-                    <div className="dr-card" style={{ background: 'var(--dr-surface-2)', padding: 13 }}>
-                      <div style={{ fontSize: 13, fontWeight: 700, fontFamily: 'var(--font-heading)', letterSpacing: '0.02em', marginBottom: 3 }}>
-                        {fixTitle}
-                      </div>
-                      <div style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--dr-faint)', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 5 }}>
-                        <GitBranch size={11} />
-                        <span>{branchName || `api-doctor/fix/${activeIncident.id.slice(0, 8)}`}</span>
-                      </div>
-
-                      {prPresent && (
-                        <div style={{ marginBottom: 12 }}>
-                          <span className="dr-chip dr-chip-amber">
-                            <AlertTriangle size={10} />
-                            {incidentPR.status ? String(incidentPR.status) : 'Awaiting human review'}
+                      <div className={`dr-step-card dr-step-card-${phase.state}`}>
+                        <div className="dr-step-head">
+                          <Icon size={13} style={{ color, flexShrink: 0 }} />
+                          <span className="dr-step-title">{phase.title}</span>
+                          <span className={`dr-step-state dr-step-state-${phase.state}`}>
+                            {phase.state === 'working' && <span className="dr-pulse" style={{ width: 6, height: 6, marginRight: 5 }} />}
+                            {phaseStateLabel[phase.state]}
                           </span>
                         </div>
-                      )}
-
-                      {prPresent ? (
-                        <a
-                          href={prUrl || '#'}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="dr-btn dr-btn-blue dr-btn-block"
-                          style={{ padding: '9px 10px', textDecoration: 'none', fontSize: 12 }}
-                        >
-                          <ArrowUpRight size={14} />
-                          <span>Open Pull Request</span>
-                        </a>
-                      ) : (
-                        <button disabled={isIncidentActionPending} onClick={onCreatePR} className="dr-btn dr-btn-blue dr-btn-block" style={{ padding: '9px 10px', fontSize: 12 }}>
-                          <GitPullRequest size={14} />
-                          <span>{isIncidentActionPending ? 'Creating…' : 'Create Pull Request'}</span>
-                        </button>
-                      )}
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-
-            {/* Agent team */}
-            <AgentTeam rows={timelineRows} />
-
-            {/* Live investigation console — auto-tailing */}
-            <div>
-              <Kicker>LIVE INVESTIGATION</Kicker>
-              <div ref={timelineRef} onScroll={handleTimelineScroll} className="dr-well dr-timeline" style={{ marginTop: 8 }}>
-                {timelineRows.length > 0 ? (
-                  timelineRows.map(row => <TimelineRow key={row.key} row={row} />)
-                ) : isDiagnosing ? (
-                  <div className="dr-event dr-event-running">
-                    <span className="dr-pulse" />
-                    <span className="dr-event-label">Starting diagnosis…</span>
-                  </div>
-                ) : (
-                  <div style={{ fontSize: 11, color: 'var(--dr-faint)' }}>
-                    No investigation activity yet. Start a diagnosis to stream live agent events.
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Relevant files accordion */}
-            {incidentContext?.implicated_files?.length > 0 && (
-              <div>
-                <div
-                  onClick={() => setExpandedFiles(!expandedFiles)}
-                  style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer' }}
-                >
-                  <Kicker>RELEVANT FILES ({incidentContext.implicated_files.length})</Kicker>
-                  {expandedFiles
-                    ? <ChevronUp size={14} style={{ color: 'var(--dr-faint)' }} />
-                    : <ChevronDown size={14} style={{ color: 'var(--dr-faint)' }} />}
-                </div>
-                {expandedFiles && (
-                  <div className="dr-well" style={{ marginTop: 8 }}>
-                    {incidentContext.implicated_files.map(filePath => (
-                      <div key={filePath} className="dr-file-row" onClick={() => setSelectedFile(filePath)}>
-                        <span style={{ display: 'flex', alignItems: 'center', gap: 6, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          <Check size={11} strokeWidth={3} style={{ color: 'var(--dr-green)', flexShrink: 0 }} />
-                          <span>{filePath}</span>
-                        </span>
-                        <ChevronRight size={11} style={{ color: 'var(--dr-faint)', flexShrink: 0 }} />
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Root cause */}
-            <div className="dr-card" style={{ padding: 12 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-                <Kicker>ROOT CAUSE ANALYSIS</Kicker>
-                {classification && (
-                  <span className="dr-chip dr-chip-red">{classification.replace(/_/g, ' ')}</span>
-                )}
-              </div>
-
-              {!rootCause ? (
-                <div style={{ fontSize: 12, color: 'var(--dr-dim)', display: 'flex', alignItems: 'center', gap: 6, marginTop: 10 }}>
-                  <Clock size={13} />
-                  <span>{isDiagnosing ? 'Waiting for investigation results…' : 'No root cause analysis yet.'}</span>
-                </div>
-              ) : (
-                <div style={{ marginTop: 10 }}>
-                  {confidencePercent !== null && (
-                    <div style={{ marginBottom: 10 }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 5 }}>
-                        <span style={{ color: 'var(--dr-dim)', fontFamily: 'var(--font-heading)', letterSpacing: '0.04em' }}>Confidence</span>
-                        <span style={{ color: 'var(--dr-green)', fontWeight: 700, fontFamily: 'var(--font-mono)' }}>{confidencePercent}%</span>
-                      </div>
-                      <div className="dr-meter">
-                        <div className="dr-meter-fill" style={{ width: `${confidencePercent}%` }} />
+                        {phase.rows.length > 0 || extras ? (
+                          <div className="dr-step-body">
+                            {phase.rows.map(row => <PhaseRow key={row.key} row={row} />)}
+                            {extras}
+                          </div>
+                        ) : (
+                          <div className="dr-step-body">
+                            <span className="dr-step-idle-text">
+                              {!isDiagnosing && activeIncident?.status
+                                ? 'No activity recorded for this step'
+                                : index === 0
+                                  ? 'Waiting for diagnosis to start…'
+                                  : 'Awaiting agent activity…'}
+                            </span>
+                          </div>
+                        )}
                       </div>
                     </div>
-                  )}
-
-                  <p style={{ fontSize: 12, lineHeight: 1.5, marginBottom: 6 }}>
-                    {rootCause.root_cause || 'Root cause identified.'}
-                  </p>
-                  {rootCause.reason && (
-                    <p style={{ fontSize: 11, color: 'var(--dr-dim)', lineHeight: 1.5, marginBottom: 8 }}>
-                      {rootCause.reason}
-                    </p>
-                  )}
-                  {rootCause.recommended_action && (
-                    <div className="dr-notice dr-notice-amber" style={{ marginBottom: 10 }}>
-                      <strong>Action:</strong> {rootCause.recommended_action}
-                    </div>
-                  )}
-
-                  {rootCause.affected_files?.[0] && (
-                    <button onClick={() => setSelectedFile(rootCause.affected_files[0])} className="dr-btn dr-btn-block" style={{ padding: '7px 10px' }}>
-                      <span>Open {rootCause.affected_files[0]}</span>
-                      <ArrowUpRight size={12} />
-                    </button>
-                  )}
-                </div>
-              )}
+                  );
+                })}
+              </div>
             </div>
           </>
         )}
