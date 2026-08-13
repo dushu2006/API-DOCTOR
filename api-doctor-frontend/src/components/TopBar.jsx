@@ -1,40 +1,30 @@
-import React, { useState } from 'react';
-import {
-  Check,
-  ChevronDown,
-  GitBranch,
-  Network,
-  RadioTower,
-  Settings,
-  Square,
-} from 'lucide-react';
-import './doctor.css';
+import React from 'react';
+import { Check, Settings, Square } from 'lucide-react';
 
-const MENUS = ['FILE', 'EDIT', 'SELECTION', 'VIEW', 'GO', 'RUN', 'TERMINAL', 'HELP'];
-
-/** Compact IDE command bar modelled after the supplied desktop reference. */
+/**
+ * Compact command bar. Every control performs a real action:
+ *   brand        → open project selector
+ *   command pill → open project selector (switch workspace)
+ *   STOP         → cancel the running diagnosis
+ *   settings     → open project settings
+ *   account      → open profile / logout
+ * Connection state is shown as a quiet OFFLINE chip only when the backend is
+ * actually unreachable.
+ */
 export default function TopBar({
-  projects = [],
+  currentUser,
   activeRun,
-  onStartDiagnosis,
   onStopDiagnosis,
-  onOpenProjectWizard,
   onOpenProjectSelector,
   onOpenProjectSettings,
   onOpenProfile,
-  onSelectProject,
   isDiagnosing,
   isBackendConnected,
   currentProject,
 }) {
-  const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const branch = currentProject?.default_branch || currentProject?.github_branch || 'main';
-
-  const handleMenu = (menu) => {
-    if (menu === 'RUN') onStartDiagnosis?.();
-    if (menu === 'FILE') onOpenProjectSelector?.();
-    if (menu === 'VIEW') onOpenProfile?.();
-  };
+  const identifier = currentUser?.email || currentUser?.username || 'U';
+  const initial = identifier.charAt(0).toUpperCase();
 
   return (
     <header className="ide-topbar">
@@ -42,27 +32,35 @@ export default function TopBar({
         <button type="button" className="ide-brand" onClick={onOpenProjectSelector}>
           API DOCTOR
         </button>
-        <nav className="ide-menu" aria-label="Application menu">
-          {MENUS.map(menu => (
-            <button type="button" key={menu} onClick={() => handleMenu(menu)}>{menu}</button>
-          ))}
-        </nav>
       </div>
 
-      <button type="button" className="ide-command" onClick={onOpenProjectSelector} title="Select project">
+      <button
+        type="button"
+        className="ide-command"
+        onClick={onOpenProjectSelector}
+        title="Switch project"
+      >
         <span className="ide-command-search">⌕</span>
-        <span>api-doctor&nbsp; / &nbsp;{branch}</span>
+        <span>
+          {currentProject?.name || 'api-doctor'}&nbsp; / &nbsp;{branch}
+        </span>
       </button>
 
       <div className="ide-topbar-actions">
+        {!isBackendConnected && (
+          <span className="ide-offline-chip" title="Backend is unreachable">
+            <span className="ide-connection-dot is-offline" /> OFFLINE
+          </span>
+        )}
         {activeRun && isDiagnosing && (
-          <div className="ide-diagnosing-chip">
-            <span className="ide-live-dot" />
-            DIAGNOSING…
-          </div>
+          <span className="ide-diagnosing-chip">
+            <span className="ide-live-dot" /> DIAGNOSING…
+          </span>
         )}
         {activeRun && !isDiagnosing && (
-          <div className="ide-complete-chip"><Check size={10} /> COMPLETE</div>
+          <span className="ide-complete-chip">
+            <Check size={10} /> COMPLETE
+          </span>
         )}
         {isDiagnosing && (
           <button type="button" className="ide-stop" onClick={onStopDiagnosis}>
@@ -70,45 +68,18 @@ export default function TopBar({
           </button>
         )}
 
-        <div className="ide-project-switcher">
-          <button
-            type="button"
-            className={`ide-connected ${isBackendConnected ? '' : 'is-offline'}`}
-            onClick={() => setProjectMenuOpen(value => !value)}
-          >
-            <span className="ide-connection-dot" />
-            {isBackendConnected ? 'CONNECTED' : 'OFFLINE'}
-            <ChevronDown size={9} />
-          </button>
-          {projectMenuOpen && (
-            <div className="ide-project-menu">
-              <div className="ide-project-menu-title">WORKSPACES</div>
-              {projects.map(project => (
-                <button
-                  type="button"
-                  key={project.id}
-                  className={project.id === currentProject?.id ? 'is-active' : ''}
-                  onClick={() => {
-                    setProjectMenuOpen(false);
-                    onSelectProject?.(project);
-                  }}
-                >
-                  <span>{project.name}</span>
-                  <small>{project.default_branch || 'main'}</small>
-                </button>
-              ))}
-              <div className="ide-project-menu-actions">
-                <button type="button" onClick={() => { setProjectMenuOpen(false); onOpenProjectSelector?.(); }}>MANAGE</button>
-                <button type="button" onClick={() => { setProjectMenuOpen(false); onOpenProjectWizard?.(); }}>+ NEW</button>
-              </div>
-            </div>
-          )}
-        </div>
+        <button
+          type="button"
+          className="ide-top-icon"
+          title="Project settings"
+          onClick={onOpenProjectSettings}
+        >
+          <Settings size={16} />
+        </button>
 
-        <button type="button" className="ide-top-icon" title="Repository"><Network size={15} /></button>
-        <button type="button" className="ide-top-icon" title="Runtime connection"><RadioTower size={15} /></button>
-        <button type="button" className="ide-top-icon" title="Project settings" onClick={onOpenProjectSettings}><Settings size={16} /></button>
-        <span className="ide-branch-mark" title={branch}><GitBranch size={11} /></span>
+        <button type="button" className="ide-account" title="Account" onClick={onOpenProfile}>
+          <span className="ide-account-avatar">{initial}</span>
+        </button>
       </div>
     </header>
   );

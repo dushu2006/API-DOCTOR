@@ -1,34 +1,41 @@
 import React from 'react';
-import {
-  Blocks,
-  Bot,
-  FolderOpen,
-  GitBranch,
-  Search,
-  ShieldCheck,
-  SquareTerminal,
-} from 'lucide-react';
+import { FolderOpen, ShieldCheck, SquareTerminal } from 'lucide-react';
 
+/**
+ * Left activity rail. Only real, wired controls are shown: the file explorer
+ * toggle, the terminal/logs toggle and the API Doctor panel toggle.
+ */
 export default function ActivityBar({
   isDoctorOpen,
   setIsDoctorOpen,
   isExplorerOpen,
   setIsExplorerOpen,
   hasActiveRun,
+  onOpenTerminal,
 }) {
   const items = [
-    { id: 'explorer', label: 'Explorer', icon: FolderOpen, active: isExplorerOpen, action: () => setIsExplorerOpen(!isExplorerOpen) },
-    { id: 'search', label: 'Search', icon: Search, action: () => setIsExplorerOpen(true) },
-    { id: 'source', label: 'Source control', icon: GitBranch, action: () => setIsExplorerOpen(true) },
-    { id: 'extensions', label: 'Extensions', icon: Blocks, action: () => setIsExplorerOpen(true) },
-    { id: 'doctor', label: 'Doctor panel', icon: ShieldCheck, active: isDoctorOpen, action: () => setIsDoctorOpen(!isDoctorOpen), doctor: true },
-    { id: 'terminal', label: 'Terminal', icon: SquareTerminal, action: () => undefined },
+    {
+      id: 'explorer',
+      label: 'Explorer',
+      icon: FolderOpen,
+      active: isExplorerOpen,
+      action: () => setIsExplorerOpen(!isExplorerOpen),
+    },
+    { id: 'terminal', label: 'Terminal & logs', icon: SquareTerminal, action: onOpenTerminal },
+    {
+      id: 'doctor',
+      label: 'API Doctor',
+      icon: ShieldCheck,
+      active: isDoctorOpen,
+      action: () => setIsDoctorOpen(!isDoctorOpen),
+      doctor: true,
+    },
   ];
 
   return (
     <aside className="ide-activitybar">
       <div className="ide-activity-items">
-        {items.map(item => {
+        {items.map((item) => {
           const Icon = item.icon;
           return (
             <button
@@ -44,7 +51,6 @@ export default function ActivityBar({
           );
         })}
       </div>
-      <button type="button" className="ide-agent-badge" title="API Doctor agent"><Bot size={13} /></button>
     </aside>
   );
 }
