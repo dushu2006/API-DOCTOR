@@ -1,4 +1,4 @@
-"""Incident dashboard and ingestion API endpoints."""
+"""Run dashboard and ingestion API endpoints."""
 
 from __future__ import annotations
 
@@ -18,8 +18,8 @@ from app.context_builder.context_builder import ContextBuilder
 from app.core.config import settings
 from app.detector.failure_detector import FailureDetector
 from app.events.hub import event_hub
-from app.incidents.models import Incident, IncidentStatus
-from app.incidents.schemas import (
+from app.runs.models import Run, RunStatus
+from app.runs.schemas import (
     ApproveRequest,
     ContextResponse,
     CreatePRRequest,
@@ -27,13 +27,13 @@ from app.incidents.schemas import (
     DiagnoseResponse,
     DiffFilePreview,
     DiffResponse,
-    IncidentResponse,
-    IngestIncidentRequest,
+    RunResponse,
+    IngestRunRequest,
     PRInfoResponse,
     SandboxResponse,
     StatusResponse,
 )
-from app.incidents.store import incident_store
+from app.runs.store import run_store
 from app.integrations.factory import get_log_provider
 from app.orchestrator import POST_FIX_GATE_STATUSES, orchestrator
 from app.projects.store import project_store
@@ -42,7 +42,7 @@ from app.security.sanitizer import redact_text, sanitize
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/incidents", tags=["incidents"], dependencies=[Depends(require_authenticated_user)])
+router = APIRouter(prefix="/api/diagnosis", tags=["diagnosis"], dependencies=[Depends(require_authenticated_user)])
 
 SCENARIOS = {
     "external_api": ("GET", "/api/v1/external/status", None),
@@ -76,17 +76,26 @@ def _safe_render_logs(logs: Any) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Listing & retrieval
+# Current, ephemeral diagnosis
 # ---------------------------------------------------------------------------
-@router.get("", response_model=list[IncidentResponse])
-async def list_incidents(
+@router.get("/current", response_model=RunResponse | None)
+async def get_current_run(
     project_id: str | None = None,
     user: UserResponse = Depends(require_authenticated_user),
-) -> list[IncidentResponse]:
+) -> RunResponse | None:
     if project_id:
         _require_project_for_user(user, project_id)
     resolved = _resolved_project_id(project_id, user.id)
-    return [IncidentResponse.from_model(i) for i in incident_store.list_all(resolved)]
+    current = run_store.get_current(user.id, resolved)
+    return RunResponse.from_model(current) if current else None
+
+
+@router.delete("/current")
+async def reset_current_run(
+    user: UserResponse = Depends(require_authenticated_user),
+) -> dict[str, bool]:
+    cleared = await orchestrator.reset_current(user.id)
+    return {"cleared": cleared}
 
 
 @router.get("/render-logs")
@@ -95,11 +104,11 @@ async def get_render_logs(
     limit: int = Query(default=200, ge=1, le=800),
     user: UserResponse = Depends(require_authenticated_user),
 ) -> dict[str, Any]:
-    """Retrieve sanitized Render log entries without running incident detection.
+    """Retrieve sanitized Render log entries without running run detection.
 
     This endpoint exists separately from ``sync-render`` so a connected project
     can inspect its runtime logs even when no failure is detected. It must stay
-    above ``/{incident_id}`` because FastAPI matches routes in declaration order.
+    above ``/{run_id}`` because FastAPI matches routes in declaration order.
     """
     project = _require_project_for_user(user, project_id)
     render = project_store.resolve_render(project.id)
@@ -131,24 +140,24 @@ async def get_render_logs(
     }
 
 
-@router.get("/{incident_id}", response_model=IncidentResponse)
-async def get_incident(incident_id: str) -> IncidentResponse:
-    return IncidentResponse.from_model(_get_or_404(incident_id))
+@router.get("/{run_id}", response_model=RunResponse)
+async def get_run(run_id: str) -> RunResponse:
+    return RunResponse.from_model(_get_or_404(run_id))
 
 
-@router.get("/{incident_id}/status", response_model=StatusResponse)
-async def get_status(incident_id: str) -> StatusResponse:
-    return StatusResponse.from_model(_get_or_404(incident_id))
+@router.get("/{run_id}/status", response_model=StatusResponse)
+async def get_status(run_id: str) -> StatusResponse:
+    return StatusResponse.from_model(_get_or_404(run_id))
 
 
-@router.get("/{incident_id}/context", response_model=ContextResponse)
-async def get_context(incident_id: str) -> ContextResponse:
-    inc = _get_or_404(incident_id)
-    if inc.context:
-        ctx = inc.context
+@router.get("/{run_id}/context", response_model=ContextResponse)
+async def get_context(run_id: str) -> ContextResponse:
+    run = _get_or_404(run_id)
+    if run.context:
+        ctx = run.context
     else:
         # Build context on demand when the pipeline hasn't finished saving it.
-        project = project_store.get(inc.project_id)
+        project = project_store.get(run.project_id)
         workspace_path = (
             project.workspace_path
             if project and project.workspace_path and Path(project.workspace_path).is_dir()
@@ -157,7 +166,7 @@ async def get_context(incident_id: str) -> ContextResponse:
 
         def _build() -> dict:
             builder = ContextBuilder(repo_root=workspace_path)
-            return builder.build_incident_payload(inc)
+            return builder.build_run_payload(run)
 
         ctx = await asyncio.to_thread(_build)
     # Saved context uses "affected_files"; dynamic payload uses "implicated_files".
@@ -166,7 +175,7 @@ async def get_context(incident_id: str) -> ContextResponse:
     else:
         implicated_files = ctx.get("affected_files", [])
     return ContextResponse(
-        incident_id=incident_id,
+        run_id=run_id,
         stack_trace=ctx.get("stack_trace", ""),
         implicated_files=implicated_files,
         code_snippets=ctx.get("code_snippets", {}),
@@ -174,19 +183,19 @@ async def get_context(incident_id: str) -> ContextResponse:
     )
 
 
-@router.get("/{incident_id}/diff", response_model=DiffResponse)
-async def get_diff(incident_id: str) -> DiffResponse:
-    inc = _get_or_404(incident_id)
-    fix = inc.fix_proposal
+@router.get("/{run_id}/diff", response_model=DiffResponse)
+async def get_diff(run_id: str) -> DiffResponse:
+    run = _get_or_404(run_id)
+    fix = run.fix_proposal
     if not fix:
-        return DiffResponse(incident_id=incident_id, present=False)
+        return DiffResponse(run_id=run_id, present=False)
 
     # Compute real before/after content per file so the frontend can render a
     # proper side-by-side diff editor (and later the applied normal code).
     previews: list[DiffFilePreview] = []
     diff_text = fix.get("diff") or ""
     if diff_text.strip():
-        project = project_store.get(inc.project_id) or project_store.get_current()
+        project = project_store.get(run.project_id) or project_store.get_current()
         workspace_path = (
             project.workspace_path
             if project and project.workspace_path and Path(project.workspace_path).is_dir()
@@ -219,10 +228,10 @@ async def get_diff(incident_id: str) -> DiffResponse:
                         preview.proposed = current
                         preview.error = None
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Diff preview failed for incident %s: %s", incident_id, exc)
+            logger.warning("Diff preview failed for run %s: %s", run_id, exc)
 
     return DiffResponse(
-        incident_id=incident_id,
+        run_id=run_id,
         present=True,
         summary=fix.get("summary"),
         diff=diff_text,
@@ -235,14 +244,14 @@ async def get_diff(incident_id: str) -> DiffResponse:
     )
 
 
-@router.get("/{incident_id}/sandbox", response_model=SandboxResponse)
-async def get_sandbox(incident_id: str) -> SandboxResponse:
-    inc = _get_or_404(incident_id)
-    sb = inc.sandbox_result
+@router.get("/{run_id}/sandbox", response_model=SandboxResponse)
+async def get_sandbox(run_id: str) -> SandboxResponse:
+    run = _get_or_404(run_id)
+    sb = run.sandbox_result
     if not sb:
-        return SandboxResponse(incident_id=incident_id, present=False)
+        return SandboxResponse(run_id=run_id, present=False)
     return SandboxResponse(
-        incident_id=incident_id,
+        run_id=run_id,
         present=True,
         passed=sb.get("passed"),
         steps=sb.get("steps", []),
@@ -251,14 +260,14 @@ async def get_sandbox(incident_id: str) -> SandboxResponse:
     )
 
 
-@router.get("/{incident_id}/pr", response_model=PRInfoResponse)
-async def get_pr(incident_id: str) -> PRInfoResponse:
-    inc = _get_or_404(incident_id)
-    if not inc.pr_info:
-        return PRInfoResponse(incident_id=incident_id, present=False)
-    info = inc.pr_info
+@router.get("/{run_id}/pr", response_model=PRInfoResponse)
+async def get_pr(run_id: str) -> PRInfoResponse:
+    run = _get_or_404(run_id)
+    if not run.pr_info:
+        return PRInfoResponse(run_id=run_id, present=False)
+    info = run.pr_info
     return PRInfoResponse(
-        incident_id=incident_id,
+        run_id=run_id,
         present=True,
         pr_number=info.get("pr_number"),
         pr_url=info.get("pr_url"),
@@ -269,16 +278,19 @@ async def get_pr(incident_id: str) -> PRInfoResponse:
 
 
 # ---------------------------------------------------------------------------
-# Real Incident Ingestion Endpoints
+# Fresh diagnosis inputs
 # ---------------------------------------------------------------------------
-@router.post("/ingest", response_model=DiagnoseResponse)
-async def ingest_incident(req: IngestIncidentRequest) -> DiagnoseResponse:
+@router.post("/start", response_model=DiagnoseResponse)
+async def ingest_run(
+    req: IngestRunRequest,
+    user: UserResponse = Depends(require_authenticated_user),
+) -> DiagnoseResponse:
     trace = req.stack_trace or req.log_text or req.raw_logs or req.message or ""
     if not trace.strip():
         raise HTTPException(400, "Log text, stack trace, or error message is required.")
 
-    project_id = req.project_id or _resolved_project_id() or "default"
-    incident = await orchestrator.ingest_incident(
+    project = _require_project_for_user(user, req.project_id or None)
+    run = await orchestrator.ingest_run(
         source=req.source,
         raw_logs=req.raw_logs or req.log_text or trace,
         stack_trace=trace,
@@ -287,16 +299,17 @@ async def ingest_incident(req: IngestIncidentRequest) -> DiagnoseResponse:
         method=req.method or "GET",
         status_code=req.status_code or 500,
         service_id=req.service_id or "",
-        project_id=project_id,
+        project_id=project.id,
+        owner_id=user.id,
     )
 
     if req.auto_diagnose:
-        orchestrator.start_diagnosis(incident.id)
+        orchestrator.start_diagnosis(run.id)
 
     return DiagnoseResponse(
-        incident_id=incident.id,
-        status=incident.status,
-        message=f"Incident ingested from {req.source} and diagnosis started.",
+        run_id=run.id,
+        status=run.status,
+        message=f"Fresh diagnosis started from {req.source} input.",
     )
 
 
@@ -307,7 +320,7 @@ def _render_error_payload(exc: RenderError, service_id: str | None = None) -> di
         "error_type": exc.error_type,
         "http_status": exc.status_code,
         "service_id": service_id,
-        "incidents_created": [],
+        "run_id": None,
         "logs_retrieved": 0,
         "logs": [],
     }
@@ -327,7 +340,7 @@ async def sync_render_logs(
             "status": "error",
             "message": "No project is configured.",
             "error_type": "unconfigured",
-            "incidents_created": [],
+            "run_id": None,
             "logs_retrieved": 0,
             "logs": [],
         }
@@ -340,7 +353,7 @@ async def sync_render_logs(
             "status": "error",
             "message": "Render integration is not configured for the selected project.",
             "error_type": "unconfigured",
-            "incidents_created": [],
+            "run_id": None,
             "logs_retrieved": 0,
             "logs": [],
         }
@@ -349,10 +362,14 @@ async def sync_render_logs(
             "status": "error",
             "message": "Render service is not configured for the selected project.",
             "error_type": "unconfigured",
-            "incidents_created": [],
+            "run_id": None,
             "logs_retrieved": 0,
             "logs": [],
         }
+
+    # Sync is a new diagnosis attempt. Discard the prior console before
+    # retrieving this point-in-time log window.
+    await orchestrator.reset_current(user.id)
 
     provider = get_log_provider(project.id, "render")
     try:
@@ -374,7 +391,7 @@ async def sync_render_logs(
             "project_id": project.id,
             "logs_retrieved": 0,
             "logs": [],
-            "incidents_created": [],
+            "run_id": None,
             "service_id": payload.get("service_id"),
             "owner_id": payload.get("owner_id"),
             "service_name": payload.get("service_name"),
@@ -394,33 +411,41 @@ async def sync_render_logs(
     detector = FailureDetector(service=render.get("service_id") or "render")
     detections = detector.detect_from_logs(logs, service=render.get("service_id") or "render", source="render")
 
-    created_ids: list[str] = []
-    for det in detections:
-        inc = await orchestrator.ingest_incident(
+    current: Run | None = None
+    if detections:
+        detection = detections[0]
+        current = await orchestrator.ingest_run(
             source="render",
-            raw_logs=det.get("raw_logs", ""),
-            stack_trace=det.get("stack_trace", ""),
-            message=det.get("error_message", ""),
-            endpoint=det.get("endpoint", ""),
-            method=det.get("method", "GET"),
-            status_code=det.get("status_code", 500),
+            raw_logs=detection.get("raw_logs", ""),
+            stack_trace=detection.get("stack_trace", ""),
+            message=detection.get("error_message", ""),
+            endpoint=detection.get("endpoint", ""),
+            method=detection.get("method", "GET"),
+            status_code=detection.get("status_code", 500),
             service_id=render.get("service_id", ""),
             project_id=project.id,
+            owner_id=user.id,
         )
-        created_ids.append(inc.id)
 
-    diagnosed = False
-    if auto_diagnose and created_ids and project.is_connected:
-        diagnosed = bool(orchestrator.start_diagnosis(created_ids[0]))
+    diagnosed = bool(
+        current
+        and auto_diagnose
+        and project.is_connected
+        and orchestrator.start_diagnosis(current.id)
+    )
 
     return {
         "status": "success",
-        "message": f"Retrieved {len(logs)} Render log entries; {len(detections)} incident(s) detected.",
+        "message": (
+            f"Retrieved {len(logs)} Render log entries; starting from the first detected error."
+            if current
+            else f"Retrieved {len(logs)} Render log entries; no error was detected."
+        ),
         "project_id": project.id,
         "logs_retrieved": len(logs),
         "logs": safe_logs,
-        "incidents_detected": len(detections),
-        "incidents_created": created_ids,
+        "errors_detected": len(detections),
+        "run_id": current.id if current else None,
         "diagnosis_started": diagnosed,
         "service_id": payload.get("service_id"),
         "owner_id": payload.get("owner_id"),
@@ -432,120 +457,130 @@ async def sync_render_logs(
 # Workflow triggers
 # ---------------------------------------------------------------------------
 @router.post("/trigger/{scenario}", response_model=DiagnoseResponse)
-async def trigger_scenario(scenario: str) -> DiagnoseResponse:
+async def trigger_scenario(
+    scenario: str,
+    user: UserResponse = Depends(require_authenticated_user),
+) -> DiagnoseResponse:
     if not settings.DEMO_MODE:
         raise HTTPException(404, "Demo scenarios are disabled when DEMO_MODE=false.")
     if scenario not in SCENARIOS:
         raise HTTPException(400, f"unknown scenario {scenario!r}; choose from {sorted(SCENARIOS)}")
     method, path, payload = SCENARIOS[scenario]
-    incident = await orchestrator.detect_and_create(path, method, payload)
-    if not orchestrator.start_diagnosis(incident.id):
+    project = project_store.get_current(user.id)
+    run = await orchestrator.detect_and_create(
+        path,
+        method,
+        payload,
+        project_id=project.id if project else "default",
+        owner_id=user.id,
+    )
+    if not orchestrator.start_diagnosis(run.id):
         raise HTTPException(409, "diagnosis could not be started")
-    return DiagnoseResponse(incident_id=incident.id, status=incident.status)
+    return DiagnoseResponse(run_id=run.id, status=run.status)
 
 
-@router.post("/{incident_id}/diagnose", response_model=DiagnoseResponse)
-async def diagnose(incident_id: str, req: DiagnoseRequest | None = None) -> DiagnoseResponse:
-    inc = _get_or_404(incident_id)
-    if not orchestrator.start_diagnosis(incident_id):
+@router.post("/{run_id}/diagnose", response_model=DiagnoseResponse)
+async def diagnose(run_id: str, req: DiagnoseRequest | None = None) -> DiagnoseResponse:
+    run = _get_or_404(run_id)
+    if not orchestrator.start_diagnosis(run_id):
         raise HTTPException(
             409,
-            f"diagnosis is already running or cannot start from status {inc.status.value}",
+            f"diagnosis is already running or cannot start from status {run.status.value}",
         )
-    return DiagnoseResponse(incident_id=incident_id, status=inc.status)
+    return DiagnoseResponse(run_id=run_id, status=run.status)
 
 
-@router.post("/{incident_id}/rediagnose", response_model=DiagnoseResponse)
-async def rediagnose(incident_id: str) -> DiagnoseResponse:
-    """Start a new diagnosis from this incident using a fresh source snapshot."""
-    _get_or_404(incident_id)
+@router.post("/{run_id}/restart", response_model=DiagnoseResponse)
+async def restart(run_id: str) -> DiagnoseResponse:
+    """Replace the current console and run this diagnosis again."""
+    _get_or_404(run_id)
     try:
-        fresh = await orchestrator.rediagnose(incident_id)
+        fresh = await orchestrator.restart(run_id)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     return DiagnoseResponse(
-        incident_id=fresh.id,
+        run_id=fresh.id,
         status=fresh.status,
         message="Fresh diagnosis started from the current workspace state.",
     )
 
 
-@router.post("/{incident_id}/cancel")
-async def cancel_diagnosis(incident_id: str) -> dict:
-    inc = _get_or_404(incident_id)
-    if not await orchestrator.cancel_diagnosis(incident_id):
+@router.post("/{run_id}/cancel")
+async def cancel_diagnosis(run_id: str) -> dict:
+    run = _get_or_404(run_id)
+    if not await orchestrator.cancel_diagnosis(run_id):
         raise HTTPException(
             409,
-            f"no active diagnosis to cancel (status={inc.status.value})",
+            f"no active diagnosis to cancel (status={run.status.value})",
         )
-    return {"incident_id": incident_id, "cancelled": True}
+    return {"run_id": run_id, "cancelled": True}
 
 
-@router.post("/{incident_id}/approve")
-async def approve(incident_id: str, req: ApproveRequest) -> dict:
-    inc = _get_or_404(incident_id)
-    if not inc.fix_proposal:
+@router.post("/{run_id}/approve")
+async def approve(run_id: str, req: ApproveRequest) -> dict:
+    run = _get_or_404(run_id)
+    if not run.fix_proposal:
         raise HTTPException(409, "no fix proposal to approve yet")
-    inc.add_activity("human_review", "done", "approved" if req.approved else "rejected")
-    incident_store.update(inc)
+    run.add_activity("human_review", "done", "approved" if req.approved else "rejected")
+    run_store.update(run)
     if not req.approved:
-        inc.status = IncidentStatus.REQUIRES_HUMAN_REVIEW
-        incident_store.update(inc)
-        return {"incident_id": incident_id, "approved": False}
-    return {"incident_id": incident_id, "approved": True}
+        run.status = RunStatus.REQUIRES_HUMAN_REVIEW
+        run_store.update(run)
+        return {"run_id": run_id, "approved": False}
+    return {"run_id": run_id, "approved": True}
 
 
-@router.post("/{incident_id}/approve-file-read")
-async def approve_file_read(incident_id: str, req: ApproveRequest) -> dict:
+@router.post("/{run_id}/approve-file-read")
+async def approve_file_read(run_id: str, req: ApproveRequest) -> dict:
     """Resume pipeline after user approves file reading."""
-    inc = _get_or_404(incident_id)
-    if inc.status != IncidentStatus.AWAITING_FILE_READ_APPROVAL:
+    run = _get_or_404(run_id)
+    if run.status != RunStatus.AWAITING_FILE_READ_APPROVAL:
         # Approval changes the status before the resumed background task starts.
         # A double-click (or a delayed browser retry) can therefore legitimately
-        # arrive while the incident is already COLLECTING_CONTEXT.  Treat that
+        # arrive while the run is already COLLECTING_CONTEXT.  Treat that
         # exact completed approval as idempotent rather than reporting a false
         # conflict to the user.
         already_approved = any(
             event.step == "file_read_approval" and event.status == "done"
-            for event in inc.activity
+            for event in run.activity
         )
-        if req.approved and already_approved and inc.status in {
-            IncidentStatus.COLLECTING_CONTEXT,
-            IncidentStatus.INVESTIGATING,
-            IncidentStatus.ROOT_CAUSE_FOUND,
-            IncidentStatus.AWAITING_FIX_APPROVAL,
-            IncidentStatus.SANDBOX_RUNNING,
-            IncidentStatus.SANDBOX_TESTING,
-            IncidentStatus.TESTING,
-            IncidentStatus.VERIFYING,
-            IncidentStatus.FIX_VERIFIED,
+        if req.approved and already_approved and run.status in {
+            RunStatus.COLLECTING_CONTEXT,
+            RunStatus.INVESTIGATING,
+            RunStatus.ROOT_CAUSE_FOUND,
+            RunStatus.AWAITING_FIX_APPROVAL,
+            RunStatus.SANDBOX_RUNNING,
+            RunStatus.SANDBOX_TESTING,
+            RunStatus.TESTING,
+            RunStatus.VERIFYING,
+            RunStatus.FIX_VERIFIED,
         }:
-            return {"incident_id": incident_id, "approved": True, "already_processed": True}
+            return {"run_id": run_id, "approved": True, "already_processed": True}
         raise HTTPException(
             409,
-            f"Cannot approve file read: incident is in {inc.status.value} state, not AWAITING_FILE_READ_APPROVAL"
+            f"Cannot approve file read: run is in {run.status.value} state, not AWAITING_FILE_READ_APPROVAL"
         )
     if not req.approved:
-        inc.status = IncidentStatus.REQUIRES_HUMAN_REVIEW
-        inc.add_activity("file_read_approval", "failed", "rejected by user")
-        incident_store.update(inc)
-        return {"incident_id": incident_id, "approved": False}
+        run.status = RunStatus.REQUIRES_HUMAN_REVIEW
+        run.add_activity("file_read_approval", "failed", "rejected by user")
+        run_store.update(run)
+        return {"run_id": run_id, "approved": False}
     
-    success = await orchestrator.resume_file_read(incident_id)
+    success = await orchestrator.resume_file_read(run_id)
     if not success:
         raise HTTPException(500, "Failed to resume file reading")
-    return {"incident_id": incident_id, "approved": True}
+    return {"run_id": run_id, "approved": True}
 
 
-@router.post("/{incident_id}/approve-fix")
-async def approve_fix(incident_id: str, req: ApproveRequest) -> dict:
+@router.post("/{run_id}/approve-fix")
+async def approve_fix(run_id: str, req: ApproveRequest) -> dict:
     """Keep Changes / resume pipeline after the user approves the proposed fix.
 
     Approving applies the patch to the real project workspace first (a
     pre-apply snapshot is kept), then verification runs against the snapshot.
     If verification fails, the workspace is rolled back automatically.
     """
-    inc = _get_or_404(incident_id)
+    run = _get_or_404(run_id)
 
     # Duplicate "Keep Changes" clicks (or browser retries on a dropped
     # response) can land while the earlier approval is already being
@@ -557,102 +592,102 @@ async def approve_fix(incident_id: str, req: ApproveRequest) -> dict:
     already_approved = (
         any(
             event.step == "fix_approval" and event.status == "done"
-            for event in inc.activity or []
+            for event in run.activity or []
         )
-        and inc.status in POST_FIX_GATE_STATUSES
+        and run.status in POST_FIX_GATE_STATUSES
     )
-    if inc.status != IncidentStatus.AWAITING_FIX_APPROVAL and not already_approved:
+    if run.status != RunStatus.AWAITING_FIX_APPROVAL and not already_approved:
         raise HTTPException(
             409,
-            f"Cannot approve fix: incident is in {inc.status.value} state, not AWAITING_FIX_APPROVAL"
+            f"Cannot approve fix: run is in {run.status.value} state, not AWAITING_FIX_APPROVAL"
         )
     if not req.approved:
-        if inc.status != IncidentStatus.AWAITING_FIX_APPROVAL:
+        if run.status != RunStatus.AWAITING_FIX_APPROVAL:
             raise HTTPException(
                 409,
                 "The fix was already approved and is being processed — it can no longer be rejected here."
             )
-        inc.status = IncidentStatus.REQUIRES_HUMAN_REVIEW
-        inc.add_activity("fix_approval", "failed", "rejected by user")
-        incident_store.update(inc)
-        await event_hub.publish(incident_id, {"type": "progress", "step": "fix_rejected", "status": "done", "message": "Patch rejected — workspace untouched"})
-        return {"incident_id": incident_id, "approved": False}
+        run.status = RunStatus.REQUIRES_HUMAN_REVIEW
+        run.add_activity("fix_approval", "failed", "rejected by user")
+        run_store.update(run)
+        await event_hub.publish(run_id, {"type": "progress", "step": "fix_rejected", "status": "done", "message": "Patch rejected — workspace untouched"})
+        return {"run_id": run_id, "approved": False}
 
     if already_approved:
-        return {"incident_id": incident_id, "approved": True, "already_approved": True}
+        return {"run_id": run_id, "approved": True, "already_approved": True}
 
     # Keep Changes: apply to the real workspace, then resume into sandbox
     # verification (which runs against the pre-apply snapshot). Never approve
     # after an unexpected workspace failure; the only exception is the
     # explicit read-only demo skip, which remains sandbox-only by design.
-    outcome = await orchestrator.stage_workspace_apply(incident_id)
+    outcome = await orchestrator.stage_workspace_apply(run_id)
     if not outcome.get("applied") and not outcome.get("skipped"):
         raise HTTPException(409, outcome.get("reason") or "Patch could not be applied.")
 
-    success = await orchestrator.resume_fix(incident_id)
+    success = await orchestrator.resume_fix(run_id)
     if not success:
         raise HTTPException(500, "Failed to resume fix")
-    return {"incident_id": incident_id, "approved": True}
+    return {"run_id": run_id, "approved": True}
 
 
-@router.post("/{incident_id}/apply-fix")
-async def apply_fix(incident_id: str) -> dict:
+@router.post("/{run_id}/apply-fix")
+async def apply_fix(run_id: str) -> dict:
     """Explicitly (re)apply the proposed patch to the project workspace."""
-    inc = _get_or_404(incident_id)
-    if not inc.fix_proposal or not (inc.fix_proposal.get("diff") or "").strip():
+    run = _get_or_404(run_id)
+    if not run.fix_proposal or not (run.fix_proposal.get("diff") or "").strip():
         raise HTTPException(409, "No fix proposal available to apply.")
-    outcome = await orchestrator.stage_workspace_apply(incident_id)
+    outcome = await orchestrator.stage_workspace_apply(run_id)
     if not outcome.get("applied"):
         raise HTTPException(409, outcome.get("reason") or "Patch could not be applied.")
     return {
-        "incident_id": incident_id,
+        "run_id": run_id,
         "applied": True,
         "files": outcome.get("files", []),
     }
 
 
-@router.post("/{incident_id}/commit")
-async def commit_changes(incident_id: str) -> dict:
+@router.post("/{run_id}/commit")
+async def commit_changes(run_id: str) -> dict:
     """Create a real git commit in the project workspace for applied changes."""
-    _get_or_404(incident_id)
+    _get_or_404(run_id)
     try:
-        outcome = await orchestrator.commit_changes(incident_id)
+        outcome = await orchestrator.commit_changes(run_id)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(500, f"Commit failed: {exc}") from exc
-    return {"incident_id": incident_id, "committed": True, **outcome}
+    return {"run_id": run_id, "committed": True, **outcome}
 
 
-@router.post("/{incident_id}/create-pr")
-async def create_pr(incident_id: str, req: CreatePRRequest | None = None) -> dict:
-    inc = _get_or_404(incident_id)
+@router.post("/{run_id}/create-pr")
+async def create_pr(run_id: str, req: CreatePRRequest | None = None) -> dict:
+    run = _get_or_404(run_id)
     if not (req or CreatePRRequest()).approved:
-        return {"incident_id": incident_id, "approved": False}
+        return {"run_id": run_id, "approved": False}
     try:
-        pr_info = await orchestrator.create_pull_request(incident_id)
+        pr_info = await orchestrator.create_pull_request(run_id)
     except ValueError as exc:
         # Configuration/gating problems are client-fixable — surface them as
         # a 409 with the actionable message instead of an opaque 502.
         raise HTTPException(409, str(exc)) from exc
     except Exception as exc:
         raise HTTPException(502, f"PR creation failed: {exc}") from exc
-    return {"incident_id": incident_id, **pr_info}
+    return {"run_id": run_id, **pr_info}
 
 
-@router.get("/{incident_id}/pr-status")
-async def pr_status(incident_id: str) -> dict:
-    _get_or_404(incident_id)
-    return await orchestrator.pr_status(incident_id)
+@router.get("/{run_id}/pr-status")
+async def pr_status(run_id: str) -> dict:
+    _get_or_404(run_id)
+    return await orchestrator.pr_status(run_id)
 
 
 # ---------------------------------------------------------------------------
 # Live activity stream (SSE)
 # ---------------------------------------------------------------------------
-@router.get("/{incident_id}/stream")
-async def stream_incident(incident_id: str, request: Request) -> StreamingResponse:
-    _get_or_404(incident_id)
-    queue = event_hub.subscribe(incident_id)
+@router.get("/{run_id}/stream")
+async def stream_run(run_id: str, request: Request) -> StreamingResponse:
+    _get_or_404(run_id)
+    queue = event_hub.subscribe(run_id)
 
     async def gen():
         # An exception escaping this generator aborts the response mid-body,
@@ -660,9 +695,9 @@ async def stream_incident(incident_id: str, request: Request) -> StreamingRespon
         # stream close. Errors are logged and the stream is ended politely so a
         # single bad event can never look like a dead server.
         try:
-            inc = incident_store.get(incident_id)
-            if inc:
-                for ev in inc.activity:
+            run = run_store.get(run_id)
+            if run:
+                for ev in run.activity:
                     payload = ev.model_dump() if hasattr(ev, "model_dump") else dict(ev)
                     payload["replay"] = True
                     yield _sse(payload)
@@ -679,21 +714,23 @@ async def stream_incident(incident_id: str, request: Request) -> StreamingRespon
                     event = json.loads(payload)
                 except (TypeError, ValueError):
                     logger.warning(
-                        "Dropping malformed event on incident %s stream", incident_id
+                        "Dropping malformed event on run %s stream", run_id
                     )
                     continue
                 yield _sse(event)
+                if event.get("step") == "reset":
+                    break
         except asyncio.CancelledError:
             # Normal client disconnect / server shutdown.
             raise
         except Exception:  # noqa: BLE001
-            logger.exception("Incident %s activity stream failed", incident_id)
+            logger.exception("Run %s activity stream failed", run_id)
             try:
                 yield _sse({"type": "stream_error"})
             except Exception:  # noqa: BLE001
                 pass
         finally:
-            event_hub.unsubscribe(incident_id, queue)
+            event_hub.unsubscribe(run_id, queue)
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -702,8 +739,8 @@ def _sse(data: dict) -> str:
     return f"data: {json.dumps(data)}\n\n"
 
 
-def _get_or_404(incident_id: str) -> Incident:
-    inc = incident_store.get(incident_id)
-    if not inc:
-        raise HTTPException(404, f"incident {incident_id!r} not found")
-    return inc
+def _get_or_404(run_id: str) -> Run:
+    run = run_store.get(run_id)
+    if not run:
+        raise HTTPException(404, f"run {run_id!r} not found")
+    return run

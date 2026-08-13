@@ -82,15 +82,15 @@ async def _get_git_status() -> dict:
     return {"status": status, "recent_commits": log}
 
 
-async def _get_logs(incident_id: str | None = None) -> dict:
-    from app.incidents.store import incident_store
+async def _get_logs(run_id: str | None = None) -> dict:
+    from app.runs.store import run_store
 
-    if incident_id:
-        inc = incident_store.get(incident_id)
-        if not inc:
-            return {"error": f"incident not found: {incident_id}"}
-        return {"incident_id": incident_id, "stack_trace": inc.stack_trace}
-    return {"note": "Provide incident_id to fetch its logs."}
+    if run_id:
+        run = run_store.get(run_id)
+        if not run:
+            return {"error": f"run not found: {run_id}"}
+        return {"run_id": run_id, "stack_trace": run.stack_trace}
+    return {"note": "Provide run_id to fetch its logs."}
 
 
 async def _get_deployment_status(project_id: str = "default") -> dict:
@@ -109,23 +109,23 @@ async def _get_deployment_status(project_id: str = "default") -> dict:
     return await client.get_deployment_status(service_id=render.get("service_id"))
 
 
-async def _run_test(incident_id: str) -> dict:
-    # Runs the sandbox verification (reproduce -> patch -> tests) for an incident.
+async def _run_test(run_id: str) -> dict:
+    # Runs the sandbox verification (reproduce -> patch -> tests) for a run.
     import asyncio
 
-    from app.incidents.store import incident_store
+    from app.runs.store import run_store
     from app.sandbox.sandbox_runner import SandboxRunner
 
-    inc = incident_store.get(incident_id)
-    if not inc or not inc.fix_proposal:
-        return {"error": "incident has no fix proposal to test"}
+    run = run_store.get(run_id)
+    if not run or not run.fix_proposal:
+        return {"error": "run has no fix proposal to test"}
     runner = SandboxRunner()
     # run_verification is synchronous (subprocess-blocking); offload it.
-    result = await asyncio.to_thread(runner.run_verification, inc.fix_proposal, inc.request_snapshot)
+    result = await asyncio.to_thread(runner.run_verification, run.fix_proposal, run.request_snapshot)
     return result.model_dump()
 
 
-async def _run_build(incident_id: str | None = None) -> dict:
+async def _run_build(run_id: str | None = None) -> dict:
     import subprocess as sp
 
     result = sp.run(
@@ -164,9 +164,9 @@ def _github_service_for_project(project_id: str):
     )
 
 
-async def _create_branch(incident_id: str, project_id: str = "default") -> dict:
+async def _create_branch(run_id: str, project_id: str = "default") -> dict:
     project, service = _github_service_for_project(project_id)
-    branch = service._branch_name(incident_id)
+    branch = service._branch_name(run_id)
     base = project.github_branch or service.client.default_branch
     branches = await service.client.list_branches()
     if branch not in branches:
@@ -175,19 +175,19 @@ async def _create_branch(incident_id: str, project_id: str = "default") -> dict:
 
 
 async def _commit_changes(
-    incident_id: str, message: str, files: list[dict], project_id: str = "default"
+    run_id: str, message: str, files: list[dict], project_id: str = "default"
 ) -> dict:
     _project, service = _github_service_for_project(project_id)
-    branch = service._branch_name(incident_id)
+    branch = service._branch_name(run_id)
     sha = await service.client.create_commit(branch, message, files)
     return {"ok": True, "branch": branch, "commit": sha}
 
 
 async def _create_pull_request(
-    incident_id: str, title: str, body: str, project_id: str = "default"
+    run_id: str, title: str, body: str, project_id: str = "default"
 ) -> dict:
     project, service = _github_service_for_project(project_id)
-    branch = service._branch_name(incident_id)
+    branch = service._branch_name(run_id)
     pr = await service.client.create_pull_request(
         head=branch, title=title, body=body, base=project.github_branch
     )
@@ -208,8 +208,8 @@ def _register_tools() -> None:
              {"path": "string"}, [], _list_files)
     )
     tool_registry.register(
-        Tool("get_logs", "Get logs / stack trace for an incident.",
-             {"incident_id": "string"}, ["incident_id"], _get_logs)
+        Tool("get_logs", "Get logs / stack trace for a run.",
+             {"run_id": "string"}, ["run_id"], _get_logs)
     )
     tool_registry.register(
         Tool("get_deployment_status", "Get Render deployment status for a project.",
@@ -220,30 +220,30 @@ def _register_tools() -> None:
              {}, [], _get_git_status)
     )
     tool_registry.register(
-        Tool("run_test", "Run sandbox verification for an incident.",
-             {"incident_id": "string"}, ["incident_id"], _run_test)
+        Tool("run_test", "Run sandbox verification for a run.",
+             {"run_id": "string"}, ["run_id"], _run_test)
     )
     tool_registry.register(
         Tool("run_build", "Compile-check the repository.",
-             {"incident_id": "string"}, [], _run_build)
+             {"run_id": "string"}, [], _run_build)
     )
     tool_registry.register(
         Tool("apply_patch", "Apply a validated unified diff.",
              {"diff": "string", "workspace_root": "string"}, ["diff"], _apply_patch)
     )
     tool_registry.register(
-        Tool("create_branch", "Create the repair branch for an incident.",
-             {"incident_id": "string", "project_id": "string"}, ["incident_id"], _create_branch)
+        Tool("create_branch", "Create the repair branch for a run.",
+             {"run_id": "string", "project_id": "string"}, ["run_id"], _create_branch)
     )
     tool_registry.register(
         Tool("commit_changes", "Commit changed files to the repair branch.",
-             {"incident_id": "string", "message": "string", "files": "list", "project_id": "string"},
-             ["incident_id", "message", "files"], _commit_changes)
+             {"run_id": "string", "message": "string", "files": "list", "project_id": "string"},
+             ["run_id", "message", "files"], _commit_changes)
     )
     tool_registry.register(
         Tool("create_pull_request", "Open a pull request for the repair.",
-             {"incident_id": "string", "title": "string", "body": "string", "project_id": "string"},
-             ["incident_id", "title", "body"], _create_pull_request)
+             {"run_id": "string", "title": "string", "body": "string", "project_id": "string"},
+             ["run_id", "title", "body"], _create_pull_request)
     )
 
 

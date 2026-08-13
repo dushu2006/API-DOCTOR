@@ -1,4 +1,4 @@
-"""API request/response schemas for incident ingestion and workflow."""
+"""API request/response schemas for run ingestion and workflow."""
 
 from __future__ import annotations
 
@@ -6,14 +6,14 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
-from app.incidents.models import Incident, IncidentStatus, ProgressEvent
+from app.runs.models import Run, RunStatus, ProgressEvent
 
 
 # ---------------------------------------------------------------------------
 # Requests
 # ---------------------------------------------------------------------------
 class DiagnoseRequest(BaseModel):
-    """Manually kick off diagnosis for a detected incident."""
+    """Manually kick off diagnosis for a detected run."""
 
     project_id: str = "default"
     endpoint: Optional[str] = None
@@ -22,8 +22,8 @@ class DiagnoseRequest(BaseModel):
     headers: Optional[dict[str, str]] = None
 
 
-class IngestIncidentRequest(BaseModel):
-    """Ingest a real production failure/log into an Incident."""
+class IngestRunRequest(BaseModel):
+    """Ingest a real production failure/log into an Run."""
 
     source: str = Field(default="manual", description="render | github_actions | manual | log")
     service_id: Optional[str] = None
@@ -57,15 +57,15 @@ class CreatePRRequest(BaseModel):
 # Responses
 # ---------------------------------------------------------------------------
 class DiagnoseResponse(BaseModel):
-    incident_id: str
-    status: IncidentStatus
+    run_id: str
+    status: RunStatus
     message: str = "Diagnosis started. Poll the status endpoint or subscribe to stream for updates."
 
 
-class IncidentResponse(BaseModel):
+class RunResponse(BaseModel):
     id: str
     project_id: str
-    status: IncidentStatus
+    status: RunStatus
     created_at: str
     updated_at: str
     detection: dict[str, Any]
@@ -77,7 +77,7 @@ class IncidentResponse(BaseModel):
     commit_sha: Optional[str] = None
 
     @classmethod
-    def from_model(cls, m: Incident) -> "IncidentResponse":
+    def from_model(cls, m: Run) -> "RunResponse":
         proposal = m.fix_proposal or {}
         return cls(
             id=m.id,
@@ -96,16 +96,16 @@ class IncidentResponse(BaseModel):
 
 
 class StatusResponse(BaseModel):
-    incident_id: str
-    status: IncidentStatus
+    run_id: str
+    status: RunStatus
     attempt_count: int
     error_message: Optional[str] = None
     activity: list[ProgressEvent] = Field(default_factory=list)
 
     @classmethod
-    def from_model(cls, m: Incident) -> "StatusResponse":
+    def from_model(cls, m: Run) -> "StatusResponse":
         return cls(
-            incident_id=m.id,
+            run_id=m.id,
             status=m.status,
             attempt_count=m.attempt_count,
             error_message=m.error_message,
@@ -114,7 +114,7 @@ class StatusResponse(BaseModel):
 
 
 class ContextResponse(BaseModel):
-    incident_id: str
+    run_id: str
     stack_trace: str
     implicated_files: list[str] = Field(default_factory=list)
     code_snippets: dict[str, Any] = Field(default_factory=dict)
@@ -129,7 +129,7 @@ class DiffFilePreview(BaseModel):
 
 
 class DiffResponse(BaseModel):
-    incident_id: str
+    run_id: str
     present: bool
     summary: Optional[str] = None
     diff: Optional[str] = None
@@ -142,7 +142,7 @@ class DiffResponse(BaseModel):
 
 
 class SandboxResponse(BaseModel):
-    incident_id: str
+    run_id: str
     present: bool
     passed: Optional[bool] = None
     steps: list[dict[str, Any]] = Field(default_factory=list)
@@ -151,7 +151,7 @@ class SandboxResponse(BaseModel):
 
 
 class PRInfoResponse(BaseModel):
-    incident_id: str
+    run_id: str
     present: bool
     pr_number: Optional[int] = None
     pr_url: Optional[str] = None

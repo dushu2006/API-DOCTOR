@@ -1,16 +1,16 @@
-"""Regression tests for the agentic one-step-at-a-time flow and incident hygiene.
+"""Regression tests for the agentic one-step-at-a-time flow and run hygiene.
 
 Covers the confirmed root causes from live testing:
 
 1. Every diagnosis is bound to ITS OWN project workspace (the sandbox/context
    runners must never leak a previously-diagnosed project's repo_root into the
-   next incident — including when the project's stored workspace_path is unset
+   next run — including when the project's stored workspace_path is unset
    and the canonical ``WorkspaceManager`` layout must be used).
-2. A FixProposal that references paths outside the incident's known context is
+2. A FixProposal that references paths outside the run's known context is
    rejected and regenerated with corrective feedback — never applied.
 3. A sandbox retry emits a single "Attempt N of M" marker instead of replaying
    the setup sequence (repo sync / discovery / file reads) a second time.
-4. Repeated ingestion of the same project+error reuses the open incident
+4. Repeated ingestion of the same project+error reuses the open run
    instead of piling up duplicate RECEIVED rows.
 """
 
@@ -22,8 +22,8 @@ from unittest.mock import AsyncMock, MagicMock
 from app.agent.fix_agent import FixProposal
 from app.agent.root_cause_agent import RootCauseAnalysis
 from app.core.config import settings
-from app.incidents.models import Incident, IncidentStatus
-from app.incidents.store import incident_store
+from app.runs.models import Run, RunStatus
+from app.runs.store import run_store
 from app.orchestrator import Orchestrator, orchestrator
 from app.sandbox.sandbox_runner import SandboxResult, SandboxStep
 
@@ -51,26 +51,26 @@ def _analysis(affected_files: list[str] | None = None) -> RootCauseAnalysis:
     )
 
 
-def _preapproved_incident(project_id: str = "default", *, with_cache: bool = True) -> Incident:
-    """Incident with both approval gates pre-seeded so the pipeline runs
+def _preapproved_run(project_id: str = "default", *, with_cache: bool = True) -> Run:
+    """Run with both approval gates pre-seeded so the pipeline runs
     end-to-end in one shot. Context is marked complete so no file is re-read."""
-    inc = Incident(
+    run = Run(
         project_id=project_id,
         request_snapshot={"method": "GET", "path": "/"},
         stack_trace="t",
     )
     context: dict = {
-        "incident_id": inc.id,
+        "run_id": run.id,
         "affected_files": ["main.py"],
         "code_snippets": {"main.py": {"content": "x\n"}},
         "_complete": True,
     }
     if with_cache:
         context["file_contents"] = {"main.py": "x\n"}
-    inc.context = context
-    inc.add_activity("file_read_approval", "done", "pre-approved")
-    inc.add_activity("fix_approval", "done", "pre-approved")
-    return incident_store.create(inc)
+    run.context = context
+    run.add_activity("file_read_approval", "done", "pre-approved")
+    run.add_activity("fix_approval", "done", "pre-approved")
+    return run_store.create(run)
 
 
 def _good_proposal(rel: str = "main.py", summary: str = "fix") -> FixProposal:
@@ -117,7 +117,7 @@ def _mock_agents(
 async def test_two_projects_diagnosed_back_to_back_never_cross_contaminate(
     tmp_path, monkeypatch, authenticated_user, project_factory
 ):
-    """The sandbox/context runners must be re-bound per incident, even when the
+    """The sandbox/context runners must be re-bound per run, even when the
     project's stored workspace_path is empty and the canonical
     WorkspaceManager layout (data/workspaces/{owner}/{repo}) has to be used."""
     ws_root = tmp_path / "workspaces"
@@ -143,16 +143,16 @@ async def test_two_projects_diagnosed_back_to_back_never_cross_contaminate(
     )
     calls = _mock_agents(orch, monkeypatch)
 
-    inc_a = _preapproved_incident("proj-a", with_cache=False)
+    inc_a = _preapproved_run("proj-a", with_cache=False)
     result_a = await orch.run_pipeline(inc_a.id)
-    assert result_a.status == IncidentStatus.FIX_VERIFIED
+    assert result_a.status == RunStatus.FIX_VERIFIED
     assert orch.sandbox_runner.repo_root == ws_a.resolve()
     assert orch.context_builder.repo_root == ws_a.resolve()
     assert calls[-1][0]["main.py"] == "A_CONTENT\n"
 
-    inc_b = _preapproved_incident("proj-b", with_cache=False)
+    inc_b = _preapproved_run("proj-b", with_cache=False)
     result_b = await orch.run_pipeline(inc_b.id)
-    assert result_b.status == IncidentStatus.FIX_VERIFIED
+    assert result_b.status == RunStatus.FIX_VERIFIED
     # repo_root must have moved to project B — never a shared global default.
     assert orch.sandbox_runner.repo_root == ws_b.resolve()
     assert orch.context_builder.repo_root == ws_b.resolve()
@@ -173,10 +173,10 @@ async def test_hallucinated_fix_path_rejected_and_regenerated(monkeypatch):
     )
     calls = _mock_agents(orch, monkeypatch, fix_calls=[bad, _good_proposal(summary="good")])
 
-    inc = _preapproved_incident()
-    result = await orch.run_pipeline(inc.id)
+    run = _preapproved_run()
+    result = await orch.run_pipeline(run.id)
 
-    assert result.status == IncidentStatus.FIX_VERIFIED
+    assert result.status == RunStatus.FIX_VERIFIED
     # The corrected proposal won — never the hallucinated "app/main.py".
     assert result.fix_proposal["files_changed"] == ["main.py"]
     assert result.fix_proposal["summary"] == "good"
@@ -196,7 +196,7 @@ async def test_hallucinated_fix_path_rejected_and_regenerated(monkeypatch):
 
 async def test_unresolvable_hallucinated_paths_fail_fix_generation(monkeypatch):
     """A model that keeps inventing paths exhausts its bounded retries and the
-    incident fails with a precise message — it is never handed to the sandbox."""
+    run fails with a precise message — it is never handed to the sandbox."""
     orch = Orchestrator()
     bad = FixProposal(
         summary="bad",
@@ -207,10 +207,10 @@ async def test_unresolvable_hallucinated_paths_fail_fix_generation(monkeypatch):
     )
     _mock_agents(orch, monkeypatch, fix_calls=[bad, bad, bad])
 
-    inc = _preapproved_incident()
-    result = await orch.run_pipeline(inc.id)
+    run = _preapproved_run()
+    result = await orch.run_pipeline(run.id)
 
-    assert result.status == IncidentStatus.FIX_GENERATION_FAILED
+    assert result.status == RunStatus.FIX_GENERATION_FAILED
     assert "app/main.py" in (result.error_message or "")
     assert result.fix_proposal is None
 
@@ -239,10 +239,10 @@ async def test_retry_emits_single_marker_and_no_setup_replay(monkeypatch):
         ]
     )
 
-    inc = _preapproved_incident()
-    result = await orch.run_pipeline(inc.id)
+    run = _preapproved_run()
+    result = await orch.run_pipeline(run.id)
 
-    assert result.status == IncidentStatus.FIX_VERIFIED
+    assert result.status == RunStatus.FIX_VERIFIED
     assert result.attempt_count == 2
 
     # Setup stages ran exactly ONCE — a retry must never re-emit them.
@@ -326,7 +326,7 @@ def _make_hackstore(tmp_path) -> Path:
 
 async def _run_hackstore_pipeline(
     monkeypatch, tmp_path, project_factory, fix_calls
-) -> tuple[Incident, Orchestrator]:
+) -> tuple[Run, Orchestrator]:
     """Run the real pipeline (real context build + real sandbox) for the
     HACK-STORE list_orders 'shipped' bug. ``fix_calls`` seeds the coder model
     outputs; a final ``None`` falls back to the correct patch."""
@@ -377,7 +377,7 @@ async def _run_hackstore_pipeline(
         MagicMock(wraps=orch.sandbox_runner.run_verification),
     )
 
-    inc = await orch.ingest_incident(
+    run = await orch.ingest_run(
         source="manual",
         stack_trace=_HACK_STORE_TRACE,
         message="AttributeError: 'dict' object has no attribute 'status'",
@@ -386,11 +386,11 @@ async def _run_hackstore_pipeline(
         project_id=project.id,
     )
     # Pre-approve the interactive gates so the pipeline runs end to end.
-    inc.add_activity("file_read_approval", "done", "pre-approved")
-    inc.add_activity("fix_approval", "done", "pre-approved")
-    incident_store.update(inc)
+    run.add_activity("file_read_approval", "done", "pre-approved")
+    run.add_activity("fix_approval", "done", "pre-approved")
+    run_store.update(run)
 
-    result = await orch.run_pipeline(inc.id)
+    result = await orch.run_pipeline(run.id)
     return result, orch
 
 
@@ -413,7 +413,7 @@ async def test_hackstore_list_orders_shipped_bug_end_to_end(
         monkeypatch, tmp_path, project_factory, [bad]
     )
 
-    assert result.status == IncidentStatus.FIX_VERIFIED, (
+    assert result.status == RunStatus.FIX_VERIFIED, (
         f"pipeline failed: {result.error_message}"
     )
     assert result.fix_proposal["files_changed"] == ["main.py"]
@@ -437,7 +437,7 @@ async def test_hackstore_list_orders_correct_patch_applies(
     """The happy path: the coder emits the correct flat-path patch on the
     first try and the real sandbox applies + verifies it."""
     result, _ = await _run_hackstore_pipeline(monkeypatch, tmp_path, project_factory, [])
-    assert result.status == IncidentStatus.FIX_VERIFIED
+    assert result.status == RunStatus.FIX_VERIFIED
     assert result.sandbox_result["passed"] is True
     apply_step = next(
         s for s in result.sandbox_result["steps"] if s["name"] == "apply_patch"
@@ -453,7 +453,7 @@ async def test_root_cause_named_path_not_on_disk_is_still_rejected(
 ):
     """A path named by the root-cause agent (rather than by the real context)
     must not become acceptable just because the model said it — it also has to
-    actually exist in the incident's read-cache or on the bound workspace."""
+    actually exist in the run's read-cache or on the bound workspace."""
     from app.projects.discovery import discover_project
 
     ws = _make_hackstore(tmp_path)
@@ -493,10 +493,10 @@ async def test_root_cause_named_path_not_on_disk_is_still_rejected(
         )),
     )
 
-    inc = _preapproved_incident("poison-proj")
-    result = await orch.run_pipeline(inc.id)
+    run = _preapproved_run("poison-proj")
+    result = await orch.run_pipeline(run.id)
 
-    assert result.status == IncidentStatus.FIX_GENERATION_FAILED
+    assert result.status == RunStatus.FIX_GENERATION_FAILED
     assert "app/demo_api/router.py" in (result.error_message or "")
 
 
@@ -524,7 +524,7 @@ async def test_resume_after_file_read_approval_does_not_replay_setup(
     orch = Orchestrator()
     _mock_agents(orch, monkeypatch)
 
-    inc = await orch.ingest_incident(
+    run = await orch.ingest_run(
         source="manual",
         stack_trace=_HACK_STORE_TRACE,
         message="AttributeError: 'dict' object has no attribute 'status'",
@@ -533,13 +533,13 @@ async def test_resume_after_file_read_approval_does_not_replay_setup(
         project_id=project.id,
     )
     # No pre-seeded approvals: the pipeline pauses at the file-read gate.
-    paused = await orch.run_pipeline(inc.id)
-    assert paused.status == IncidentStatus.AWAITING_FILE_READ_APPROVAL
+    paused = await orch.run_pipeline(run.id)
+    assert paused.status == RunStatus.AWAITING_FILE_READ_APPROVAL
 
-    assert await orch.resume_file_read(inc.id) is True
-    task = orch._pipeline_tasks.get(inc.id)
+    assert await orch.resume_file_read(run.id) is True
+    task = orch._pipeline_tasks.get(run.id)
     result = await task
-    assert result.status == IncidentStatus.AWAITING_FIX_APPROVAL
+    assert result.status == RunStatus.AWAITING_FIX_APPROVAL
 
     # Every setup step was emitted exactly ONCE across the two pipeline runs.
     for step in (
@@ -560,9 +560,9 @@ async def test_resume_after_file_read_approval_does_not_replay_setup(
 
 
 # ---------------------------------------------------------------------------
-# 4. Duplicate incident creation is prevented for an open error
+# 4. Every new input replaces the current run instead of creating history
 # ---------------------------------------------------------------------------
-async def test_duplicate_incident_not_created_for_open_error(
+async def test_new_input_replaces_current_run(
     tmp_path, authenticated_user, project_factory
 ):
     ws = tmp_path / "org" / "repo"
@@ -579,34 +579,22 @@ async def test_duplicate_incident_not_created_for_open_error(
         "ValueError: bad status\n"
     )
 
-    first = await orchestrator.ingest_incident(
+    first = await orchestrator.ingest_run(
         source="render", stack_trace=trace,
         endpoint="/api/orders", method="GET", project_id=project.id,
     )
-    second = await orchestrator.ingest_incident(
+    second = await orchestrator.ingest_run(
         source="render", stack_trace=trace,
         endpoint="/api/orders", method="GET", project_id=project.id,
     )
-    # Same open error -> same incident reused, no duplicate row.
-    assert second.id == first.id
-    assert len(incident_store.list_all(project.id)) == 1
-    assert any(ev.step == "duplicate_suppressed" for ev in second.activity)
+    assert second.id != first.id
+    assert run_store.get(first.id) is None
+    assert run_store.get_current("local", project.id).id == second.id
 
-    # A different endpoint is a different error -> new incident.
-    other = await orchestrator.ingest_incident(
+    other = await orchestrator.ingest_run(
         source="render", stack_trace=trace,
         endpoint="/api/other", method="GET", project_id=project.id,
     )
-    assert other.id != first.id
-    assert len(incident_store.list_all(project.id)) == 2
-
-    # Once the incident is closed (PR created), a fresh occurrence of the
-    # same error creates a NEW incident instead of resurrecting history.
-    first.status = IncidentStatus.PR_CREATED
-    incident_store.update(first)
-    fresh = await orchestrator.ingest_incident(
-        source="render", stack_trace=trace,
-        endpoint="/api/orders", method="GET", project_id=project.id,
-    )
-    assert fresh.id != first.id
-    assert len(incident_store.list_all(project.id)) == 3
+    assert other.id != second.id
+    assert run_store.get(second.id) is None
+    assert run_store.get_current("local", project.id).id == other.id

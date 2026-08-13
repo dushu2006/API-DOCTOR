@@ -78,9 +78,6 @@ class ProjectRecord(Base):
     settings: Mapped[ProjectSettingsRecord | None] = relationship(
         "ProjectSettingsRecord", back_populates="project", cascade="all, delete-orphan", uselist=False
     )
-    incidents: Mapped[list[IncidentRecord]] = relationship(
-        "IncidentRecord", back_populates="project", cascade="all, delete-orphan"
-    )
 
 
 class IntegrationRecord(Base):
@@ -117,26 +114,3 @@ class ProjectSettingsRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
     project: Mapped[ProjectRecord] = relationship("ProjectRecord", back_populates="settings")
-
-
-class IncidentRecord(Base):
-    __tablename__ = "incidents"
-
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
-    status: Mapped[str] = mapped_column(String(64), nullable=False, default="RECEIVED")
-    detection: Mapped[dict] = mapped_column(JSON, default=dict)
-    request_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
-    stack_trace: Mapped[str] = mapped_column(Text, default="")
-    context: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    root_cause: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    fix_proposal: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    sandbox_result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    pr_info: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
-    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    activity: Mapped[list] = mapped_column(JSON, default=list)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
-
-    project: Mapped[ProjectRecord] = relationship("ProjectRecord", back_populates="incidents")

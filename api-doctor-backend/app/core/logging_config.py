@@ -1,6 +1,6 @@
 """Structured application logging.
 
-Every major operation logs the incident id, operation, status, duration and any
+Every major operation logs the run id, operation, status, duration and any
 error. Secrets are never logged — callers must pass already-sanitised values, and
 the formatter applies an extra scrub to be safe.
 """
@@ -117,16 +117,16 @@ def get_logger(name: str) -> logging.Logger:
 
 def log_operation(
     logger: logging.Logger,
-    incident_id: str,
+    run_id: str,
     operation: str,
     status: str,
     duration: float | None = None,
     error: str | None = None,
     **extra: Any,
 ) -> None:
-    """Log a structured operation record for an incident."""
+    """Log a structured operation record for a run."""
     record: dict[str, Any] = {
-        "incident_id": incident_id,
+        "run_id": run_id,
         "operation": operation,
         "status": status,
     }
@@ -137,6 +137,6 @@ def log_operation(
     record.update(extra)
     level = logging.ERROR if status in ("failed", "error") else logging.INFO
     # Attach the payload as record.extra so JsonFormatter can merge it.
-    # Passing the dict itself as extra= would set incident_id/status/error as
+    # Passing the dict itself as extra= would set run_id/status/error as
     # LogRecord attributes and the formatter would drop them.
     logger.log(level, operation, extra={"extra": record})

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from app.context_builder.context_builder import ContextBuilder
-from app.incidents.models import Incident
+from app.runs.models import Run
 
 TRACE = (
     'Traceback (most recent call last):\n'
@@ -15,16 +15,16 @@ TRACE = (
 )
 
 
-def _incident() -> Incident:
-    return Incident(
+def _run() -> Run:
+    return Run(
         request_snapshot={"method": "POST", "path": "/api/v1/users/user_2/charge", "body": {"amount": 1}},
         stack_trace=TRACE,
     )
 
 
 def test_builds_minimal_context():
-    ctx = ContextBuilder().build(_incident())
-    assert ctx["incident_id"]
+    ctx = ContextBuilder().build(_run())
+    assert ctx["run_id"]
     assert ctx["exception_type"] == "AttributeError"
     # Stack trace is trimmed to project-relevant frames (no .venv noise)
     assert "AttributeError" in ctx["stack_trace"]
@@ -38,7 +38,7 @@ def test_builds_minimal_context():
 
 
 def test_context_small_enough():
-    ctx = ContextBuilder().build(_incident())
+    ctx = ContextBuilder().build(_run())
     total = sum(len(s["content"]) for s in ctx["code_snippets"].values())
     assert len(ctx["affected_files"]) <= 10  # MAX_CONTEXT_FILES
     # The whole repo must never be sent.

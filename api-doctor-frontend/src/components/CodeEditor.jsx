@@ -28,34 +28,34 @@ function registerTheme() {
     base: 'vs-dark',
     inherit: true,
     rules: [
-      { token: 'comment', foreground: '5C6B7F', fontStyle: 'italic' },
-      { token: 'keyword', foreground: 'F0A93A' },
-      { token: 'keyword.flow', foreground: 'F0A93A' },
-      { token: 'string', foreground: '7EE787' },
-      { token: 'string.escape', foreground: '34D399' },
-      { token: 'number', foreground: '79C0FF' },
-      { token: 'constant', foreground: '79C0FF' },
-      { token: 'type', foreground: '38BDF8' },
-      { token: 'class', foreground: '38BDF8' },
-      { token: 'function', foreground: 'D2A8FF' },
-      { token: 'variable', foreground: 'E8ECF1' },
-      { token: 'tag', foreground: 'F0A93A' },
-      { token: 'attribute.name', foreground: '38BDF8' },
-      { token: 'attribute.value', foreground: '7EE787' },
-      { token: 'delimiter', foreground: '8292A6' },
-      { token: 'regexp', foreground: 'F87171' }
+      { token: 'comment', foreground: '686B74', fontStyle: 'italic' },
+      { token: 'keyword', foreground: '9A91FF' },
+      { token: 'keyword.flow', foreground: '9A91FF' },
+      { token: 'string', foreground: 'D6D2A4' },
+      { token: 'string.escape', foreground: 'B9B3FF' },
+      { token: 'number', foreground: 'C3BFFF' },
+      { token: 'constant', foreground: 'C3BFFF' },
+      { token: 'type', foreground: 'A8A2FF' },
+      { token: 'class', foreground: 'A8A2FF' },
+      { token: 'function', foreground: 'E2E0FF' },
+      { token: 'variable', foreground: 'E4E5EA' },
+      { token: 'tag', foreground: '9A91FF' },
+      { token: 'attribute.name', foreground: 'B1ABFF' },
+      { token: 'attribute.value', foreground: 'D6D2A4' },
+      { token: 'delimiter', foreground: '858893' },
+      { token: 'regexp', foreground: 'FF5575' }
     ],
     colors: {
-      'editor.background': '#0A0E14',
-      'editor.foreground': '#E8ECF1',
-      'editor.lineHighlightBackground': '#131A24',
-      'editorLineNumber.foreground': '#4C5B6E',
-      'editorLineNumber.activeForeground': '#F0A93A',
-      'editor.selectionBackground': '#243144',
-      'editorCursor.foreground': '#F0A93A',
-      'editorIndentGuide.background': '#1E2B3C',
-      'scrollbarSlider.background': '#1E2B3C88',
-      'scrollbarSlider.hoverBackground': '#2E405988',
+      'editor.background': '#070809',
+      'editor.foreground': '#E2E3E8',
+      'editor.lineHighlightBackground': '#101114',
+      'editorLineNumber.foreground': '#44474D',
+      'editorLineNumber.activeForeground': '#9188FF',
+      'editor.selectionBackground': '#332F5C',
+      'editorCursor.foreground': '#9188FF',
+      'editorIndentGuide.background': '#24262A',
+      'scrollbarSlider.background': '#292B3088',
+      'scrollbarSlider.hoverBackground': '#45485088',
       'diffEditor.insertedTextBackground': '#10B98122',
       'diffEditor.removedTextBackground': '#F43F5E22',
       'diffEditor.insertedLineBackground': '#10B98118',
@@ -83,7 +83,7 @@ const LANGUAGE_BY_EXT = {
   c: 'c', h: 'c', cpp: 'cpp', hpp: 'cpp'
 };
 
-export function languageForPath(path = '') {
+function languageForPath(path = '') {
   const name = path.split('/').pop() || '';
   if (/^dockerfile$/i.test(name)) return 'dockerfile';
   const ext = (name.includes('.') ? name.split('.').pop() : '').toLowerCase();

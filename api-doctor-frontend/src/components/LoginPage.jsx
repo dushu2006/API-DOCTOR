@@ -103,7 +103,7 @@ export default function LoginPage({ onAuthenticated }) {
               Automated production failure diagnosis & code repair.
             </h1>
             <div style={{ fontSize: '13px', color: 'var(--text-muted)', lineHeight: 1.6 }}>
-              Enter your credentials to open the API Doctor workspace. Authenticate to ingest stack traces, inspect incident contexts, and generate pull requests.
+              Enter your credentials to open the API Doctor workspace. Authenticate to diagnose a current stack trace, inspect live steps, and generate pull requests.
             </div>
           </div>
           <div style={{ display: 'grid', gap: '12px' }}>

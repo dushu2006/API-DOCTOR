@@ -1,4 +1,4 @@
-"""Incident context builder.
+"""Run context builder.
 
 Builds a minimal, repository-aware context bundle for the LLM using the synchronized
 GitHub project workspace. Retrieves only required files (exact stack-trace file,
@@ -17,7 +17,7 @@ from app.code_retrieval.local_retriever import LocalRetriever
 from app.code_retrieval.semantic_retriever import SemanticRetriever
 from app.context_builder.stack_trace_parser import parse_stack_trace, StackFrame
 from app.core.config import settings
-from app.incidents.models import Incident
+from app.runs.models import Run
 from app.security.sanitizer import sanitize
 
 logger = logging.getLogger(__name__)
@@ -101,7 +101,7 @@ class ContextBuilder:
         self.repo_root = Path(repo_root).resolve()
         self.retriever.set_repo_root(self.repo_root)
 
-    def identify_files(self, incident: Incident, project_profile: Any = None) -> list[str]:
+    def identify_files(self, run: Run, project_profile: Any = None) -> list[str]:
         """Identify relevant file paths WITHOUT reading their contents.
 
         This powers the honest two-phase workflow: first the agent names the
@@ -109,7 +109,7 @@ class ContextBuilder:
         actually read one by one. Falls back to locating the project's primary
         entrypoint modules when the stack trace names no resolvable files.
         """
-        parsed = parse_stack_trace(incident.stack_trace, self.repo_root)
+        parsed = parse_stack_trace(run.stack_trace, self.repo_root)
         project_frames = [f for f in parsed.frames if _is_project_frame(f)]
         frames = project_frames if project_frames else parsed.frames
 
@@ -162,12 +162,12 @@ class ContextBuilder:
                 break
         return found
 
-    def parse_trace(self, incident: Incident) -> Any:
-        """Parse the incident stack trace (exposed for live progress events)."""
-        return parse_stack_trace(incident.stack_trace, self.repo_root)
+    def parse_trace(self, run: Run) -> Any:
+        """Parse the run stack trace (exposed for live progress events)."""
+        return parse_stack_trace(run.stack_trace, self.repo_root)
 
-    def build(self, incident: Incident, project_profile: Any = None) -> dict:
-        parsed = parse_stack_trace(incident.stack_trace, self.repo_root)
+    def build(self, run: Run, project_profile: Any = None) -> dict:
+        parsed = parse_stack_trace(run.stack_trace, self.repo_root)
 
         project_frames = [f for f in parsed.frames if _is_project_frame(f)]
         frames_for_retrieval = project_frames if project_frames else parsed.frames
@@ -183,14 +183,14 @@ class ContextBuilder:
         git_log = self._git_log()
 
         trimmed_trace = _trim_stack_trace(
-            incident.stack_trace, parsed.frames, parsed.exception_type, parsed.message
+            run.stack_trace, parsed.frames, parsed.exception_type, parsed.message
         )
         log_lines = trimmed_trace.splitlines()[:30]
 
         context = {
-            "incident_id": incident.id,
-            "project_id": incident.project_id,
-            "request_snapshot": incident.request_snapshot,
+            "run_id": run.id,
+            "project_id": run.project_id,
+            "request_snapshot": run.request_snapshot,
             "logs": log_lines,
             "stack_trace": trimmed_trace,
             "exception_type": parsed.exception_type,
@@ -228,16 +228,16 @@ class ContextBuilder:
         except Exception:
             return "Git not available"
 
-    def build_incident_payload(self, incident: Incident) -> dict:
+    def build_run_payload(self, run: Run) -> dict:
         """Sanitized serializable version used for the /context API response."""
-        parsed = parse_stack_trace(incident.stack_trace, self.repo_root)
+        parsed = parse_stack_trace(run.stack_trace, self.repo_root)
         project_frames = [f for f in parsed.frames if _is_project_frame(f)]
         frames_for_retrieval = project_frames if project_frames else parsed.frames
         return sanitize(
             {
-                "incident_id": incident.id,
+                "run_id": run.id,
                 "stack_trace": _trim_stack_trace(
-                    incident.stack_trace, parsed.frames, parsed.exception_type, parsed.message
+                    run.stack_trace, parsed.frames, parsed.exception_type, parsed.message
                 ),
                 "implicated_files": list(
                     dict.fromkeys(

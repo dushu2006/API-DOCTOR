@@ -11,8 +11,8 @@ import pytest
 
 from app.agent.fix_agent import FixProposal
 from app.agent.root_cause_agent import RootCauseAnalysis
-from app.incidents.models import Incident, IncidentStatus
-from app.incidents.store import incident_store
+from app.runs.models import Run, RunStatus
+from app.runs.store import run_store
 from app.orchestrator import Orchestrator
 from app.projects.discovery import discover_project
 from app.sandbox.patch_utils import PatchError, apply_patch, normalize_diff, resolve_diff_paths
@@ -100,10 +100,10 @@ def _make_project_workspace(tmp_path: Path) -> Path:
     return ws
 
 
-def _incident_with_proposal(project_id: str) -> Incident:
-    inc = Incident(
+def _run_with_proposal(project_id: str) -> Run:
+    run = Run(
         project_id=project_id,
-        status=IncidentStatus.AWAITING_FIX_APPROVAL,
+        status=RunStatus.AWAITING_FIX_APPROVAL,
         stack_trace=(
             "Traceback (most recent call last):\n"
             '  File "app/services/payment.py", line 2, in process_payment\n'
@@ -127,18 +127,18 @@ def _incident_with_proposal(project_id: str) -> Incident:
             risk="low",
         ).model_dump(),
     )
-    inc.add_activity("fix_approval", "pending", "proposed")
+    run.add_activity("fix_approval", "pending", "proposed")
     # Pre-seed a complete context + file-read approval so resume_fix goes
     # straight to sandbox verification (mirrors the UI flow after both gates).
-    inc.add_activity("file_read_approval", "done", "pre-approved")
-    inc.context = {
-        "incident_id": inc.id,
-        "stack_trace": inc.stack_trace,
+    run.add_activity("file_read_approval", "done", "pre-approved")
+    run.context = {
+        "run_id": run.id,
+        "stack_trace": run.stack_trace,
         "affected_files": ["app/services/payment.py"],
         "code_snippets": {},
         "_complete": True,
     }
-    return incident_store.create(inc)
+    return run_store.create(run)
 
 
 async def test_keep_changes_applies_patch_and_keeps_it_after_verification(
@@ -151,9 +151,9 @@ async def test_keep_changes_applies_patch_and_keeps_it_after_verification(
     orch.context_builder.set_repo_root(ws)
     orch.sandbox_runner.set_repo_root(ws)
 
-    inc = _incident_with_proposal("kp-proj")
+    run = _run_with_proposal("kp-proj")
 
-    outcome = await orch.stage_workspace_apply(inc.id)
+    outcome = await orch.stage_workspace_apply(run.id)
     assert outcome["applied"] is True
     assert outcome["files"] == ["app/services/payment.py"]
 
@@ -169,20 +169,20 @@ async def test_keep_changes_applies_patch_and_keeps_it_after_verification(
             SandboxStep(name="verify_fix", passed=True),
         ], logs="ok")),
     )
-    assert await orch.resume_fix(inc.id) is True
-    task = orch._pipeline_tasks.get(inc.id)
+    assert await orch.resume_fix(run.id) is True
+    task = orch._pipeline_tasks.get(run.id)
     result = await task
-    assert result.status == IncidentStatus.FIX_VERIFIED
+    assert result.status == RunStatus.FIX_VERIFIED
 
     # Passed verification -> the applied change stays in the workspace.
     content = (ws / "app" / "services" / "payment.py").read_text()
     assert "raise ValueError('no payment method')" in content
-    persisted = incident_store.get(inc.id)
+    persisted = run_store.get(run.id)
     assert persisted.fix_proposal["applied_files"] == ["app/services/payment.py"]
 
     # A delayed duplicate apply request must not attempt the old hunk again.
     # The temporary rollback state is gone after a successful verification.
-    duplicate = await orch.stage_workspace_apply(inc.id)
+    duplicate = await orch.stage_workspace_apply(run.id)
     assert duplicate == {"applied": True, "files": ["app/services/payment.py"]}
 
 
@@ -191,34 +191,35 @@ async def test_stage_apply_recovers_when_patch_is_already_on_disk(
 ):
     """A lost response/restart after the write must be an idempotent success.
 
-    The incident metadata intentionally says "not applied" while the workspace
+    The run metadata intentionally says "not applied" while the workspace
     already contains the exact post-image. The safety copy is reconstructed to
     the original source so a subsequent verification can still reproduce it.
     """
     ws = _make_project_workspace(tmp_path)
     project_factory(project_id="kp-retry", workspace_path=str(ws), profile=discover_project(ws))
     orch = Orchestrator()
-    inc = _incident_with_proposal("kp-retry")
-    inc.context["file_contents"] = {"app/services/payment.py": _BUGGY}
-    incident_store.update(inc)
+    run = _run_with_proposal("kp-retry")
+    run.context["file_contents"] = {"app/services/payment.py": _BUGGY}
+    run_store.update(run)
 
     # Simulate a process dying after the workspace write and before
     # fix_proposal.applied_files was persisted.
     apply_patch(_DIFF, ws)
-    assert not (incident_store.get(inc.id).fix_proposal or {}).get("applied_files")
+    assert not (run_store.get(run.id).fix_proposal or {}).get("applied_files")
 
-    outcome = await orch.stage_workspace_apply(inc.id)
+    outcome = await orch.stage_workspace_apply(run.id)
 
     assert outcome["applied"] is True
     assert outcome["already_applied"] is True
     assert "raise ValueError('no payment method')" in (
         ws / "app" / "services" / "payment.py"
     ).read_text()
-    persisted = incident_store.get(inc.id)
+    persisted = run_store.get(run.id)
     assert persisted.fix_proposal["applied_files"] == ["app/services/payment.py"]
-    state = orch._load_apply_state(inc.id)
+    state = orch._load_apply_state(run.id)
     assert state is not None
-    assert (Path(state["backup"]) / "app" / "services" / "payment.py").read_text() == _BUGGY
+    assert state["snapshots"]["app/services/payment.py"].decode("utf-8") == _BUGGY
+    assert "backup" not in state
 
 
 async def test_keep_changes_rolls_back_when_verification_fails(
@@ -231,22 +232,22 @@ async def test_keep_changes_rolls_back_when_verification_fails(
     orch.context_builder.set_repo_root(ws)
     orch.sandbox_runner.set_repo_root(ws)
 
-    inc = _incident_with_proposal("kp-fail")
-    outcome = await orch.stage_workspace_apply(inc.id)
+    run = _run_with_proposal("kp-fail")
+    outcome = await orch.stage_workspace_apply(run.id)
     assert outcome["applied"] is True
 
     monkeypatch.setattr(
         orch.sandbox_runner, "run_verification",
         MagicMock(return_value=SandboxResult(passed=False, error="still crashes", logs="x")),
     )
-    assert await orch.resume_fix(inc.id) is True
-    task = orch._pipeline_tasks.get(inc.id)
+    assert await orch.resume_fix(run.id) is True
+    task = orch._pipeline_tasks.get(run.id)
     result = await task
-    assert result.status in (IncidentStatus.VERIFICATION_FAILED, IncidentStatus.REPAIR_LIMIT_REACHED)
+    assert result.status in (RunStatus.VERIFICATION_FAILED, RunStatus.REPAIR_LIMIT_REACHED)
 
     # Failed verification -> workspace restored to the original code.
     assert (ws / "app" / "services" / "payment.py").read_text() == _BUGGY
-    persisted = incident_store.get(inc.id)
+    persisted = run_store.get(run.id)
     assert not persisted.fix_proposal.get("applied_files")
 
 
@@ -260,8 +261,8 @@ async def test_stage_apply_refuses_missing_original_file(
     project_factory(project_id="kp-missing", workspace_path=str(ws), profile=discover_project(ws))
     orch = Orchestrator()
 
-    inc = _incident_with_proposal("kp-missing")
-    outcome = await orch.stage_workspace_apply(inc.id)
+    run = _run_with_proposal("kp-missing")
+    outcome = await orch.stage_workspace_apply(run.id)
     assert outcome["applied"] is False
     assert "Original file not found" in outcome["reason"]
     # Nothing was touched.
@@ -274,9 +275,9 @@ async def test_stage_apply_reports_genuine_workspace_change(
     ws = _make_project_workspace(tmp_path)
     project_factory(project_id="kp-stale", workspace_path=str(ws), profile=discover_project(ws))
     orch = Orchestrator()
-    inc = _incident_with_proposal("kp-stale")
-    inc.context["file_contents"] = {"app/services/payment.py": _BUGGY}
-    incident_store.update(inc)
+    run = _run_with_proposal("kp-stale")
+    run.context["file_contents"] = {"app/services/payment.py": _BUGGY}
+    run_store.update(run)
 
     changed = _BUGGY.replace(
         "token = user.payment_method.token",
@@ -284,7 +285,7 @@ async def test_stage_apply_reports_genuine_workspace_change(
     )
     (ws / "app" / "services" / "payment.py").write_text(changed)
 
-    outcome = await orch.stage_workspace_apply(inc.id)
+    outcome = await orch.stage_workspace_apply(run.id)
 
     assert outcome["applied"] is False
     assert outcome["conflict"] == "workspace_changed"
@@ -304,8 +305,8 @@ async def test_stage_apply_relocates_misnamed_patch_paths(
     project_factory(project_id="kp-nested", workspace_path=str(ws), profile=discover_project(ws))
     orch = Orchestrator()
 
-    inc = _incident_with_proposal("kp-nested")
-    outcome = await orch.stage_workspace_apply(inc.id)
+    run = _run_with_proposal("kp-nested")
+    outcome = await orch.stage_workspace_apply(run.id)
     assert outcome["applied"] is True, outcome
     content = (ws / "src" / "app" / "services" / "payment.py").read_text()
     assert "raise ValueError('no payment method')" in content
@@ -326,11 +327,11 @@ async def test_commit_changes_creates_real_git_commit(
     project_factory(project_id="kp-commit", workspace_path=str(ws), profile=discover_project(ws))
     orch = Orchestrator()
 
-    inc = _incident_with_proposal("kp-commit")
-    outcome = await orch.stage_workspace_apply(inc.id)
+    run = _run_with_proposal("kp-commit")
+    outcome = await orch.stage_workspace_apply(run.id)
     assert outcome["applied"] is True
 
-    commit = await orch.commit_changes(inc.id)
+    commit = await orch.commit_changes(run.id)
     assert commit["sha"]
     assert commit["files"] == ["app/services/payment.py"]
 
@@ -347,12 +348,12 @@ async def test_commit_changes_requires_applied_fix(tmp_path, authenticated_user,
     subprocess.run(["git", "init", "-q"], cwd=ws, check=True)
     project_factory(project_id="kp-nocommit", workspace_path=str(ws), profile=discover_project(ws))
     orch = Orchestrator()
-    inc = _incident_with_proposal("kp-nocommit")
-    inc.fix_proposal.pop("applied_files", None)
-    incident_store.update(inc)
+    run = _run_with_proposal("kp-nocommit")
+    run.fix_proposal.pop("applied_files", None)
+    run_store.update(run)
 
     with pytest.raises(ValueError, match="Keep Changes"):
-        await orch.commit_changes(inc.id)
+        await orch.commit_changes(run.id)
 
 
 async def test_reject_fix_leaves_workspace_untouched(
@@ -364,24 +365,24 @@ async def test_reject_fix_leaves_workspace_untouched(
 
     ws = _make_project_workspace(tmp_path)
     project_factory(project_id="kp-reject", workspace_path=str(ws), profile=discover_project(ws))
-    inc = _incident_with_proposal("kp-reject")
-    assert inc.status == IncidentStatus.AWAITING_FIX_APPROVAL
+    run = _run_with_proposal("kp-reject")
+    assert run.status == RunStatus.AWAITING_FIX_APPROVAL
 
     import httpx
 
     transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
-            f"/api/incidents/{inc.id}/approve-fix",
+            f"/api/diagnosis/{run.id}/approve-fix",
             headers=auth_headers,
             json={"approved": False},
         )
 
     assert response.status_code == 200
-    assert response.json() == {"incident_id": inc.id, "approved": False}
+    assert response.json() == {"run_id": run.id, "approved": False}
 
-    persisted = incident_store.get(inc.id)
-    assert persisted.status == IncidentStatus.REQUIRES_HUMAN_REVIEW
+    persisted = run_store.get(run.id)
+    assert persisted.status == RunStatus.REQUIRES_HUMAN_REVIEW
     # Proposal discarded, nothing applied, workspace byte-identical.
     assert not persisted.fix_proposal.get("applied_files")
     assert (ws / "app" / "services" / "payment.py").read_text() == _BUGGY

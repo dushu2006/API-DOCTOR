@@ -78,7 +78,6 @@ class Project(BaseModel):
 
 class ProjectStatus(BaseModel):
     project: Project
-    incidents_count: int = 0
     integrations: list[IntegrationInfo] = Field(default_factory=list)
     workspace_ready: bool = False
     active_log_provider: Optional[str] = None

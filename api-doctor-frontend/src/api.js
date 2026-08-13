@@ -148,50 +148,51 @@ export const api = {
     body: JSON.stringify(data)
   }),
 
-  // Incidents
-  listIncidents: (projectId) => request(`/api/incidents${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ''}`, { suppressErrorLog: true }),
-  getIncident: (id) => request(`/api/incidents/${id}`),
-  getIncidentStatus: (id) => request(`/api/incidents/${id}/status`),
-  getIncidentContext: (id) => request(`/api/incidents/${id}/context`, { suppressErrorLog: true }),
-  getIncidentDiff: (id) => request(`/api/incidents/${id}/diff`, { suppressErrorLog: true }),
-  getIncidentSandbox: (id) => request(`/api/incidents/${id}/sandbox`, { suppressErrorLog: true }),
-  getIncidentPR: (id) => request(`/api/incidents/${id}/pr`, { suppressErrorLog: true }),
-  ingestIncident: (data) => request('/api/incidents/ingest', {
+  // One current diagnosis. The backend never returns a history collection.
+  getCurrentRun: (projectId) => request(`/api/diagnosis/current${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ''}`, { suppressErrorLog: true }),
+  resetCurrentRun: () => request('/api/diagnosis/current', { method: 'DELETE' }),
+  getRun: (id) => request(`/api/diagnosis/${id}`),
+  getRunStatus: (id) => request(`/api/diagnosis/${id}/status`),
+  getRunContext: (id) => request(`/api/diagnosis/${id}/context`, { suppressErrorLog: true }),
+  getRunDiff: (id) => request(`/api/diagnosis/${id}/diff`, { suppressErrorLog: true }),
+  getRunSandbox: (id) => request(`/api/diagnosis/${id}/sandbox`, { suppressErrorLog: true }),
+  getRunPR: (id) => request(`/api/diagnosis/${id}/pr`, { suppressErrorLog: true }),
+  ingestRun: (data) => request('/api/diagnosis/start', {
     method: 'POST',
     body: JSON.stringify(data)
   }),
-  syncRenderLogs: (serviceId, projectId) => request(`/api/incidents/sync-render${serviceId || projectId ? '?' : ''}${serviceId ? `service_id=${encodeURIComponent(serviceId)}` : ''}${serviceId && projectId ? '&' : ''}${projectId ? `project_id=${encodeURIComponent(projectId)}` : ''}`, {
+  syncRenderLogs: (serviceId, projectId) => request(`/api/diagnosis/sync-render${serviceId || projectId ? '?' : ''}${serviceId ? `service_id=${encodeURIComponent(serviceId)}` : ''}${serviceId && projectId ? '&' : ''}${projectId ? `project_id=${encodeURIComponent(projectId)}` : ''}`, {
     method: 'POST'
   }),
-  getRenderLogs: (projectId, limit = 200) => request(`/api/incidents/render-logs?limit=${encodeURIComponent(limit)}${projectId ? `&project_id=${encodeURIComponent(projectId)}` : ''}`),
-  diagnoseIncident: (id) => request(`/api/incidents/${id}/diagnose`, { method: 'POST' }),
-  rediagnoseIncident: (id) => request(`/api/incidents/${id}/rediagnose`, { method: 'POST' }),
-  triggerDemoScenario: (scenario = 'external_api') => request(`/api/incidents/trigger/${encodeURIComponent(scenario)}`, { method: 'POST' }),
-  cancelDiagnosis: (id) => request(`/api/incidents/${id}/cancel`, { method: 'POST' }),
-  approveFix: (id, approved = true) => request(`/api/incidents/${id}/approve`, {
+  getRenderLogs: (projectId, limit = 200) => request(`/api/diagnosis/render-logs?limit=${encodeURIComponent(limit)}${projectId ? `&project_id=${encodeURIComponent(projectId)}` : ''}`),
+  diagnoseRun: (id) => request(`/api/diagnosis/${id}/diagnose`, { method: 'POST' }),
+  restartRun: (id) => request(`/api/diagnosis/${id}/restart`, { method: 'POST' }),
+  triggerDemoScenario: (scenario = 'external_api') => request(`/api/diagnosis/trigger/${encodeURIComponent(scenario)}`, { method: 'POST' }),
+  cancelDiagnosis: (id) => request(`/api/diagnosis/${id}/cancel`, { method: 'POST' }),
+  approveFix: (id, approved = true) => request(`/api/diagnosis/${id}/approve`, {
     method: 'POST',
     body: JSON.stringify({ approved })
   }),
-  approveFileRead: (id, approved = true) => request(`/api/incidents/${id}/approve-file-read`, {
+  approveFileRead: (id, approved = true) => request(`/api/diagnosis/${id}/approve-file-read`, {
     method: 'POST',
     body: JSON.stringify({ approved })
   }),
-  approveFixProposal: (id, approved = true) => request(`/api/incidents/${id}/approve-fix`, {
+  approveFixProposal: (id, approved = true) => request(`/api/diagnosis/${id}/approve-fix`, {
     method: 'POST',
     body: JSON.stringify({ approved })
   }),
-  applyFix: (id) => request(`/api/incidents/${id}/apply-fix`, { method: 'POST' }),
-  commitFix: (id) => request(`/api/incidents/${id}/commit`, { method: 'POST' }),
-  createPR: (id) => request(`/api/incidents/${id}/create-pr`, {
+  applyFix: (id) => request(`/api/diagnosis/${id}/apply-fix`, { method: 'POST' }),
+  commitFix: (id) => request(`/api/diagnosis/${id}/commit`, { method: 'POST' }),
+  createPR: (id) => request(`/api/diagnosis/${id}/create-pr`, {
     method: 'POST',
     body: JSON.stringify({ approved: true })
   }),
 
-  // Subscribes to an incident's activity stream and keeps the subscription
+  // Subscribes to a run's activity stream and keeps the subscription
   // alive across backend restarts. A dropped connection previously closed the
   // EventSource for good, so the timeline stayed frozen until a full page
   // reload; the stream is now re-established with capped exponential backoff.
-  subscribeIncidentStream: (id, onEvent, onError) => {
+  subscribeRunStream: (id, onEvent, onError) => {
     let eventSource = null;
     let retryTimer = null;
     let attempt = 0;
@@ -200,7 +201,7 @@ export const api = {
     const connect = () => {
       if (stopped) return;
       const token = getSessionToken();
-      const url = `${API_BASE}/api/incidents/${id}/stream${token ? `?session_token=${encodeURIComponent(token)}` : ''}`;
+      const url = `${API_BASE}/api/diagnosis/${id}/stream${token ? `?session_token=${encodeURIComponent(token)}` : ''}`;
       eventSource = new EventSource(url);
 
       eventSource.onopen = () => {

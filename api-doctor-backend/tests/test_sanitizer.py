@@ -39,10 +39,10 @@ def test_sanitize_in_place():
 def test_context_has_no_secret_values():
     # Verify a built context never contains actual secret-shaped values.
     from app.context_builder.context_builder import ContextBuilder
-    from app.incidents.models import Incident
+    from app.runs.models import Run
 
     ctx = ContextBuilder().build(
-        Incident(request_snapshot={}, stack_trace="Traceback\nValueError: x")
+        Run(request_snapshot={}, stack_trace="Traceback\nValueError: x")
     )
     blob = repr(ctx)
     assert "sk-" not in blob

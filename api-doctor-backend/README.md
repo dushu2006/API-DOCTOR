@@ -1,18 +1,23 @@
 # 🩺 API Doctor — Backend
 
-AI-powered production incident **diagnosis and repair**. API Doctor watches a
-service, detects a failure, analyses the stack trace, retrieves only the
-relevant source, identifies the root cause, generates a minimal fix, verifies it
-in an isolated sandbox, and opens a reviewable GitHub Pull Request. It never
-modifies production directly and never auto-merges.
+AI-powered, point-in-time production **diagnosis and repair**. API Doctor reads
+the current failure, analyses the stack trace, retrieves only the relevant
+source, identifies the root cause, generates a minimal fix, verifies it in an
+isolated sandbox, and opens a reviewable GitHub Pull Request. It never modifies
+production directly and never auto-merges.
+
+Diagnosis data is deliberately ephemeral. Each user has at most one current run
+in process memory. A fresh start replaces it, a backend restart clears it, and
+no logs, timeline, context, diff, sandbox result, or PR metadata is stored in the
+database.
 
 ```
 Production error
   → Log/Error detection
-  → Incident creation
+  → Fresh in-memory diagnosis
   → Stack-trace analysis
   → Relevant-code retrieval
-  → Incident context
+  → Minimal context
   → AI root-cause analysis
   → AI fix generation
   → Sandbox (reproduce → patch → test → verify)
@@ -25,7 +30,7 @@ Production error
 ## Architecture
 
 ```
-Request → FailureDetector → IncidentStore → ContextBuilder (StackTraceParser + CodeRetrieval)
+Request → FailureDetector → Ephemeral RunStore → ContextBuilder (StackTraceParser + CodeRetrieval)
          → RootCauseAgent → FixAgent → SandboxRunner (Docker/local)
          → GitHubService (branch → commit → PR) → Dashboard (SSE)
 ```
@@ -45,7 +50,7 @@ api-doctor-backend/
 │   ├── github/                  # GitHub client + branch/commit/PR service
 │   ├── render/                  # Render client (service/deploy/logs)
 │   ├── projects/                # project → repo/branch/Render mapping
-│   ├── incidents/               # models, schemas, store, dashboard router
+│   ├── runs/                    # current-run models, memory store, API router
 │   ├── events/                  # live activity hub (SSE)
 │   ├── tools/                   # validated, controlled agent tools
 │   └── security/                # secret sanitisation
@@ -95,23 +100,23 @@ transport), so the whole demo is self-contained.
 
 ```bash
 # Deterministic bugs
-curl -X POST http://localhost:8000/api/incidents/trigger/external_api
-curl -X POST http://localhost:8000/api/incidents/trigger/config
-curl -X POST http://localhost:8000/api/incidents/trigger/null_pointer   # <- flagship
-curl -X POST http://localhost:8000/api/incidents/trigger/schema
+curl -X POST http://localhost:8000/api/diagnosis/trigger/external_api
+curl -X POST http://localhost:8000/api/diagnosis/trigger/config
+curl -X POST http://localhost:8000/api/diagnosis/trigger/null_pointer   # <- flagship
+curl -X POST http://localhost:8000/api/diagnosis/trigger/schema
 ```
 
-Each returns an `incident_id`. Poll the pipeline:
+Each returns a `run_id`. Poll the pipeline:
 
 ```bash
-curl http://localhost:8000/api/incidents/<id>/status    # live progress + activity
-curl http://localhost:8000/api/incidents/<id>/context   # retrieved context
-curl http://localhost:8000/api/incidents/<id>/diff      # proposed fix
-curl http://localhost:8000/api/incidents/<id>/sandbox   # sandbox verification
-curl http://localhost:8000/api/incidents/<id>/stream    # SSE live progress
-curl -X POST http://localhost:8000/api/incidents/<id>/cancel
-curl -X POST http://localhost:8000/api/incidents/<id>/approve
-curl -X POST http://localhost:8000/api/incidents/<id>/create-pr
+curl http://localhost:8000/api/diagnosis/<id>/status    # live progress + activity
+curl http://localhost:8000/api/diagnosis/<id>/context   # retrieved context
+curl http://localhost:8000/api/diagnosis/<id>/diff      # proposed fix
+curl http://localhost:8000/api/diagnosis/<id>/sandbox   # sandbox verification
+curl http://localhost:8000/api/diagnosis/<id>/stream    # SSE live progress
+curl -X POST http://localhost:8000/api/diagnosis/<id>/cancel
+curl -X POST http://localhost:8000/api/diagnosis/<id>/approve
+curl -X POST http://localhost:8000/api/diagnosis/<id>/create-pr
 ```
 
 ---
@@ -169,29 +174,30 @@ Two execution modes:
 - `SANDBOX_MODE=local` — subprocess in a temp workspace (no Docker required).
 
 Repair attempts are capped by `MAX_REPAIR_ATTEMPTS` (default 2). On failure the
-fix is regenerated with sandbox feedback; after the limit the incident stops in
+fix is regenerated with sandbox feedback; after the limit the run stops in
 `REPAIR_LIMIT_REACHED`.
 
 ---
 
 ## GitHub & Render
 
-- **GitHub**: `main → api-doctor/fix/<incident-id> → commit → Pull Request`.
+- **GitHub**: `main → api-doctor/fix/<run-id> → commit → Pull Request`.
   `main` is never modified. Read PR status and GitHub Actions check runs.
 - **Render**: isolated behind `RenderClient` (service, deployments, logs). The
   orchestrator never calls the Render API directly.
 - **Project mapping** (`app/projects`): stores each project's GitHub repo/branch
   and Render service in the application database. GitHub and Render credentials
   are project-scoped, encrypted at rest, and supplied explicitly to clients.
-- **Runtime log viewing**: `GET /api/incidents/render-logs?project_id=…` retrieves
-  sanitized Render entries for inspection without creating incidents. `sync-render`
-  retrieves the same entries and additionally runs failure detection.
+- **Runtime log viewing**: `GET /api/diagnosis/render-logs?project_id=…` retrieves
+  sanitized Render entries for immediate inspection without starting diagnosis.
+  `sync-render` reads a new point-in-time window and starts only the first
+  detected error as the current run.
 
 ---
 
 ## Security
 
-- Secrets are **never** sent to the LLM, frontend, browser, logs, or incident
+- Secrets are **never** sent to the LLM, frontend, browser, logs, or run
   responses.
 - `app/security.sanitizer` scrubs API keys, tokens, passwords, authorization
   headers, DB URLs, and env secret values (`DATABASE_URL=<SECRET_PRESENT>`).
@@ -207,30 +213,35 @@ fix is regenerated with sandbox feedback; after the limit the incident stops in
 | Method | Path                                  | Purpose                          |
 | ------ | ------------------------------------- | -------------------------------- |
 | GET    | `/health`                             | liveness + config status         |
-| GET    | `/api/incidents`                      | list incidents                   |
-| GET    | `/api/incidents/render-logs`          | view sanitized Render entries    |
-| POST   | `/api/incidents/sync-render`          | fetch Render entries + detect    |
-| GET    | `/api/incidents/{id}`                 | incident detail                  |
-| POST   | `/api/incidents/trigger/{scenario}`   | detect + start a seeded failure  |
-| POST   | `/api/incidents/{id}/diagnose`        | start/resume diagnosis           |
-| POST   | `/api/incidents/{id}/rediagnose`      | start fresh from current source  |
-| POST   | `/api/incidents/{id}/cancel`          | cancel active diagnosis          |
-| GET    | `/api/incidents/{id}/status`          | live status + activity           |
-| GET    | `/api/incidents/{id}/context`         | retrieved context                |
-| GET    | `/api/incidents/{id}/diff`            | proposed fix diff                |
-| GET    | `/api/incidents/{id}/sandbox`         | sandbox result                   |
-| GET    | `/api/incidents/{id}/pr`              | PR information                   |
-| GET    | `/api/incidents/{id}/pr-status`       | PR + checks status               |
-| POST   | `/api/incidents/{id}/approve`         | human approve / reject           |
-| POST   | `/api/incidents/{id}/apply-fix`       | idempotently apply verified fix  |
-| POST   | `/api/incidents/{id}/commit`          | commit applied workspace change  |
-| POST   | `/api/incidents/{id}/create-pr`       | open the repair PR               |
-| GET    | `/api/incidents/{id}/stream`          | SSE live agent activity          |
+| GET    | `/api/diagnosis/current`              | current run or `null`             |
+| DELETE | `/api/diagnosis/current`              | fresh start; forget current run   |
+| POST   | `/api/diagnosis/start`                | start from pasted logs/trace      |
+| GET    | `/api/diagnosis/render-logs`          | view sanitized Render entries     |
+| POST   | `/api/diagnosis/sync-render`          | fetch a fresh Render log window   |
+| GET    | `/api/diagnosis/{id}`                 | current run detail                |
+| POST   | `/api/diagnosis/trigger/{scenario}`   | detect + start a seeded failure  |
+| POST   | `/api/diagnosis/{id}/diagnose`        | start/resume diagnosis           |
+| POST   | `/api/diagnosis/{id}/restart`      | start fresh from current source  |
+| POST   | `/api/diagnosis/{id}/cancel`          | cancel active diagnosis          |
+| GET    | `/api/diagnosis/{id}/status`          | live status + activity           |
+| GET    | `/api/diagnosis/{id}/context`         | retrieved context                |
+| GET    | `/api/diagnosis/{id}/diff`            | proposed fix diff                |
+| GET    | `/api/diagnosis/{id}/sandbox`         | sandbox result                   |
+| GET    | `/api/diagnosis/{id}/pr`              | PR information                   |
+| GET    | `/api/diagnosis/{id}/pr-status`       | PR + checks status               |
+| POST   | `/api/diagnosis/{id}/approve`         | human approve / reject           |
+| POST   | `/api/diagnosis/{id}/apply-fix`       | idempotently apply verified fix  |
+| POST   | `/api/diagnosis/{id}/commit`          | commit applied workspace change  |
+| POST   | `/api/diagnosis/{id}/create-pr`       | open the repair PR               |
+| GET    | `/api/diagnosis/{id}/stream`          | SSE live agent activity          |
 | GET    | `/api/projects` / `/{id}`             | project mapping                  |
 | GET    | `/api/tools`                          | list controlled tools            |
 | POST   | `/api/benchmark`                      | compare configured models        |
 
-### Incident lifecycle
+There is intentionally no collection/list endpoint. Detail endpoints work only
+for the current in-memory run; an older ID returns `404` after a fresh start.
+
+### Current run lifecycle
 
 `DETECTED → COLLECTING_CONTEXT → INVESTIGATING → ROOT_CAUSE_FOUND → FIX_PLANNED →
 SANDBOX_TESTING → VERIFYING → FIX_VERIFIED → PR_CREATED → AWAITING_REVIEW`
@@ -247,7 +258,7 @@ pytest tests/ -v
 ```
 
 Covers: demo failures, traceback parser, context builder, secret sanitisation,
-AI response parsing, patch validation, sandbox, incident lifecycle, orchestrator,
+AI response parsing, patch validation, sandbox, run lifecycle, orchestrator,
 GitHub client, Render client, and a full **e2e** flow
 (failure → diagnosis → fix → sandbox → verification).
 

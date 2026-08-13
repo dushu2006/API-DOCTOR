@@ -46,7 +46,7 @@ export default function ProjectSelectorModal({
   };
 
   const deleteProject = async (project) => {
-    const confirmed = window.confirm(`Delete project "${project.name}"? This removes its incidents, settings, and integrations.`);
+    const confirmed = window.confirm(`Delete project "${project.name}"? This removes its runs, settings, and integrations.`);
     if (!confirmed) return;
     setBusyId(project.id);
     try {
@@ -80,7 +80,7 @@ export default function ProjectSelectorModal({
           <div style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: 700, letterSpacing: '0.08em', marginBottom: '8px' }}>PROJECTS</div>
           <div style={{ fontSize: '24px', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '8px' }}>Manage Projects</div>
           <div style={{ fontSize: '12px', color: 'var(--text-muted)', lineHeight: 1.6 }}>
-            Open, rename, duplicate, or delete your projects. Each project keeps its own repository, integrations, incidents, and repair history.
+            Open, rename, duplicate, or delete your projects. Each project keeps only its repository, integrations, and settings.
           </div>
         </div>
 

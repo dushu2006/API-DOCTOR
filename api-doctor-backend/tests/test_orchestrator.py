@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 from app.agent.fix_agent import FixProposal
 from app.agent.root_cause_agent import RootCauseAnalysis
-from app.incidents.models import Incident, IncidentStatus
-from app.incidents.store import incident_store
+from app.runs.models import Run, RunStatus
+from app.runs.store import run_store
 from app.orchestrator import Orchestrator
 from app.sandbox.sandbox_runner import SandboxResult, SandboxStep
 
@@ -23,19 +23,19 @@ def _context() -> dict:
     }
 
 
-def _preapprove_gates(incident_id: str) -> None:
-    """Skip interactive pause points so unit tests can run the pipeline in one shot."""
-    inc = incident_store.get(incident_id)
-    assert inc is not None
-    inc.add_activity("file_read_approval", "done", "pre-approved")
-    inc.add_activity("fix_approval", "done", "pre-approved")
-    incident_store.update(inc)
+def _preapprove_gates(run_id: str) -> None:
+    """Skip interactive pause points so unit tests ca run the pipeline in one shot."""
+    run = run_store.get(run_id)
+    assert run is not None
+    run.add_activity("file_read_approval", "done", "pre-approved")
+    run.add_activity("fix_approval", "done", "pre-approved")
+    run_store.update(run)
 
 
-async def _await_pipeline(orch: Orchestrator, incident_id: str):
-    task = orch._pipeline_tasks.get(incident_id)
+async def _await_pipeline(orch: Orchestrator, run_id: str):
+    task = orch._pipeline_tasks.get(run_id)
     if not task:
-        return incident_store.get(incident_id)
+        return run_store.get(run_id)
     result = await task
     await asyncio.sleep(0)
     return result
@@ -45,7 +45,7 @@ async def test_full_pipeline_success(monkeypatch):
     orch = Orchestrator()
 
     monkeypatch.setattr(
-        orch.context_builder, "build", lambda inc: _context()
+        orch.context_builder, "build", lambda run: _context()
     )
     monkeypatch.setattr(
         orch.root_cause_agent, "analyze",
@@ -76,12 +76,12 @@ async def test_full_pipeline_success(monkeypatch):
         ], logs="ok")),
     )
 
-    inc = Incident(request_snapshot=_context()["request_snapshot"], stack_trace="t")
-    incident_store.create(inc)
-    _preapprove_gates(inc.id)
-    result = await orch.run_pipeline(inc.id)
+    run = Run(request_snapshot=_context()["request_snapshot"], stack_trace="t")
+    run_store.create(run)
+    _preapprove_gates(run.id)
+    result = await orch.run_pipeline(run.id)
 
-    assert result.status == IncidentStatus.FIX_VERIFIED
+    assert result.status == RunStatus.FIX_VERIFIED
     assert result.root_cause["category"] == "CODE_BUG"
     assert result.fix_proposal["summary"] == "null check"
     assert result.sandbox_result["passed"] is True
@@ -90,7 +90,7 @@ async def test_full_pipeline_success(monkeypatch):
 
 async def test_low_confidence_stops_pipeline(monkeypatch):
     orch = Orchestrator()
-    monkeypatch.setattr(orch.context_builder, "build", lambda inc: _context())
+    monkeypatch.setattr(orch.context_builder, "build", lambda run: _context())
     monkeypatch.setattr(
         orch.root_cause_agent, "analyze",
         AsyncMock(return_value=RootCauseAnalysis(
@@ -99,17 +99,17 @@ async def test_low_confidence_stops_pipeline(monkeypatch):
             reason="not enough info",
         )),
     )
-    inc = Incident(request_snapshot={}, stack_trace="t")
-    incident_store.create(inc)
-    _preapprove_gates(inc.id)
-    result = await orch.run_pipeline(inc.id)
-    assert result.status == IncidentStatus.INVESTIGATION_FAILED
+    run = Run(request_snapshot={}, stack_trace="t")
+    run_store.create(run)
+    _preapprove_gates(run.id)
+    result = await orch.run_pipeline(run.id)
+    assert result.status == RunStatus.INVESTIGATION_FAILED
     assert result.fix_proposal is None
 
 
 async def test_repair_limit_reached(monkeypatch):
     orch = Orchestrator()
-    monkeypatch.setattr(orch.context_builder, "build", lambda inc: _context())
+    monkeypatch.setattr(orch.context_builder, "build", lambda run: _context())
     monkeypatch.setattr(
         orch.root_cause_agent, "analyze",
         AsyncMock(return_value=RootCauseAnalysis(
@@ -130,61 +130,61 @@ async def test_repair_limit_reached(monkeypatch):
         orch.sandbox_runner, "run_verification",
         MagicMock(return_value=SandboxResult(passed=False, error="still crashes", logs="x")),
     )
-    inc = Incident(request_snapshot={}, stack_trace="t")
-    incident_store.create(inc)
-    _preapprove_gates(inc.id)
-    result = await orch.run_pipeline(inc.id)
-    assert result.status == IncidentStatus.REPAIR_LIMIT_REACHED
+    run = Run(request_snapshot={}, stack_trace="t")
+    run_store.create(run)
+    _preapprove_gates(run.id)
+    result = await orch.run_pipeline(run.id)
+    assert result.status == RunStatus.REPAIR_LIMIT_REACHED
     assert result.attempt_count == 2  # MAX_REPAIR_ATTEMPTS
 
 
 async def test_start_diagnosis_allows_only_one_active_task(monkeypatch):
     orch = Orchestrator()
-    inc = incident_store.create(Incident())
+    run = run_store.create(Run())
     pipeline_started = asyncio.Event()
     release_pipeline = asyncio.Event()
 
-    async def slow_pipeline(incident_id: str):
+    async def slow_pipeline(run_id: str):
         pipeline_started.set()
         await release_pipeline.wait()
-        return incident_store.get(incident_id)
+        return run_store.get(run_id)
 
     monkeypatch.setattr(orch, "run_pipeline", slow_pipeline)
 
-    assert orch.start_diagnosis(inc.id) is True
+    assert orch.start_diagnosis(run.id) is True
     await pipeline_started.wait()
-    assert orch.start_diagnosis(inc.id) is False
+    assert orch.start_diagnosis(run.id) is False
 
     release_pipeline.set()
-    await orch._pipeline_tasks[inc.id]
+    await orch._pipeline_tasks[run.id]
     await asyncio.sleep(0)
-    assert inc.id not in orch._pipeline_tasks
+    assert run.id not in orch._pipeline_tasks
 
 
 async def test_cancel_diagnosis_sets_terminal_status(monkeypatch):
     orch = Orchestrator()
-    inc = incident_store.create(Incident())
+    run = run_store.create(Run())
     pipeline_started = asyncio.Event()
 
-    async def waiting_pipeline(incident_id: str):
+    async def waiting_pipeline(run_id: str):
         pipeline_started.set()
         await asyncio.Event().wait()
 
     monkeypatch.setattr(orch, "run_pipeline", waiting_pipeline)
 
-    assert orch.start_diagnosis(inc.id) is True
+    assert orch.start_diagnosis(run.id) is True
     await pipeline_started.wait()
-    assert await orch.cancel_diagnosis(inc.id) is True
+    assert await orch.cancel_diagnosis(run.id) is True
 
-    persisted = incident_store.get(inc.id)
+    persisted = run_store.get(run.id)
     assert persisted is not None
-    assert persisted.status == IncidentStatus.CANCELLED
+    assert persisted.status == RunStatus.CANCELLED
     assert persisted.status.is_terminal
     assert persisted.activity[-1].status == "cancelled"
 
 
 def _mock_successful_agents(orch: Orchestrator, monkeypatch) -> None:
-    monkeypatch.setattr(orch.context_builder, "build", lambda inc: _context())
+    monkeypatch.setattr(orch.context_builder, "build", lambda run: _context())
     monkeypatch.setattr(
         orch.root_cause_agent, "analyze",
         AsyncMock(return_value=RootCauseAnalysis(
@@ -218,12 +218,12 @@ def _mock_successful_agents(orch: Orchestrator, monkeypatch) -> None:
 async def test_pipeline_pauses_for_file_read_approval(monkeypatch):
     orch = Orchestrator()
     _mock_successful_agents(orch, monkeypatch)
-    inc = Incident(request_snapshot=_context()["request_snapshot"], stack_trace="t")
-    incident_store.create(inc)
+    run = Run(request_snapshot=_context()["request_snapshot"], stack_trace="t")
+    run_store.create(run)
 
-    result = await orch.run_pipeline(inc.id)
+    result = await orch.run_pipeline(run.id)
 
-    assert result.status == IncidentStatus.AWAITING_FILE_READ_APPROVAL
+    assert result.status == RunStatus.AWAITING_FILE_READ_APPROVAL
     assert result.fix_proposal is None
     assert result.context is not None
 
@@ -231,17 +231,17 @@ async def test_pipeline_pauses_for_file_read_approval(monkeypatch):
 async def test_file_read_approval_continues_to_fix_approval(monkeypatch):
     orch = Orchestrator()
     _mock_successful_agents(orch, monkeypatch)
-    inc = Incident(request_snapshot=_context()["request_snapshot"], stack_trace="t")
-    incident_store.create(inc)
+    run = Run(request_snapshot=_context()["request_snapshot"], stack_trace="t")
+    run_store.create(run)
 
-    paused = await orch.run_pipeline(inc.id)
-    assert paused.status == IncidentStatus.AWAITING_FILE_READ_APPROVAL
+    paused = await orch.run_pipeline(run.id)
+    assert paused.status == RunStatus.AWAITING_FILE_READ_APPROVAL
 
-    assert await orch.resume_file_read(inc.id) is True
-    result = await _await_pipeline(orch, inc.id)
+    assert await orch.resume_file_read(run.id) is True
+    result = await _await_pipeline(orch, run.id)
 
     assert result is not None
-    assert result.status == IncidentStatus.AWAITING_FIX_APPROVAL
+    assert result.status == RunStatus.AWAITING_FIX_APPROVAL
     assert result.fix_proposal is not None
     assert result.root_cause is not None
 
@@ -249,93 +249,93 @@ async def test_file_read_approval_continues_to_fix_approval(monkeypatch):
 async def test_fix_approval_continues_to_sandbox(monkeypatch):
     orch = Orchestrator()
     _mock_successful_agents(orch, monkeypatch)
-    inc = Incident(request_snapshot=_context()["request_snapshot"], stack_trace="t")
-    incident_store.create(inc)
+    run = Run(request_snapshot=_context()["request_snapshot"], stack_trace="t")
+    run_store.create(run)
 
-    await orch.run_pipeline(inc.id)
-    assert await orch.resume_file_read(inc.id) is True
-    paused = await _await_pipeline(orch, inc.id)
-    assert paused.status == IncidentStatus.AWAITING_FIX_APPROVAL
+    await orch.run_pipeline(run.id)
+    assert await orch.resume_file_read(run.id) is True
+    paused = await _await_pipeline(orch, run.id)
+    assert paused.status == RunStatus.AWAITING_FIX_APPROVAL
 
-    assert await orch.resume_fix(inc.id) is True
-    result = await _await_pipeline(orch, inc.id)
+    assert await orch.resume_fix(run.id) is True
+    result = await _await_pipeline(orch, run.id)
 
     assert result is not None
-    assert result.status == IncidentStatus.FIX_VERIFIED
+    assert result.status == RunStatus.FIX_VERIFIED
     assert result.sandbox_result["passed"] is True
 
 
 async def test_cancel_paused_file_read_approval():
     orch = Orchestrator()
-    inc = incident_store.create(Incident(status=IncidentStatus.AWAITING_FILE_READ_APPROVAL))
+    run = run_store.create(Run(status=RunStatus.AWAITING_FILE_READ_APPROVAL))
 
-    assert orch.has_active_pipeline(inc.id) is False
-    assert await orch.cancel_diagnosis(inc.id) is True
+    assert orch.has_active_pipeline(run.id) is False
+    assert await orch.cancel_diagnosis(run.id) is True
 
-    persisted = incident_store.get(inc.id)
+    persisted = run_store.get(run.id)
     assert persisted is not None
-    assert persisted.status == IncidentStatus.CANCELLED
+    assert persisted.status == RunStatus.CANCELLED
     assert persisted.error_message == "Diagnosis cancelled by user"
 
 
 async def test_cancel_stuck_collecting_context():
     orch = Orchestrator()
-    inc = incident_store.create(Incident(status=IncidentStatus.COLLECTING_CONTEXT))
+    run = run_store.create(Run(status=RunStatus.COLLECTING_CONTEXT))
 
-    assert await orch.cancel_diagnosis(inc.id) is True
-    persisted = incident_store.get(inc.id)
+    assert await orch.cancel_diagnosis(run.id) is True
+    persisted = run_store.get(run.id)
     assert persisted is not None
-    assert persisted.status == IncidentStatus.CANCELLED
+    assert persisted.status == RunStatus.CANCELLED
 
 
 async def test_cancel_already_terminal_returns_false():
     orch = Orchestrator()
-    inc = incident_store.create(Incident(status=IncidentStatus.CANCELLED))
-    assert await orch.cancel_diagnosis(inc.id) is False
+    run = run_store.create(Run(status=RunStatus.CANCELLED))
+    assert await orch.cancel_diagnosis(run.id) is False
 
 
 async def test_start_diagnosis_recovers_stuck_collecting_context(monkeypatch):
     orch = Orchestrator()
     _mock_successful_agents(orch, monkeypatch)
-    inc = incident_store.create(Incident(
-        status=IncidentStatus.COLLECTING_CONTEXT,
+    run = run_store.create(Run(
+        status=RunStatus.COLLECTING_CONTEXT,
         request_snapshot=_context()["request_snapshot"],
         stack_trace="t",
     ))
-    inc.add_activity("file_read_approval", "done", "already approved")
-    incident_store.update(inc)
+    run.add_activity("file_read_approval", "done", "already approved")
+    run_store.update(run)
 
-    assert orch.start_diagnosis(inc.id) is True
-    result = await _await_pipeline(orch, inc.id)
+    assert orch.start_diagnosis(run.id) is True
+    result = await _await_pipeline(orch, run.id)
     assert result is not None
-    assert result.status == IncidentStatus.AWAITING_FIX_APPROVAL
+    assert result.status == RunStatus.AWAITING_FIX_APPROVAL
 
 
 async def test_pipeline_fails_gracefully_when_no_workspace(monkeypatch):
     """Regression: with no synchronized workspace and DEMO_MODE off, the pipeline
-    must mark the incident FAILED instead of raising out of the background task
+    must mark the run FAILED instead of raising out of the background task
     and leaving it stuck in RECEIVED."""
     from app.core.config import settings
 
     monkeypatch.setattr(settings, "DEMO_MODE", False)
     # No project exists (autouse fixture reset projects), so no workspace resolves.
     orch = Orchestrator()
-    inc = incident_store.create(Incident(stack_trace="t"))
-    assert inc.project_id == "default"
+    run = run_store.create(Run(stack_trace="t"))
+    assert run.project_id == "default"
 
-    result = await orch.run_pipeline(inc.id)
+    result = await orch.run_pipeline(run.id)
 
-    persisted = incident_store.get(inc.id)
+    persisted = run_store.get(run.id)
     assert persisted is not None
-    assert persisted.status == IncidentStatus.FAILED
+    assert persisted.status == RunStatus.FAILED
     assert "workspace" in (persisted.error_message or "").lower()
 
 
-async def test_rediagnose_creates_fresh_incident_without_stale_outputs(monkeypatch):
+async def test_restart_replaces_run_without_stale_outputs(monkeypatch):
     orch = Orchestrator()
-    original = incident_store.create(Incident(
+    original = run_store.create(Run(
         project_id="fresh-project",
-        status=IncidentStatus.FIX_VERIFIED,
+        status=RunStatus.FIX_VERIFIED,
         detection={"endpoint": "/orders", "nested": {"value": 1}},
         request_snapshot={"method": "GET", "path": "/orders"},
         stack_trace="ValueError: stale",
@@ -346,24 +346,25 @@ async def test_rediagnose_creates_fresh_incident_without_stale_outputs(monkeypat
     ))
     started: list[str] = []
     monkeypatch.setattr(
-        orch, "start_diagnosis", lambda incident_id: started.append(incident_id) or True
+        orch, "start_diagnosis", lambda run_id: started.append(run_id) or True
     )
 
-    fresh = await orch.rediagnose(original.id)
+    fresh = await orch.restart(original.id)
 
     assert fresh.id != original.id
-    assert fresh.status == IncidentStatus.RECEIVED
+    assert fresh.status == RunStatus.RECEIVED
     assert fresh.project_id == original.project_id
     assert fresh.stack_trace == original.stack_trace
     assert fresh.context is None
     assert fresh.root_cause is None
     assert fresh.fix_proposal is None
     assert fresh.sandbox_result is None
-    assert fresh.detection["rediagnosis_of"] == original.id
     assert started == [fresh.id]
-    # Nested input data is independent from the historical incident.
+    assert run_store.get(original.id) is None
+    assert run_store.get_current(original.owner_id).id == fresh.id
+    # Input data is copied before the old run is discarded.
     fresh.detection["nested"]["value"] = 2
-    assert incident_store.get(original.id).detection["nested"]["value"] == 1
+    assert original.detection["nested"]["value"] == 1
 
 
 async def test_create_pull_request_requires_synchronized_workspace(monkeypatch):
@@ -373,8 +374,8 @@ async def test_create_pull_request_requires_synchronized_workspace(monkeypatch):
 
     monkeypatch.setattr(settings, "DEMO_MODE", False)
     orch = Orchestrator()
-    inc = incident_store.create(Incident(
-        status=IncidentStatus.FIX_VERIFIED,
+    run = run_store.create(Run(
+        status=RunStatus.FIX_VERIFIED,
         stack_trace="t",
         fix_proposal={
             "summary": "fix",
@@ -387,14 +388,14 @@ async def test_create_pull_request_requires_synchronized_workspace(monkeypatch):
     import pytest
 
     with pytest.raises(ValueError, match="workspace"):
-        await orch.create_pull_request(inc.id)
+        await orch.create_pull_request(run.id)
 
 
 async def test_empty_coder_diff_fails_fix_generation(monkeypatch):
     """An empty diff from the coder model must surface as a fix-generation
     failure, not proceed to a confusing sandbox verification failure."""
     orch = Orchestrator()
-    monkeypatch.setattr(orch.context_builder, "build", lambda inc: _context())
+    monkeypatch.setattr(orch.context_builder, "build", lambda run: _context())
     monkeypatch.setattr(
         orch.root_cause_agent, "analyze",
         AsyncMock(return_value=RootCauseAnalysis(
@@ -409,11 +410,11 @@ async def test_empty_coder_diff_fails_fix_generation(monkeypatch):
             summary="s", files_changed=["f"], diff="", reason="r", risk="low",
         )),
     )
-    inc = Incident(request_snapshot=_context()["request_snapshot"], stack_trace="t")
-    incident_store.create(inc)
-    _preapprove_gates(inc.id)
+    run = Run(request_snapshot=_context()["request_snapshot"], stack_trace="t")
+    run_store.create(run)
+    _preapprove_gates(run.id)
 
-    result = await orch.run_pipeline(inc.id)
-    assert result.status == IncidentStatus.FIX_GENERATION_FAILED
+    result = await orch.run_pipeline(run.id)
+    assert result.status == RunStatus.FIX_GENERATION_FAILED
     assert "empty diff" in (result.error_message or "").lower()
 

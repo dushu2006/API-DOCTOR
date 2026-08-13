@@ -18,7 +18,6 @@ export default function ProfileModal({
   user,
   projects = [],
   currentProject,
-  incidentsCount = 0,
   onClose,
   onUpdated,
   onLogout,
@@ -140,7 +139,7 @@ export default function ProfileModal({
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: '12px' }}>
             <StatCard label="Projects" value={String(projects.length)} />
             <StatCard label="Current Project" value={currentProject?.name || 'None'} />
-            <StatCard label="Visible Incidents" value={String(incidentsCount)} />
+            <StatCard label="Diagnosis Storage" value="None" />
           </div>
 
           <Section title="Profile Details">

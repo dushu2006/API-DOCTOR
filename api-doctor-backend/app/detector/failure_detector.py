@@ -1,7 +1,7 @@
 """Failure detection and log ingestion pipeline.
 
 Parses real production logs (Render, CI failures, manual logs) and HTTP responses
-to detect and group failures into structured Incident detections.
+to detect and group failures into structured Run detections.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ Method = Literal["GET", "POST", "PUT", "DELETE", "PATCH"]
 
 
 class DetectionResult(dict):
-    """Structured incident-ready detection payload."""
+    """Structured run-ready detection payload."""
 
 
 def _now_iso() -> str:
@@ -145,9 +145,9 @@ class FailureDetector:
         service: str | None = None,
         source: str = "render",
     ) -> list[DetectionResult]:
-        """Parse raw log lines and group related error lines into coherent incidents.
+        """Parse raw log lines and group related error lines into coherent runs.
 
-        Avoids treating every individual log line as an isolated incident.
+        Avoids treating every individual log line as an isolated run.
         """
         svc = service or self.service
         raw_text_lines: list[str] = []

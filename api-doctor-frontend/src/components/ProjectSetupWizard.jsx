@@ -450,7 +450,7 @@ export default function ProjectSetupWizard({ isOpen, fullScreen = false, onClose
                   <div style={{ ...panelStyle, backgroundColor: 'var(--surface-2)', padding: '16px' }}>
                     <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '6px' }}>Manual log source</div>
                     <div style={{ fontSize: '12px', color: 'var(--text-muted)', lineHeight: 1.6 }}>
-                      The project will be created without an external deployment integration. You can paste production logs manually whenever you diagnose an incident.
+                      The project will be created without an external deployment integration. You can paste production logs manually whenever you diagnose a run.
                     </div>
                   </div>
                 )}

@@ -12,27 +12,27 @@ from unittest.mock import AsyncMock
 from app.agent.fix_agent import FixProposal
 from app.agent.root_cause_agent import RootCauseAnalysis
 from app.core.config import settings
-from app.incidents.models import IncidentStatus
-from app.incidents.store import incident_store
+from app.runs.models import RunStatus
+from app.runs.store import run_store
 from app.orchestrator import Orchestrator
 
 
-async def _await_started(orch: Orchestrator, incident_id: str):
-    task = orch._pipeline_tasks.get(incident_id)
+async def _await_started(orch: Orchestrator, run_id: str):
+    task = orch._pipeline_tasks.get(run_id)
     if task:
         return await task
-    return incident_store.get(incident_id)
+    return run_store.get(run_id)
 
 
-async def _drive_pipeline(orch: Orchestrator, incident_id: str):
+async def _drive_pipeline(orch: Orchestrator, run_id: str):
     """Run the pipeline through interactive approval gates."""
-    result = await orch.run_pipeline(incident_id)
-    if result and result.status == IncidentStatus.AWAITING_FILE_READ_APPROVAL:
-        assert await orch.resume_file_read(incident_id)
-        result = await _await_started(orch, incident_id)
-    if result and result.status == IncidentStatus.AWAITING_FIX_APPROVAL:
-        assert await orch.resume_fix(incident_id)
-        result = await _await_started(orch, incident_id)
+    result = await orch.run_pipeline(run_id)
+    if result and result.status == RunStatus.AWAITING_FILE_READ_APPROVAL:
+        assert await orch.resume_file_read(run_id)
+        result = await _await_started(orch, run_id)
+    if result and result.status == RunStatus.AWAITING_FIX_APPROVAL:
+        assert await orch.resume_fix(run_id)
+        result = await _await_started(orch, run_id)
     return result
 
 ORIGINAL_MARKER = (
@@ -72,10 +72,10 @@ async def test_e2e_null_pointer(monkeypatch):
     orch = Orchestrator()
 
     # 1. Real detection.
-    incident = await orch.detect_and_create(
+    run = await orch.detect_and_create(
         "/api/v1/users/user_2/charge", "POST", {"amount": 100.0}
     )
-    assert incident.status == IncidentStatus.DETECTED
+    assert run.status == RunStatus.DETECTED
 
     # 2-3. Real context build; mock the AI agents (no API key in CI).
     monkeypatch.setattr(
@@ -95,15 +95,15 @@ async def test_e2e_null_pointer(monkeypatch):
     )
 
     # 4-7. Run the full pipeline with a real sandbox verification.
-    result = await _drive_pipeline(orch, incident.id)
+    result = await _drive_pipeline(orch, run.id)
 
-    assert result.status == IncidentStatus.FIX_VERIFIED
+    assert result.status == RunStatus.FIX_VERIFIED
     assert result.sandbox_result["passed"] is True
     step_names = {s["name"]: s["passed"] for s in result.sandbox_result["steps"]}
     assert step_names["reproduce_failure"] is True
     assert step_names["apply_patch"] is True
     assert step_names["verify_fix"] is True
-    assert incident_store.get(incident.id).attempt_count >= 1
+    assert run_store.get(run.id).attempt_count >= 1
 
 
 async def test_e2e_null_pointer_with_mock_ai():
@@ -116,15 +116,15 @@ async def test_e2e_null_pointer_with_mock_ai():
     old_tests = settings.REQUIRE_TESTS
     settings.REQUIRE_TESTS = False
     try:
-        incident = await orch.detect_and_create(
+        run = await orch.detect_and_create(
             "/api/v1/users/user_2/charge", "POST", {"amount": 100.0}
         )
-        result = await _drive_pipeline(orch, incident.id)
+        result = await _drive_pipeline(orch, run.id)
     finally:
         settings.REQUIRE_TESTS = old_tests
 
     assert result is not None
-    assert result.status == IncidentStatus.FIX_VERIFIED, (
+    assert result.status == RunStatus.FIX_VERIFIED, (
         f"expected FIX_VERIFIED, got {result.status}: {result.error_message}"
     )
     assert result.fix_proposal and result.fix_proposal.get("diff")
