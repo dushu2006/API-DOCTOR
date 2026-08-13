@@ -17,7 +17,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-_HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+_HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))?(?: \+(\d+)(?:,(\d+))?)? @@")
 
 _UNSAFE_PATH = re.compile(r"(\.\.|^/|:|[\\])")
 
@@ -403,8 +403,14 @@ def _parse_unified_diff(diff: str) -> list[dict[str, Any]]:
                     raise PatchError(f"Malformed hunk header: {header!r}")
                 old_start = int(match.group(1))
                 old_count = int(match.group(2) or "1")
-                new_start = int(match.group(3))
-                new_count = int(match.group(4) or "1")
+                # The new-file side (+start,+count) is optional in some diffs;
+                # if missing, fall back to the old range values.
+                if match.group(3):
+                    new_start = int(match.group(3))
+                    new_count = int(match.group(4) or "1")
+                else:
+                    new_start = old_start
+                    new_count = old_count
                 i += 1
                 hunk_lines: list[str] = []
                 while i < len(lines) and lines[i] and lines[i][0] in (" ", "+", "-", "\\"):

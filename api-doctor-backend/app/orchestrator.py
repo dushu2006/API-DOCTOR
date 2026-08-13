@@ -1195,6 +1195,29 @@ class Orchestrator:
                 raise RuntimeError(f"git add failed: {(add.stderr or '').strip()[:300]}")
             staged = _git("diff", "--cached", "--name-only").stdout.strip()
             if not staged:
+                # If nothing is staged, the workspace may already contain the
+                # requested changes. Probe a temporary copy with the proposed
+                # diff to distinguish "already applied" from a real failure.
+                try:
+                    from app.sandbox.workspace_manager import WorkspaceManager
+                    from app.sandbox.patch_utils import apply_patch_idempotent, PatchError
+
+                    diff_text = proposal.get("diff") or ""
+                    if diff_text.strip():
+                        wm = WorkspaceManager(repo_root=str(ws))
+                        tmp = wm.create_workspace()
+                        try:
+                            affected, already_applied = apply_patch_idempotent(diff_text, tmp)
+                        finally:
+                            wm.cleanup(tmp)
+                        if affected and set(affected) <= set(already_applied):
+                            # All changes are already present in the workspace.
+                            sha = _git("rev-parse", "HEAD").stdout.strip()
+                            return {"sha": sha, "files": affected}
+                except PatchError:
+                    # Fall through to the original error for clarity to caller.
+                    pass
+
                 raise RuntimeError(
                     "Nothing to commit — the workspace already matches the fix or changes were reverted."
                 )
@@ -1609,12 +1632,17 @@ class Orchestrator:
 
     def _changes_from_diff(self, diff: str) -> list[dict[str, str]]:
         from app.sandbox.workspace_manager import WorkspaceManager
-        from app.sandbox.patch_utils import apply_patch
+        from app.sandbox.patch_utils import apply_patch_idempotent, PatchError
 
         wm = WorkspaceManager(repo_root=self.sandbox_runner.repo_root)
         ws = wm.create_workspace()
         try:
-            affected = apply_patch(diff, ws)
+            try:
+                affected, already_applied = apply_patch_idempotent(diff, ws)
+            except PatchError:
+                # Fall back to strict apply to raise the original failure
+                affected = []
+                raise
             changes = []
             for rel in affected:
                 content = wm.read_relative(ws, rel)
