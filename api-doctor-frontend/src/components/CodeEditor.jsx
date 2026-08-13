@@ -131,6 +131,10 @@ export default function CodeEditor({
       const diffEditor = monaco.editor.createDiffEditor(container, {
         theme: THEME_NAME,
         readOnly: true,
+        // The editor is a read-only review surface. Disabling Monaco's context
+        // menu also avoids a Monaco disposal race when React switches between
+        // the normal and split editor while a menu debounce is pending.
+        contextmenu: false,
         renderSideBySide: true,
         automaticLayout: false,
         fontFamily: "'JetBrains Mono', monospace",
@@ -149,6 +153,9 @@ export default function CodeEditor({
         value: value || '',
         language: languageForPath(path),
         readOnly,
+        // This panel does not support source editing, so a context menu only
+        // introduces lifecycle work during rapid view switches.
+        contextmenu: false,
         automaticLayout: false,
         fontFamily: "'JetBrains Mono', monospace",
         fontSize: 12,

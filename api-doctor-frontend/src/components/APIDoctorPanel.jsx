@@ -166,6 +166,7 @@ export default function APIDoctorPanel({
   incidentPR,
   timelineEvents = [],
   isDiagnosing,
+  isIncidentActionPending = false,
   onKeepChanges,
   onRejectChanges,
   onApplyFix,
@@ -519,11 +520,11 @@ export default function APIDoctorPanel({
                   )) || <div style={{ color: 'var(--text-muted)' }}>No files identified</div>}
                 </div>
                 <div style={{ display: 'flex', gap: '8px' }}>
-                  <button onClick={() => onApproveFileRead(true)} className="btn-success" style={{ flex: 1, justifyContent: 'center' }}>
+                  <button disabled={isIncidentActionPending} onClick={() => onApproveFileRead(true)} className="btn-success" style={{ flex: 1, justifyContent: 'center' }}>
                     <Check size={14} />
-                    <span>Approve Reading</span>
+                    <span>{isIncidentActionPending ? 'Recording…' : 'Approve Reading'}</span>
                   </button>
-                  <button onClick={() => onApproveFileRead(false)} className="btn-outline" style={{ flex: 1, justifyContent: 'center' }}>
+                  <button disabled={isIncidentActionPending} onClick={() => onApproveFileRead(false)} className="btn-outline" style={{ flex: 1, justifyContent: 'center' }}>
                     Deny
                   </button>
                 </div>
@@ -591,9 +592,9 @@ export default function APIDoctorPanel({
                 ) : isAwaitingFix ? (
                   /* Awaiting user decision */
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                    <button onClick={() => onKeepChanges(true)} className="btn-success" style={{ justifyContent: 'center', width: '100%' }}>
+                    <button disabled={isIncidentActionPending} onClick={() => onKeepChanges(true)} className="btn-success" style={{ justifyContent: 'center', width: '100%' }}>
                       <Check size={14} />
-                      <span>Keep Changes</span>
+                      <span>{isIncidentActionPending ? 'Applying…' : 'Keep Changes'}</span>
                     </button>
                     <div style={{ fontSize: '10px', color: 'var(--text-muted)', lineHeight: 1.4 }}>
                       Applies the patch to your workspace, then verifies it in an isolated sandbox copy. If verification fails, the workspace is restored automatically.

@@ -12,10 +12,10 @@ from app.main import app
 from app.orchestrator import orchestrator
 
 
-async def _request(method: str, path: str, headers: dict[str, str]) -> httpx.Response:
+async def _request(method: str, path: str, headers: dict[str, str], **kwargs) -> httpx.Response:
     transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        return await client.request(method, path, headers=headers)
+        return await client.request(method, path, headers=headers, **kwargs)
 
 
 async def test_diagnose_returns_incident_status(monkeypatch, auth_headers):
@@ -98,6 +98,20 @@ async def test_approve_file_read_calls_resume(monkeypatch, auth_headers):
     assert response.status_code == 200
     assert response.json() == {"incident_id": inc.id, "approved": True}
     resume.assert_awaited_once_with(inc.id)
+
+
+async def test_approve_file_read_is_idempotent_after_resume(auth_headers):
+    inc = incident_store.create(Incident(status=IncidentStatus.COLLECTING_CONTEXT))
+    inc.add_activity("file_read_approval", "done", "User approved file reading")
+    incident_store.update(inc)
+
+    response = await _request(
+        "POST", f"/api/incidents/{inc.id}/approve-file-read", auth_headers,
+        json={"approved": True},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["already_processed"] is True
 
 
 async def test_approve_fix_calls_resume(monkeypatch, auth_headers):

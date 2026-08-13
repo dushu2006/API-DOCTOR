@@ -485,6 +485,27 @@ async def approve_file_read(incident_id: str, req: ApproveRequest) -> dict:
     """Resume pipeline after user approves file reading."""
     inc = _get_or_404(incident_id)
     if inc.status != IncidentStatus.AWAITING_FILE_READ_APPROVAL:
+        # Approval changes the status before the resumed background task starts.
+        # A double-click (or a delayed browser retry) can therefore legitimately
+        # arrive while the incident is already COLLECTING_CONTEXT.  Treat that
+        # exact completed approval as idempotent rather than reporting a false
+        # conflict to the user.
+        already_approved = any(
+            event.step == "file_read_approval" and event.status == "done"
+            for event in inc.activity
+        )
+        if req.approved and already_approved and inc.status in {
+            IncidentStatus.COLLECTING_CONTEXT,
+            IncidentStatus.INVESTIGATING,
+            IncidentStatus.ROOT_CAUSE_FOUND,
+            IncidentStatus.AWAITING_FIX_APPROVAL,
+            IncidentStatus.SANDBOX_RUNNING,
+            IncidentStatus.SANDBOX_TESTING,
+            IncidentStatus.TESTING,
+            IncidentStatus.VERIFYING,
+            IncidentStatus.FIX_VERIFIED,
+        }:
+            return {"incident_id": incident_id, "approved": True, "already_processed": True}
         raise HTTPException(
             409,
             f"Cannot approve file read: incident is in {inc.status.value} state, not AWAITING_FILE_READ_APPROVAL"
