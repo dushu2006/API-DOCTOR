@@ -124,6 +124,26 @@ class ProjectStore:
                 for row in session.execute(select(UserRecord)).scalars().all():
                     session.delete(row)
 
+    def _first(self, session, stmt) -> ProjectRecord | None:
+        """Return the first matching project, or None.
+
+        Callers that order a multi-row result must use this instead of
+        ``scalar_one_or_none()``, which raises ``MultipleResultsFound``.
+        """
+        return session.execute(stmt).scalars().first()
+
+    def _clear_active_flag(self, session, *, except_project_id: str, user_id: str) -> None:
+        """Ensure at most one project is marked active for the owner."""
+        session.execute(
+            update(ProjectRecord)
+            .where(
+                ProjectRecord.user_id == user_id,
+                ProjectRecord.id != except_project_id,
+                ProjectRecord.is_active.is_(True),
+            )
+            .values(is_active=False)
+        )
+
     def get(self, project_id: str, user_id: str | None = None) -> Optional[Project]:
         with session_scope() as session:
             stmt = self._base_stmt().where(ProjectRecord.id == project_id)
@@ -147,17 +167,33 @@ class ProjectStore:
                     ).scalar_one_or_none()
                     if row:
                         return self._project_model(row)
-                row = session.execute(
-                    self._base_stmt().where(ProjectRecord.user_id == user_id).order_by(ProjectRecord.created_at.asc())
-                ).scalar_one_or_none()
+                row = self._first(
+                    session,
+                    self._base_stmt()
+                    .where(ProjectRecord.user_id == user_id)
+                    .order_by(
+                        ProjectRecord.is_active.desc(),
+                        ProjectRecord.updated_at.desc(),
+                        ProjectRecord.created_at.asc(),
+                    ),
+                )
                 return self._project_model(row) if row else None
 
-            row = session.execute(
-                self._base_stmt().where(ProjectRecord.is_active.is_(True)).order_by(ProjectRecord.updated_at.desc())
-            ).scalar_one_or_none()
+            # Unscoped lookup used by /health and internal fallbacks. Creating a
+            # second project used to leave multiple is_active rows, and
+            # scalar_one_or_none() turned that into a 500.
+            row = self._first(
+                session,
+                self._base_stmt()
+                .where(ProjectRecord.is_active.is_(True))
+                .order_by(ProjectRecord.updated_at.desc(), ProjectRecord.created_at.asc()),
+            )
             if row:
                 return self._project_model(row)
-            row = session.execute(self._base_stmt().order_by(ProjectRecord.created_at.asc())).scalar_one_or_none()
+            row = self._first(
+                session,
+                self._base_stmt().order_by(ProjectRecord.created_at.asc()),
+            )
             return self._project_model(row) if row else None
 
     def set_current(self, project_id: str, user_id: str | None = None) -> Optional[Project]:
@@ -169,6 +205,7 @@ class ProjectStore:
                 row.is_active = True
                 row.updated_at = _utcnow()
                 session.add(row)
+                self._clear_active_flag(session, except_project_id=row.id, user_id=row.user_id)
                 if user_id:
                     user = session.get(UserRecord, user_id)
                     if user:
@@ -238,6 +275,7 @@ class ProjectStore:
                 )
 
                 if activate:
+                    self._clear_active_flag(session, except_project_id=row.id, user_id=user_id)
                     user = session.get(UserRecord, user_id)
                     if user:
                         user.current_project_id = row.id
@@ -289,10 +327,20 @@ class ProjectStore:
                 session.flush()
                 user = session.get(UserRecord, owner_id)
                 if user and user.current_project_id == project_id:
-                    replacement = session.execute(
-                        select(ProjectRecord).where(ProjectRecord.user_id == owner_id).order_by(ProjectRecord.created_at.asc())
-                    ).scalar_one_or_none()
+                    replacement = self._first(
+                        session,
+                        select(ProjectRecord)
+                        .where(ProjectRecord.user_id == owner_id)
+                        .order_by(
+                            ProjectRecord.is_active.desc(),
+                            ProjectRecord.updated_at.desc(),
+                            ProjectRecord.created_at.asc(),
+                        ),
+                    )
                     user.current_project_id = replacement.id if replacement else None
+                    if replacement:
+                        replacement.is_active = True
+                        session.add(replacement)
                     user.updated_at = _utcnow()
                     session.add(user)
                 return True

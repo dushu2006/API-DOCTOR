@@ -91,7 +91,7 @@ export const api = {
     return res;
   },
 
-  getHealth: () => request('/health'),
+  getHealth: () => request('/health', { suppressErrorLog: true }),
 
   // Projects / onboarding
   listProjects: () => request('/api/projects', { suppressErrorLog: true }),
