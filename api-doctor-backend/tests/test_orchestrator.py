@@ -121,7 +121,8 @@ async def test_repair_limit_reached(monkeypatch):
     monkeypatch.setattr(
         orch.fix_agent, "generate_fix",
         AsyncMock(return_value=FixProposal(
-            summary="s", files_changed=["f"], diff="--- a/b\n+++ b/b\n@@ -1 +1 @@\n-x\n+y",
+            summary="s", files_changed=["app/demo_api/bugs.py"],
+            diff="--- a/app/demo_api/bugs.py\n+++ b/app/demo_api/bugs.py\n@@ -1 +1 @@\n-x\n+y",
             reason="r", risk="low",
         )),
     )

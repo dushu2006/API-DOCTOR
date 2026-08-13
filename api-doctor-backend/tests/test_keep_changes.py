@@ -293,3 +293,36 @@ async def test_commit_changes_requires_applied_fix(tmp_path, authenticated_user,
 
     with pytest.raises(ValueError, match="Keep Changes"):
         await orch.commit_changes(inc.id)
+
+
+async def test_reject_fix_leaves_workspace_untouched(
+    tmp_path, auth_headers, project_factory
+):
+    """Reject must discard the proposal without touching the workspace and
+    surface a 'patch rejected' event — never a half-applied file."""
+    from app.main import app
+
+    ws = _make_project_workspace(tmp_path)
+    project_factory(project_id="kp-reject", workspace_path=str(ws), profile=discover_project(ws))
+    inc = _incident_with_proposal("kp-reject")
+    assert inc.status == IncidentStatus.AWAITING_FIX_APPROVAL
+
+    import httpx
+
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            f"/api/incidents/{inc.id}/approve-fix",
+            headers=auth_headers,
+            json={"approved": False},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"incident_id": inc.id, "approved": False}
+
+    persisted = incident_store.get(inc.id)
+    assert persisted.status == IncidentStatus.REQUIRES_HUMAN_REVIEW
+    # Proposal discarded, nothing applied, workspace byte-identical.
+    assert not persisted.fix_proposal.get("applied_files")
+    assert (ws / "app" / "services" / "payment.py").read_text() == _BUGGY
+    assert any(ev.step == "fix_approval" and ev.status == "failed" for ev in persisted.activity)

@@ -38,6 +38,7 @@ const STEP_LABELS = {
   investigation_started: 'Investigating root cause',
   root_cause_identified: 'Root cause identified',
   fix_generated: 'Generating fix',
+  fix_regenerating: 'Regenerating fix',
   fix_approval: 'Fix approval',
   diff_ready: 'Proposed diff ready',
   changes_applied: 'Applying changes to workspace',
