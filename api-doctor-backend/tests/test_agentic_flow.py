@@ -162,7 +162,7 @@ async def test_two_projects_diagnosed_back_to_back_never_cross_contaminate(
 # ---------------------------------------------------------------------------
 # 2. Hallucinated fix paths are rejected and regenerated
 # ---------------------------------------------------------------------------
-async def test_hallucinated_fix_path_rejected_and_regenerated(monkeypatch):
+async def test_hallucinated_fix_path_rejected_and_regenerated(monkeypatch, default_workspace_project):
     orch = Orchestrator()
     bad = FixProposal(
         summary="bad",
@@ -194,7 +194,7 @@ async def test_hallucinated_fix_path_rejected_and_regenerated(monkeypatch):
     assert regenerated[-1].status == "done"
 
 
-async def test_unresolvable_hallucinated_paths_fail_fix_generation(monkeypatch):
+async def test_unresolvable_hallucinated_paths_fail_fix_generation(monkeypatch, default_workspace_project):
     """A model that keeps inventing paths exhausts its bounded retries and the
     run fails with a precise message — it is never handed to the sandbox."""
     orch = Orchestrator()
@@ -218,7 +218,7 @@ async def test_unresolvable_hallucinated_paths_fail_fix_generation(monkeypatch):
 # ---------------------------------------------------------------------------
 # 3. Retry emits a single marker, never a setup replay
 # ---------------------------------------------------------------------------
-async def test_retry_emits_single_marker_and_no_setup_replay(monkeypatch):
+async def test_retry_emits_single_marker_and_no_setup_replay(monkeypatch, default_workspace_project):
     orch = Orchestrator()
     calls = _mock_agents(
         orch,

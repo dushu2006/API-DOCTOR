@@ -34,15 +34,16 @@ async def lifespan(app: FastAPI):
     ai_provider = selected_ai_provider()
     logger.info(
         "API Doctor backend starting up (Mode: %s, AI provider: %s, DB: %s)",
-        "DEMO" if settings.DEMO_MODE else "REAL PROJECT",
+        "REAL PROJECT",
         ai_provider,
         settings.DATABASE_URL,
     )
 
-    if ai_provider == "mock":
-        logger.info("Deterministic mock AI is active. Set NVIDIA_API_KEY to use NVIDIA NIM.")
-    elif not settings.has_nvidia:
-        logger.warning("NVIDIA_API_KEY is not set; requests requiring external NVIDIA models will fall back.")
+    if not settings.has_nvidia:
+        logger.warning(
+            "NVIDIA_API_KEY is not set. The application cannot run real AI "
+            "diagnosis until a key is configured."
+        )
 
     logger.info(
         "Project database ready (%s project(s) configured).",
@@ -92,11 +93,14 @@ def _register_routes() -> None:
     from app.tools.registry import tool_registry
     from app.tools import tools  # noqa: F401
 
-    if settings.DEMO_MODE:
-        from app.demo_api.router import router as demo_router
+    # INTERNAL SAMPLE / REGRESSION HARNESS. Not a product feature: it is never
+    # surfaced in the UI and is hidden from the OpenAPI docs. The sandbox
+    # verification (reproduce -> patch -> verify) and the failure detector
+    # exercise a FastAPI project's own ``app.main``; this sample API gives the
+    # automated tests a deterministic live target without a real deployment.
+    from app.demo_api.router import router as sample_router
 
-        app.include_router(demo_router)
-        logger.info("Mounted demo API endpoints at /api/v1 (DEMO_MODE=true)")
+    app.include_router(sample_router, include_in_schema=False)
 
     app.include_router(auth_router)
     app.include_router(runs_router)
@@ -126,7 +130,6 @@ def _register_routes() -> None:
 
         return {
             "status": "ok",
-            "demo_mode": settings.DEMO_MODE,
             "sandbox_mode": settings.SANDBOX_MODE,
             "docker": docker_ok,
             "ai_provider": selected_ai_provider(),

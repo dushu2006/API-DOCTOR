@@ -81,14 +81,17 @@ export default function App() {
   const [isIngesting, setIsIngesting] = useState(false);
 
   const [activeBottomTab, setActiveBottomTab] = useState('terminal');
-  const [isExplorerOpen, setIsExplorerOpen] = useState(true);
+  // The API Doctor panel is the primary interface. The file explorer starts
+  // collapsed and the doctor panel is given generous width so the diagnosis
+  // timeline is the clear focus instead of the workspace chrome.
+  const [isExplorerOpen, setIsExplorerOpen] = useState(false);
   const [isDoctorOpen, setIsDoctorOpen] = useState(true);
   const [isBottomCollapsed, setIsBottomCollapsed] = useState(true);
   const [isDiffMode, setIsDiffMode] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
 
-  const [explorerWidth, setExplorerWidth] = useState(188);
-  const [doctorWidth, setDoctorWidth] = useState(420);
+  const [explorerWidth, setExplorerWidth] = useState(220);
+  const [doctorWidth, setDoctorWidth] = useState(540);
   const [bottomHeight, setBottomHeight] = useState(220);
 
   // Progressive, backend-driven timeline. The revealer paces how quickly the
@@ -271,10 +274,9 @@ export default function App() {
 
       if (!projectList || projectList.length === 0) {
         setCurrentProject(null);
-        // Demo mode skips the mandatory setup wizard so operators ca run the
-        // built-in demo diagnosis straight away. Use the locally fetched
-        // health (state is not committed yet inside this async flow).
-        setShowProjectWizard(!health?.demo_mode);
+        // A fresh account with no project always lands on the onboarding
+        // wizard — a real repository must be connected before diagnosis.
+        setShowProjectWizard(true);
         setShowProjectSelector(false);
         clearProjectWorkspace();
         clearRunWorkspace();
@@ -752,30 +754,6 @@ export default function App() {
     }
   };
 
-  // Demo-mode trigger: runs a real diagnosis against the built-in demo API
-  // (deterministic bugs). Only offered while the backend reports demo mode.
-  const [isDemoPending, setIsDemoPending] = useState(false);
-  const handleRunDemoScenario = async (scenario = 'external_api') => {
-    if (isDemoPending) return;
-    setIsDemoPending(true);
-    setIsDiagnosing(true);
-    try {
-      const res = await api.triggerDemoScenario(scenario);
-      if (res?.run_id) {
-        setActiveRunId(res.run_id);
-        fetchRunDetails(res.run_id);
-      } else {
-        setIsDiagnosing(false);
-        alert('Demo scenario did not return a run.');
-      }
-    } catch (err) {
-      setIsDiagnosing(false);
-      alert(`Demo diagnosis failed: ${err.message}`);
-    } finally {
-      setIsDemoPending(false);
-    }
-  };
-
   const handleStartDiagnosis = async () => {
     if (!currentProject?.id) {
       setShowProjectSelector(true);
@@ -962,9 +940,9 @@ export default function App() {
   };
 
   const isConnected = Boolean(currentProject?.is_connected);
-  // In backend demo mode a fresh account can jump straight into the workspace
-  // and run the built-in demo diagnosis — no project setup required.
-  const showFullScreenWizard = !isBootstrapping && currentUser && projects.length === 0 && !backendHealth?.demo_mode;
+  // A fresh account with no project always goes through the setup wizard —
+  // a real repository must be connected before diagnosis.
+  const showFullScreenWizard = !isBootstrapping && currentUser && projects.length === 0;
 
   if (!isBootstrapping && !currentUser) {
     return <LoginPage onAuthenticated={handleAuthenticated} />;
@@ -1097,9 +1075,6 @@ export default function App() {
             onNewDiagnosis={handleFreshStart}
             onStartDiagnosis={handleStartDiagnosis}
             onOpenIngestModal={() => setShowIngestModal(true)}
-            demoMode={Boolean(backendHealth?.demo_mode)}
-            onRunDemoScenario={handleRunDemoScenario}
-            isDemoPending={isDemoPending}
             doctorWidth={doctorWidth}
             projectProfile={currentProject?.profile}
             isDoctorOpen={isDoctorOpen}

@@ -20,7 +20,6 @@ os.environ["DATABASE_URL"] = f"sqlite:///{_TEST_DB}"
 os.environ.setdefault("SANDBOX_MODE", "local")
 os.environ.setdefault("MAX_REPAIR_ATTEMPTS", "2")
 os.environ.setdefault("AUTO_CREATE_PR", "false")
-os.environ.setdefault("DEMO_MODE", "true")
 os.environ.setdefault("GITHUB_API_BASE_URL", "https://api.github.com")
 os.environ.setdefault("RENDER_API_BASE_URL", "https://api.render.com/v1")
 
@@ -55,6 +54,60 @@ def _clear_runs():
 @pytest.fixture
 def repo_root() -> Path:
     return _BACKEND_ROOT
+
+
+@pytest.fixture
+def default_workspace_project(tmp_path):
+    """Create a real project + workspace for the ``default`` project id.
+
+    Pipeline tests that build runs with ``project_id="default"`` and run the
+    orchestrator end-to-end need a synchronized workspace to resolve. This
+    fixture provides one so those tests no longer rely on any demo-mode
+    workspace fallback (which has been removed).
+    """
+    from app.auth.schemas import RegisterRequest
+    from app.auth.store import auth_store
+    from app.projects.models import ProjectProfile, ProjectSettings
+    from app.projects.store import project_store
+
+    user, _token = auth_store.register(
+        RegisterRequest(
+            email="wsowner@example.com",
+            username="wsowner",
+            password="password123",
+        )
+    )
+    ws = tmp_path / "default-ws"
+    (ws / "app").mkdir(parents=True)
+    (ws / "main.py").write_text("x\n")
+    # Some pipeline tests reference the sample API paths (``app/demo_api/*``)
+    # in their mocked context/fix. Copy the sample API into the workspace so
+    # the orchestrator's path-validation gate still sees those files on disk.
+    src_demo = _BACKEND_ROOT / "app" / "demo_api"
+    if src_demo.is_dir():
+        for name in ("router.py", "bugs.py"):
+            src = src_demo / name
+            if src.is_file():
+                (ws / "app" / "demo_api").mkdir(parents=True, exist_ok=True)
+                (ws / "app" / "demo_api" / name).write_text(
+                    src.read_text(encoding="utf-8")
+                )
+    project = project_store.create_project(
+        user_id=user.id,
+        project_id="default",
+        name="default/repo",
+        description="",
+        github_owner="default",
+        github_repo="repo",
+        default_branch="main",
+        repository_url="https://github.com/default/repo",
+        workspace_path=str(ws),
+        profile=ProjectProfile(language="python", framework="fastapi"),
+        settings=ProjectSettings(),
+        status="connected",
+        activate=True,
+    )
+    return project
 
 
 @pytest.fixture

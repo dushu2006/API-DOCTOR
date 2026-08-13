@@ -167,7 +167,6 @@ export const api = {
   getRenderLogs: (projectId, limit = 200) => request(`/api/diagnosis/render-logs?limit=${encodeURIComponent(limit)}${projectId ? `&project_id=${encodeURIComponent(projectId)}` : ''}`),
   diagnoseRun: (id) => request(`/api/diagnosis/${id}/diagnose`, { method: 'POST' }),
   restartRun: (id) => request(`/api/diagnosis/${id}/restart`, { method: 'POST' }),
-  triggerDemoScenario: (scenario = 'external_api') => request(`/api/diagnosis/trigger/${encodeURIComponent(scenario)}`, { method: 'POST' }),
   cancelDiagnosis: (id) => request(`/api/diagnosis/${id}/cancel`, { method: 'POST' }),
   approveFix: (id, approved = true) => request(`/api/diagnosis/${id}/approve`, {
     method: 'POST',

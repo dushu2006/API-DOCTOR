@@ -398,9 +398,6 @@ export default function APIDoctorPanel({
   selectedFile,
   setSelectedFile,
   setIsDiffMode,
-  demoMode = false,
-  onRunDemoScenario,
-  isDemoPending = false,
 }) {
   const bodyRef = useRef(null);
   const [expanded, setExpanded] = useState(null);
@@ -509,32 +506,13 @@ export default function APIDoctorPanel({
               logs and source, isolates the root cause and proposes a verified fix —
               one step at a time.
             </p>
-            {demoMode && onRunDemoScenario ? (
-              <>
-                <button
-                  type="button"
-                  className="dp-cta"
-                  disabled={isDemoPending}
-                  onClick={() => onRunDemoScenario('external_api')}
-                >
-                  <Play size={14} fill="currentColor" />
-                  <span>{isDemoPending ? 'Starting demo…' : 'Run Demo Diagnosis'}</span>
-                </button>
-                <button type="button" className="dp-cta-secondary" onClick={onOpenIngestModal}>
-                  Paste error / stack trace
-                </button>
-              </>
-            ) : (
-              <>
-                <button type="button" className="dp-cta" onClick={onStartDiagnosis}>
-                  <Play size={14} fill="currentColor" />
-                  <span>Start Diagnosis</span>
-                </button>
-                <button type="button" className="dp-cta-secondary" onClick={onOpenIngestModal}>
-                  Paste error / stack trace
-                </button>
-              </>
-            )}
+            <button type="button" className="dp-cta" onClick={onStartDiagnosis}>
+              <Play size={14} fill="currentColor" />
+              <span>Start Diagnosis</span>
+            </button>
+            <button type="button" className="dp-cta-secondary" onClick={onOpenIngestModal}>
+              Paste error / stack trace
+            </button>
           </div>
           <div className="dp-idle-context">
             <div className="dp-kicker">Current context</div>
@@ -554,10 +532,37 @@ export default function APIDoctorPanel({
         <div className="dp-live">
           <div className="dp-body" ref={bodyRef}>
             <div className="dp-steps">
+              {stages.length === 0 && (
+                <div className="dp-step is-running dp-step-kickoff">
+                  <div className="dp-step-rail">
+                    <StepIcon state="running" />
+                    <span className="dp-step-line" />
+                  </div>
+                  <div className="dp-step-main">
+                    <div className="dp-step-card">
+                      <div className="dp-step-head">
+                        <span className="dp-step-title">DIAGNOSIS STARTED</span>
+                        <span className="dp-step-state">running</span>
+                      </div>
+                      <div className="dp-step-msg">
+                        <span className="dp-step-working">
+                          Starting the diagnostic engine and reviewing the failure…
+                        </span>
+                      </div>
+                      <div className="dp-step-running">
+                        <span className="dp-ellipsis" />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
               {stages.map((stage, index) => {
                 const state = displayState(stage);
                 const message = displayMessage(stage, activeRun, runDiff, runSandbox);
-                const isExpanded = expanded === stage.key;
+                // Approval steps are auto-expanded so the viewer immediately sees
+                // what is being asked (files to read / fix summary) without having
+                // to discover that steps are clickable.
+                const isExpanded = stage.status === 'waiting' || expanded === stage.key;
                 const isLast = index === stages.length - 1;
                 return (
                   <div
@@ -608,6 +613,19 @@ export default function APIDoctorPanel({
           </div>
 
           <footer className="dp-footer">
+            {isRunActionPending && (isAwaitingRead || isAwaitingFix) && (
+              <div className="dp-approval is-processing">
+                <div className="dp-approval-title">
+                  <Loader2 size={13} className="spin" />
+                  Recording approval
+                </div>
+                <p className="dp-approval-text">
+                  Waiting for approval — API Doctor is resuming the diagnosis and
+                  will continue with the next step.
+                </p>
+              </div>
+            )}
+
             {isAwaitingRead && (
               <div className="dp-approval">
                 <div className="dp-approval-title">

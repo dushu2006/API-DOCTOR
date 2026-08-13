@@ -1,8 +1,10 @@
 """AI provider abstraction.
 
 The rest of the system talks only to :class:`AIClient`. NVIDIA NIM is the
-initial provider; additional providers can be added by implementing the same
-interface and registering them in :func:`create_ai_client`.
+production provider; additional providers can be added by implementing the
+same interface and registering them in :func:`create_ai_client`. There is no
+mock or demo provider — the application diagnoses with the real configured
+models or it fails clearly.
 """
 
 from __future__ import annotations
@@ -48,37 +50,32 @@ class AIProviderError(Exception):
 
 
 def selected_ai_provider() -> str:
-    """Return the effective provider name without exposing configuration secrets."""
+    """Return the effective provider name without exposing configuration secrets.
+
+    The application runs on the real NVIDIA NIM provider only. ``auto`` still
+    resolves to ``nvidia``; anything else is a configuration error.
+    """
     from app.core.config import settings
 
     configured = settings.AI_PROVIDER.strip().lower()
-    if configured not in {"auto", "nvidia", "mock"}:
-        raise ValueError("AI_PROVIDER must be one of: auto, nvidia, mock")
-    if configured == "auto":
-        return "nvidia" if settings.has_nvidia else "mock"
-    return configured
+    if configured not in {"auto", "nvidia"}:
+        raise ValueError("AI_PROVIDER must be one of: auto, nvidia")
+    return "nvidia"
 
 
 def create_ai_client() -> AIClient:
-    """Factory — pick a concrete provider independently of sandbox mode."""
-    from app.ai.mock_client import MockAIClient
+    """Factory — always build the real NVIDIA NIM client.
+
+    There is intentionally no mock/demo fallback. If ``NVIDIA_API_KEY`` is not
+    configured the client will fail loudly on the first request rather than
+    silently produce a canned diagnosis.
+    """
     from app.ai.nim_client import NIMClient
     from app.core.config import settings
 
-    provider = selected_ai_provider()
-    if provider == "mock":
-        if settings.AI_PROVIDER.strip().lower() == "auto":
-            logger.warning(
-                "AI_PROVIDER=auto and NVIDIA_API_KEY is not configured; "
-                "using deterministic MockAIClient"
-            )
-        else:
-            logger.warning("AI_PROVIDER=mock; using deterministic MockAIClient")
-        return MockAIClient()
-
     if not settings.has_nvidia:
         logger.error(
-            "AI_PROVIDER=nvidia but NVIDIA_API_KEY is not configured; "
-            "provider requests will fail"
+            "NVIDIA_API_KEY is not configured. The application will not be able "
+            "to run AI diagnosis until a real API key is provided."
         )
     return NIMClient()

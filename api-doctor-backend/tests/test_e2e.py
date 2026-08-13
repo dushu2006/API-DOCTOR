@@ -68,7 +68,7 @@ def _null_check_fix() -> FixProposal:
     )
 
 
-async def test_e2e_null_pointer(monkeypatch):
+async def test_e2e_null_pointer(monkeypatch, default_workspace_project):
     orch = Orchestrator()
 
     # 1. Real detection.
@@ -106,30 +106,4 @@ async def test_e2e_null_pointer(monkeypatch):
     assert run_store.get(run.id).attempt_count >= 1
 
 
-async def test_e2e_null_pointer_with_mock_ai():
-    """Full pipeline using MockAIClient (the no-key AI_PROVIDER=auto path).
 
-    This is the auto_trigger.py flow: detect the charge 500, generate a
-    mock fix, apply it in the sandbox, and verify the crash is gone.
-    """
-    orch = Orchestrator()
-    old_tests = settings.REQUIRE_TESTS
-    settings.REQUIRE_TESTS = False
-    try:
-        run = await orch.detect_and_create(
-            "/api/v1/users/user_2/charge", "POST", {"amount": 100.0}
-        )
-        result = await _drive_pipeline(orch, run.id)
-    finally:
-        settings.REQUIRE_TESTS = old_tests
-
-    assert result is not None
-    assert result.status == RunStatus.FIX_VERIFIED, (
-        f"expected FIX_VERIFIED, got {result.status}: {result.error_message}"
-    )
-    assert result.fix_proposal and result.fix_proposal.get("diff")
-    assert result.sandbox_result["passed"] is True
-    step_names = {s["name"]: s["passed"] for s in result.sandbox_result["steps"]}
-    assert step_names["reproduce_failure"] is True
-    assert step_names["apply_patch"] is True
-    assert step_names["verify_fix"] is True
