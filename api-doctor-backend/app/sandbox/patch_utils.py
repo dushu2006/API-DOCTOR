@@ -17,7 +17,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-_HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))?(?: \+(\d+)(?:,(\d+))?)? @@")
+_HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))?(?: \+(\d*)(?:,(\d+))?)? @@")
 
 _UNSAFE_PATH = re.compile(r"(\.\.|^/|:|[\\])")
 
@@ -403,10 +403,13 @@ def _parse_unified_diff(diff: str) -> list[dict[str, Any]]:
                     raise PatchError(f"Malformed hunk header: {header!r}")
                 old_start = int(match.group(1))
                 old_count = int(match.group(2) or "1")
-                # The new-file side (+start,+count) is optional in some diffs;
-                # if missing, fall back to the old range values.
-                if match.group(3):
-                    new_start = int(match.group(3))
+                # The new-file side (+start,+count) is optional or may be
+                # malformed from LLM output (e.g. a trailing '+' with no
+                # numbers). If the captured new-start is missing or not a
+                # digit, fall back to the old range values for safety.
+                new_start_raw = match.group(3)
+                if new_start_raw and new_start_raw.isdigit():
+                    new_start = int(new_start_raw)
                     new_count = int(match.group(4) or "1")
                 else:
                     new_start = old_start
