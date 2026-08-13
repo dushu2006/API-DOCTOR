@@ -35,6 +35,13 @@ BACKEND_DIR = REPO_ROOT / "api-doctor-backend"
 FRONTEND_DIR = REPO_ROOT / "api-doctor-frontend"
 PRINT_LOCK = threading.Lock()
 
+# A crashed service is restarted automatically instead of tearing down the
+# whole stack. Restarts are only abandoned when a service dies repeatedly in
+# a short window, which indicates a genuine crash loop rather than a one-off.
+MAX_RESTARTS_PER_WINDOW = 5
+RESTART_WINDOW_SECONDS = 60.0
+RESTART_BACKOFF_SECONDS = 1.0
+
 # Import names that must be present before uvicorn loads app.main.
 # fastapi/uvicorn alone is not enough — an older or partial venv can
 # import those and still crash on sqlalchemy, cryptography, etc.
@@ -261,8 +268,49 @@ def _popen(command: Sequence[str], cwd: Path, env: dict[str, str]) -> subprocess
 def _stream_output(label: str, process: subprocess.Popen[str]) -> None:
     if process.stdout is None:
         return
-    for line in process.stdout:
-        _print(f"[{label}] {line.rstrip()}")
+    try:
+        for line in process.stdout:
+            _print(f"[{label}] {line.rstrip()}")
+    except (ValueError, OSError):
+        # The pipe is closed while the process is being replaced on restart.
+        pass
+
+
+class Service:
+    """A supervised child process that is restarted when it exits early."""
+
+    def __init__(
+        self,
+        label: str,
+        command: Sequence[str],
+        cwd: Path | str,
+        env: dict[str, str],
+    ) -> None:
+        self.label = label
+        self.command = list(command)
+        self.cwd = Path(cwd)
+        self.env = env
+        self.process: subprocess.Popen[str] | None = None
+        self.restarts: list[float] = []
+
+    def start(self) -> None:
+        self.process = _popen(self.command, self.cwd, self.env)
+        threading.Thread(
+            target=_stream_output,
+            args=(self.label, self.process),
+            daemon=True,
+            name=f"{self.label}-log-stream",
+        ).start()
+
+    def poll(self) -> int | None:
+        return self.process.poll() if self.process else None
+
+    def record_restart(self, now: float) -> None:
+        self.restarts = [t for t in self.restarts if now - t < RESTART_WINDOW_SECONDS]
+        self.restarts.append(now)
+
+    def is_crash_looping(self) -> bool:
+        return len(self.restarts) >= MAX_RESTARTS_PER_WINDOW
 
 
 def _start_services(
@@ -273,7 +321,7 @@ def _start_services(
     frontend_host: str,
     frontend_port: int,
     reload_backend: bool,
-) -> list[tuple[str, subprocess.Popen[str]]]:
+) -> list[Service]:
     backend_env = os.environ.copy()
     backend_env.setdefault("SANDBOX_MODE", "local")
     backend_env.setdefault("PYTHONUNBUFFERED", "1")
@@ -306,17 +354,12 @@ def _start_services(
         "--strictPort",
     ]
 
-    backend = _popen(backend_command, BACKEND_DIR, backend_env)
-    frontend = _popen(frontend_command, FRONTEND_DIR, frontend_env)
-    services = [("backend", backend), ("frontend", frontend)]
-
-    for label, process in services:
-        threading.Thread(
-            target=_stream_output,
-            args=(label, process),
-            daemon=True,
-            name=f"{label}-log-stream",
-        ).start()
+    services = [
+        Service("backend", backend_command, BACKEND_DIR, backend_env),
+        Service("frontend", frontend_command, FRONTEND_DIR, frontend_env),
+    ]
+    for service in services:
+        service.start()
 
     return services
 
@@ -332,16 +375,16 @@ def _url_ready(url: str) -> bool:
 def _wait_for_url(
     name: str,
     url: str,
-    services: list[tuple[str, subprocess.Popen[str]]],
+    services: list[Service],
     timeout: float,
 ) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        for label, process in services:
-            return_code = process.poll()
+        for service in services:
+            return_code = service.poll()
             if return_code is not None:
                 raise LauncherError(
-                    f"{label.capitalize()} exited early with code {return_code}"
+                    f"{service.label.capitalize()} exited early with code {return_code}"
                 )
         if _url_ready(url):
             _print(f"[ready] {name}: {url}")
@@ -379,20 +422,49 @@ def _terminate_process(process: subprocess.Popen[str]) -> None:
         pass
 
 
-def _stop_services(services: list[tuple[str, subprocess.Popen[str]]]) -> None:
+def _stop_services(services: list[Service]) -> None:
     if not services:
         return
     _print("\n[shutdown] Stopping frontend and backend...")
-    for _, process in reversed(services):
-        _terminate_process(process)
+    for service in reversed(services):
+        if service.process is not None:
+            _terminate_process(service.process)
 
 
-def _monitor_services(services: list[tuple[str, subprocess.Popen[str]]]) -> int:
+def _monitor_services(services: list[Service]) -> int:
+    """Keep both services alive.
+
+    A crash in one service used to end the whole run, which took the healthy
+    service down with it: when the backend died the launcher immediately
+    terminated Vite, so the browser lost the dev server (and its HMR socket)
+    on top of the API. Each service is now restarted independently, and the
+    launcher only gives up when a service crash-loops.
+    """
     while True:
-        for label, process in services:
-            return_code = process.poll()
-            if return_code is not None:
-                _print(f"[error] {label.capitalize()} stopped with exit code {return_code}.")
+        for service in services:
+            return_code = service.poll()
+            if return_code is None:
+                continue
+
+            _print(
+                f"[error] {service.label.capitalize()} stopped with exit code {return_code}."
+            )
+            now = time.monotonic()
+            service.record_restart(now)
+            if service.is_crash_looping():
+                _print(
+                    f"[error] {service.label.capitalize()} crashed "
+                    f"{len(service.restarts)} times within "
+                    f"{int(RESTART_WINDOW_SECONDS)}s. Giving up."
+                )
+                return return_code or 1
+
+            _print(f"[restart] Restarting {service.label}...")
+            time.sleep(RESTART_BACKOFF_SECONDS)
+            try:
+                service.start()
+            except OSError as exc:
+                _print(f"[error] Could not restart {service.label}: {exc}")
                 return return_code or 1
         time.sleep(0.5)
 
@@ -440,7 +512,7 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = _parse_args()
-    services: list[tuple[str, subprocess.Popen[str]]] = []
+    services: list[Service] = []
     frontend_url = f"http://{_browser_host(args.frontend_host)}:{args.frontend_port}"
     backend_health_url = f"http://{_browser_host(args.backend_host)}:{args.backend_port}/health"
 
