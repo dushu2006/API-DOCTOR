@@ -230,8 +230,100 @@ def preview_patch(diff: str, workspace_root: Path) -> list[dict[str, Any]]:
                 entry["proposed"] = text
         except PatchError as exc:
             entry["error"] = str(exc)
+            _fill_error_preview(entry, patch)
         previews.append(entry)
     return previews
+
+
+def _fill_error_preview(entry: dict[str, Any], patch: dict[str, Any]) -> None:
+    """Populate a reviewable before/after view when strict application fails.
+
+    A patch whose hunks do not match the current file used to surface as a
+    full red pane (whole file shown as removed) next to an empty green pane,
+    completely hiding the change under review. Two readable fallbacks instead:
+
+    1.  If the patch's changes are *already present* in the file (detected by
+        reverse-applying the hunks to the current content) reconstruct the
+        pre-fix content for the red side and keep the current, fixed content
+        on the green side. That renders the exact change set normally, and
+        because the application path accepts this state as already applied
+        the error banner is cleared as well.
+    2.  Otherwise the workspace genuinely drifted. Best-effort apply the
+        hunks at their fuzzy/claimed positions without verifying context so
+        the intended removals still show red and the additions green. The
+        strict error message stays, as a banner, to warn the review is of a
+        stale patch.
+    """
+    if patch["new_path"] == "/dev/null":
+        # File-deletion patch: the empty green pane is the correct outcome.
+        return
+    current_text = entry.get("original") or ""
+    orig_lines = current_text.splitlines()
+
+    if patch["old_path"] != "/dev/null" and orig_lines:
+        try:
+            pre_lines = _apply_hunks(orig_lines, _reverse_file_patch(patch)["hunks"])
+        except PatchError:
+            pass
+        else:
+            pre_text = "\n".join(pre_lines)
+            if pre_lines:
+                pre_text += "\n"
+            entry["original"] = pre_text
+            entry["proposed"] = current_text
+            entry["error"] = None
+            return
+
+    result_lines = _apply_hunks_lenient(orig_lines, patch["hunks"])
+    text = "\n".join(result_lines)
+    if result_lines:
+        text += "\n"
+    entry["proposed"] = text
+
+
+def _apply_hunks_lenient(orig_lines: list[str], hunks: list[dict[str, Any]]) -> list[str]:
+    """Best-effort hunk application for the preview pane when strict matching
+    failed because the file drifted since the patch was generated.
+
+    Hunks are placed at their fuzzy-located (or claimed) position and applied
+    without verifying that context/removal lines still match: context keeps
+    whatever content is currently in the file, removals drop the line sitting
+    at the slot, additions are inserted verbatim. The result is used only for
+    the review diff and is never written to the workspace.
+    """
+    result_lines: list[str] = []
+    current_index = 0
+
+    for hunk in hunks:
+        try:
+            start = _locate_hunk(orig_lines, hunk, current_index)
+        except PatchError:
+            start = _best_effort_locate(orig_lines, hunk, current_index)
+        result_lines.extend(orig_lines[current_index:start])
+        idx = start
+        for hline in hunk["lines"]:
+            if not hline:
+                continue
+            opcode = hline[0]
+            content = hline[1:]
+            if opcode == " ":
+                if idx < len(orig_lines):
+                    # Whatever currently sits on a context row counts as
+                    # unchanged for this degraded preview.
+                    result_lines.append(orig_lines[idx])
+                    idx += 1
+                else:
+                    result_lines.append(content)
+            elif opcode == "-":
+                if idx < len(orig_lines):
+                    idx += 1
+            elif opcode == "+":
+                result_lines.append(content)
+            elif opcode == "\\":
+                continue
+        current_index = idx
+    result_lines.extend(orig_lines[current_index:])
+    return result_lines
 
 
 def validate_diff(diff: str, allowed_roots: list[str] | None = None) -> list[str]:
@@ -416,18 +508,47 @@ def _parse_unified_diff(diff: str) -> list[dict[str, Any]]:
                     new_count = old_count
                 i += 1
                 hunk_lines: list[str] = []
-                while i < len(lines) and lines[i] and lines[i][0] in (" ", "+", "-", "\\"):
+                while i < len(lines):
+                    raw = lines[i]
                     # A multi-file unified diff commonly places the next file's
                     # ---/+++ headers immediately after the previous hunk (no
                     # blank separator). Those are headers, not removal/addition
                     # lines belonging to this hunk.
                     if (
-                        lines[i].startswith("--- ")
+                        raw.startswith("--- ")
                         and i + 1 < len(lines)
                         and lines[i + 1].startswith("+++ ")
                     ):
                         break
-                    hunk_lines.append(lines[i])
+                    if raw == "":
+                        # Models routinely strip the leading space from blank
+                        # context lines (PEP8 code is full of blank lines), and
+                        # a bare empty line used to truncate the hunk here and
+                        # silently drop every +/-/context line after it. Like
+                        # GNU patch, absorb a run of blank lines as empty
+                        # context lines — but only when the hunk body actually
+                        # resumes afterwards; otherwise the blanks separate
+                        # sections and the hunk is over.
+                        j = i
+                        while j < len(lines) and lines[j] == "":
+                            j += 1
+                        nxt = lines[j] if j < len(lines) else ""
+                        resumes_hunk = (
+                            nxt.startswith((" ", "+", "-", "\\"))
+                            and not (
+                                nxt.startswith("--- ")
+                                and j + 1 < len(lines)
+                                and lines[j + 1].startswith("+++ ")
+                            )
+                        )
+                        if not resumes_hunk:
+                            break
+                        hunk_lines.extend(" " for _ in range(j - i))
+                        i = j
+                        continue
+                    if not raw.startswith((" ", "+", "-", "\\")):
+                        break
+                    hunk_lines.append(raw)
                     i += 1
                 hunks.append(
                     {
@@ -547,6 +668,34 @@ def _apply_hunks(orig_lines: list[str], hunks: list[dict[str, Any]]) -> list[str
         current_index = idx
     result_lines.extend(orig_lines[current_index:])
     return result_lines
+
+
+def _best_effort_locate(orig_lines: list[str], hunk: dict[str, Any], current_index: int) -> int:
+    """Locate a hunk that no longer matches anywhere exactly.
+
+    Used only by the degraded preview: slide the hunk's old-side lines over
+    the file and return the position with the most matching lines (preferring
+    the claimed line on ties), so the review stays anchored near the edit
+    instead of dumping the hunk at whatever the stale header claimed.
+    """
+    claimed = max(0, int(hunk["old_start"]) - 1)
+    fallback = min(max(claimed, current_index), len(orig_lines))
+    old_contents = _hunk_old_contents(hunk)
+    if not old_contents:
+        return fallback
+    best_idx = fallback
+    best_score = 0
+    stop = len(orig_lines) - len(old_contents) + 1
+    for idx in range(current_index, max(current_index, stop)):
+        score = sum(
+            1
+            for offset, old in enumerate(old_contents)
+            if _lines_equal(orig_lines[idx + offset], old)
+        )
+        if score > best_score or (score == best_score and abs(idx - claimed) < abs(best_idx - claimed)):
+            best_idx = idx
+            best_score = score
+    return best_idx
 
 
 def _affected_path(patch: dict[str, Any]) -> str:

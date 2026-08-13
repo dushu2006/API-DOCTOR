@@ -55,6 +55,25 @@ logger = logging.getLogger(__name__)
 # never loop forever.
 _FIX_PATH_RETRIES = 2
 
+# Statuses an incident can be in AFTER the fix-approval gate has been crossed
+# (verification running/done, downstream failure, PR opened). Once a
+# "fix_approval: done" activity was recorded and the incident sits in one of
+# these, a repeated "Keep Changes" request is a duplicate (double click,
+# browser retry on a dropped response) and must be treated as an idempotent
+# success — never as a conflict.
+POST_FIX_GATE_STATUSES = frozenset({
+    IncidentStatus.SANDBOX_TESTING,
+    IncidentStatus.SANDBOX_RUNNING,
+    IncidentStatus.TESTING,
+    IncidentStatus.VERIFYING,
+    IncidentStatus.FIX_VERIFIED,
+    IncidentStatus.PR_READY,
+    IncidentStatus.PR_CREATED,
+    IncidentStatus.VERIFICATION_FAILED,
+    IncidentStatus.REPAIR_LIMIT_REACHED,
+    IncidentStatus.FAILED,
+})
+
 # Lines that do not start a Python exception type when scanning a traceback.
 _NON_EXCEPTION_LEADERS = {"Traceback", "File", "During", "The", "Error", "Warning"}
 
@@ -1051,10 +1070,19 @@ class Orchestrator:
                     if current != diagnosed[rel_old] and rel_old not in stale_files:
                         stale_files.append(rel_old)
 
-                if "mismatch" in message or stale_files:
-                    changed = f" ({', '.join(stale_files)})" if stale_files else ""
+                if stale_files:
+                    changed = f" ({', '.join(stale_files)})"
                     message = (
                         f"File changed since diagnosis{changed} — patch refused for safety. "
+                        "Re-run the diagnosis to generate a fresh patch."
+                    )
+                elif "mismatch" in message:
+                    # The workspace still matches the diagnosis snapshot; the
+                    # patch itself does not fit (e.g. generated against an
+                    # older revision of the file). Do not blame a workspace
+                    # change that never happened.
+                    message = (
+                        "Patch does not match the current file content — patch refused for safety. "
                         "Re-run the diagnosis to generate a fresh patch."
                     )
                 return {
@@ -1202,7 +1230,10 @@ class Orchestrator:
                     from app.sandbox.workspace_manager import WorkspaceManager
                     from app.sandbox.patch_utils import apply_patch_idempotent, PatchError
 
-                    diff_text = proposal.get("diff") or ""
+                    # Probe with the RESOLVED diff: the AI may have referenced
+                    # un-relocated paths that only exist in the mapping, and a
+                    # raw-diff probe would misread "already applied" as an error.
+                    diff_text = proposal.get("resolved_diff") or proposal.get("diff") or ""
                     if diff_text.strip():
                         wm = WorkspaceManager(repo_root=str(ws))
                         tmp = wm.create_workspace()
@@ -1273,14 +1304,33 @@ class Orchestrator:
             logger.error("Incident %s not found", incident_id)
             return False
         if inc.status != IncidentStatus.AWAITING_FIX_APPROVAL:
+            # Idempotent: a duplicate resume (double click, browser retry on a
+            # dropped response) can legitimately land after the gate was
+            # already crossed and the pipeline is past the approval pause.
+            if (
+                self._has_activity(inc, "fix_approval", "done")
+                and inc.status in POST_FIX_GATE_STATUSES
+            ):
+                return True
             logger.warning("Incident %s not in AWAITING_FIX_APPROVAL state", incident_id)
             return False
 
-        inc.add_activity("fix_approval", "done", "User approved fix")
+        if not self._has_activity(inc, "fix_approval", "done"):
+            inc.add_activity("fix_approval", "done", "User approved fix")
+        # Flip out of the awaiting state in the SAME store write as the
+        # recorded approval, so an overlapping approval request observes the
+        # gate as already crossed instead of resuming a second time and
+        # hitting "no active pipeline slots" (which used to surface as a
+        # bogus 500 'Failed to resume fix').
+        inc.status = IncidentStatus.SANDBOX_TESTING
         incident_store.update(inc)
         await emit(inc.id, "fix_approval", "done", "Fix approved")
 
         if not self.start_diagnosis(incident_id):
+            # A racing earlier resume already started the pipeline — that is
+            # the in-flight duplicate case, not a failure.
+            if self.has_active_pipeline(incident_id):
+                return True
             logger.error("Failed to resume diagnosis after fix approval for %s", incident_id)
             return False
         return True
@@ -1562,6 +1612,21 @@ class Orchestrator:
         if not project or not project.workspace_path or not Path(project.workspace_path).is_dir():
             raise ValueError("Cannot create PR: project workspace is not synchronized.")
 
+        # Fail fast with actionable guidance BEFORE touching the network:
+        # without a linked repository/token every GitHub call would die with
+        # a confusing 4xx deep inside the flow.
+        github = project_store.resolve_github(project.id)
+        if not (github.get("owner") and github.get("repo")):
+            raise ValueError(
+                "Cannot create pull request: no GitHub repository is linked to this project. "
+                "Set the repository owner and name in Project Settings, then retry."
+            )
+        if not github.get("token"):
+            raise ValueError(
+                "Cannot create pull request: no GitHub access token is configured for this project. "
+                "Add one in Project Settings, then retry."
+            )
+
         # The orchestrator's context/sandbox runners are singletons whose
         # repo_root is whatever project was diagnosed last. Re-bind them to
         # THIS incident's project so _changes_from_diff reads the correct
@@ -1569,7 +1634,6 @@ class Orchestrator:
         self.context_builder.set_repo_root(project.workspace_path)
         self.sandbox_runner.set_repo_root(project.workspace_path, project.profile)
 
-        github = project_store.resolve_github(project.id)
         gh_client = GitHubClient(
             token=github.get("token", ""),
             owner=github.get("owner", ""),
@@ -1588,18 +1652,33 @@ class Orchestrator:
         title = f"fix(api-doctor): {summary}"
         body = self._pr_body(inc)
 
+        # Report branch work honestly: "running" while GitHub is being asked,
+        # "done" only once the PR payload exists, "failed" otherwise. The old
+        # flow claimed a created branch BEFORE anything happened, so a failed
+        # attempt left a permanently misleading timeline.
         branch_name = f"api-doctor/fix/{incident_id}"
-        await emit(inc.id, "branch_created", "done", branch_name)
-        inc.add_activity("branch_created", "done", branch_name)
+        inc.add_activity("branch_created", "running", branch_name)
+        incident_store.update(inc)
+        await emit(inc.id, "branch_created", "running", f"Creating repair branch {branch_name}")
+        try:
+            pr_info = await service.repair(
+                incident_id=incident_id,
+                changes=changes,
+                message=f"fix: {summary}\n\napi-doctor incident {incident_id}",
+                title=title,
+                body=body,
+                project=project,
+            )
+        except Exception as exc:
+            inc.set_activity("branch_created", "failed", str(exc)[:200])
+            inc.error_message = f"PR creation failed: {exc}"
+            incident_store.update(inc)
+            await emit(inc.id, "branch_created", "failed", str(exc)[:300])
+            raise
 
-        pr_info = await service.repair(
-            incident_id=incident_id,
-            changes=changes,
-            message=f"fix: {summary}\n\napi-doctor incident {incident_id}",
-            title=title,
-            body=body,
-            project=project,
-        )
+        inc.set_activity("branch_created", "done", branch_name)
+        incident_store.update(inc)
+        await emit(inc.id, "branch_created", "done", branch_name)
 
         await emit(inc.id, "commit_created", "done", pr_info.get("head_sha", ""))
         inc.add_activity("commit_created", "done", pr_info.get("head_sha", ""))
@@ -1607,6 +1686,10 @@ class Orchestrator:
         inc.pr_info = pr_info
         inc.status = IncidentStatus.PR_CREATED
         inc.add_activity("pr_created", "done", pr_info.get("pr_url") or "")
+        # A retry succeeded after an earlier failed attempt — drop the stale
+        # failure so the UI does not keep flagging it.
+        if (inc.error_message or "").startswith("PR creation failed"):
+            inc.error_message = ""
         incident_store.update(inc)
         await emit(inc.id, "pr_created", "done", pr_info.get("pr_url") or "")
         return pr_info

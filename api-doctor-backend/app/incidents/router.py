@@ -35,7 +35,7 @@ from app.incidents.schemas import (
 )
 from app.incidents.store import incident_store
 from app.integrations.factory import get_log_provider
-from app.orchestrator import orchestrator
+from app.orchestrator import POST_FIX_GATE_STATUSES, orchestrator
 from app.projects.store import project_store
 from app.render.client import RenderError
 from app.security.sanitizer import redact_text, sanitize
@@ -546,17 +546,40 @@ async def approve_fix(incident_id: str, req: ApproveRequest) -> dict:
     If verification fails, the workspace is rolled back automatically.
     """
     inc = _get_or_404(incident_id)
-    if inc.status != IncidentStatus.AWAITING_FIX_APPROVAL:
+
+    # Duplicate "Keep Changes" clicks (or browser retries on a dropped
+    # response) can land while the earlier approval is already being
+    # verified/committed downstream. The recorded approval plus a
+    # post-gate status proves this request is a duplicate: answer with an
+    # idempotent success instead of a misleading 409/500, and — critically —
+    # never re-apply or regenerate anything. Mirrored from the
+    # approve-file-read gate.
+    already_approved = (
+        any(
+            event.step == "fix_approval" and event.status == "done"
+            for event in inc.activity or []
+        )
+        and inc.status in POST_FIX_GATE_STATUSES
+    )
+    if inc.status != IncidentStatus.AWAITING_FIX_APPROVAL and not already_approved:
         raise HTTPException(
             409,
             f"Cannot approve fix: incident is in {inc.status.value} state, not AWAITING_FIX_APPROVAL"
         )
     if not req.approved:
+        if inc.status != IncidentStatus.AWAITING_FIX_APPROVAL:
+            raise HTTPException(
+                409,
+                "The fix was already approved and is being processed — it can no longer be rejected here."
+            )
         inc.status = IncidentStatus.REQUIRES_HUMAN_REVIEW
         inc.add_activity("fix_approval", "failed", "rejected by user")
         incident_store.update(inc)
         await event_hub.publish(incident_id, {"type": "progress", "step": "fix_rejected", "status": "done", "message": "Patch rejected — workspace untouched"})
         return {"incident_id": incident_id, "approved": False}
+
+    if already_approved:
+        return {"incident_id": incident_id, "approved": True, "already_approved": True}
 
     # Keep Changes: apply to the real workspace, then resume into sandbox
     # verification (which runs against the pre-apply snapshot). Never approve
@@ -608,6 +631,10 @@ async def create_pr(incident_id: str, req: CreatePRRequest | None = None) -> dic
         return {"incident_id": incident_id, "approved": False}
     try:
         pr_info = await orchestrator.create_pull_request(incident_id)
+    except ValueError as exc:
+        # Configuration/gating problems are client-fixable — surface them as
+        # a 409 with the actionable message instead of an opaque 502.
+        raise HTTPException(409, str(exc)) from exc
     except Exception as exc:
         raise HTTPException(502, f"PR creation failed: {exc}") from exc
     return {"incident_id": incident_id, **pr_info}
