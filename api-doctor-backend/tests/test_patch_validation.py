@@ -6,7 +6,12 @@ import difflib
 
 import pytest
 
-from app.sandbox.patch_utils import PatchError, apply_patch, validate_diff
+from app.sandbox.patch_utils import (
+    PatchError,
+    apply_patch,
+    apply_patch_idempotent,
+    validate_diff,
+)
 
 ORIGINAL = "def foo():\n    return 1\n"
 FIXED = "def foo():\n    return 2\n"
@@ -128,3 +133,113 @@ def test_apply_patch_legacy_mock_hunk_at_line_121(tmp_path):
     patched = (target / "bugs.py").read_text()
     assert "token = \"no_payment\"" in patched
     assert "payment_method is None" in patched
+
+
+def test_apply_patch_is_transactional_across_files(tmp_path):
+    """A mismatch in a later file must not leave an earlier file modified."""
+    (tmp_path / "one.py").write_text("one = 1\n")
+    (tmp_path / "two.py").write_text("two = 999\n")
+    diff = (
+        "--- a/one.py\n"
+        "+++ b/one.py\n"
+        "@@ -1 +1 @@\n"
+        "-one = 1\n"
+        "+one = 2\n"
+        "--- a/two.py\n"
+        "+++ b/two.py\n"
+        "@@ -1 +1 @@\n"
+        "-two = 1\n"
+        "+two = 2\n"
+    )
+
+    with pytest.raises(PatchError, match="mismatch"):
+        apply_patch(diff, tmp_path)
+
+    assert (tmp_path / "one.py").read_text() == "one = 1\n"
+    assert (tmp_path / "two.py").read_text() == "two = 999\n"
+
+
+def test_idempotent_apply_recognizes_exact_postimage(tmp_path):
+    target = tmp_path / "app" / "demo_api"
+    target.mkdir(parents=True)
+    path = target / "bugs.py"
+    path.write_text(ORIGINAL)
+    apply_patch(_diff(), tmp_path)
+
+    affected, already_applied = apply_patch_idempotent(_diff(), tmp_path)
+
+    assert affected == ["app/demo_api/bugs.py"]
+    assert already_applied == ["app/demo_api/bugs.py"]
+    assert path.read_text() == FIXED
+
+
+def test_new_file_patch_never_overwrites_existing_content(tmp_path):
+    (tmp_path / "new.py").write_text("user content\n")
+    diff = (
+        "--- /dev/null\n"
+        "+++ b/new.py\n"
+        "@@ -0,0 +1 @@\n"
+        "+generated content\n"
+    )
+
+    with pytest.raises(PatchError, match="already exists"):
+        apply_patch(diff, tmp_path)
+
+    assert (tmp_path / "new.py").read_text() == "user content\n"
+
+
+def test_idempotent_new_file_patch_accepts_exact_postimage(tmp_path):
+    (tmp_path / "new.py").write_text("generated content\n")
+    diff = (
+        "--- /dev/null\n"
+        "+++ b/new.py\n"
+        "@@ -0,0 +1 @@\n"
+        "+generated content\n"
+    )
+
+    affected, already_applied = apply_patch_idempotent(diff, tmp_path)
+
+    assert affected == ["new.py"]
+    assert already_applied == ["new.py"]
+
+
+def test_delete_patch_and_idempotent_retry(tmp_path):
+    diff = (
+        "--- a/obsolete.py\n"
+        "+++ /dev/null\n"
+        "@@ -1 +0,0 @@\n"
+        "-obsolete = True\n"
+    )
+    path = tmp_path / "obsolete.py"
+    path.write_text("obsolete = True\n")
+
+    assert apply_patch(diff, tmp_path) == ["obsolete.py"]
+    assert not path.exists()
+    affected, already_applied = apply_patch_idempotent(diff, tmp_path)
+    assert affected == ["obsolete.py"]
+    assert already_applied == ["obsolete.py"]
+    assert not path.exists()
+
+
+def test_idempotent_apply_recovers_partially_applied_multifile_patch(tmp_path):
+    (tmp_path / "one.py").write_text("one = 2\n")  # first file already applied
+    (tmp_path / "two.py").write_text("two = 1\n")
+    diff = (
+        "--- a/one.py\n"
+        "+++ b/one.py\n"
+        "@@ -1 +1 @@\n"
+        "-one = 1\n"
+        "+one = 2\n"
+        "--- a/two.py\n"
+        "+++ b/two.py\n"
+        "@@ -1 +1 @@\n"
+        "-two = 1\n"
+        "+two = 2\n"
+    )
+
+    affected, already_applied = apply_patch_idempotent(diff, tmp_path)
+
+    assert affected == ["one.py", "two.py"]
+    assert already_applied == ["one.py"]
+    assert (tmp_path / "one.py").read_text() == "one = 2\n"
+    assert (tmp_path / "two.py").read_text() == "two = 2\n"

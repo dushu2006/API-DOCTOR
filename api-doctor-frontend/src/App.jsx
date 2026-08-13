@@ -691,6 +691,31 @@ export default function App() {
     return handleRejectChanges();
   };
 
+  const handleRediagnose = async () => {
+    if (!activeIncidentId || isIncidentActionPending) return;
+    setIsIncidentActionPending(true);
+    setIsDiagnosing(true);
+    try {
+      const res = await api.rediagnoseIncident(activeIncidentId);
+      if (!res?.incident_id) throw new Error('Backend did not return a new incident.');
+      // Keep the stale incident as history, but move every active surface and
+      // the SSE subscription to the fresh diagnosis immediately.
+      setTimelineEvents([]);
+      setIncidentContext(null);
+      setIncidentDiff(null);
+      setIncidentSandbox(null);
+      setIncidentPR(null);
+      setActiveIncidentId(res.incident_id);
+      if (currentProject?.id) await refreshProjectData(currentProject.id);
+      await fetchIncidentDetails(res.incident_id);
+    } catch (err) {
+      setIsDiagnosing(false);
+      alert(`Failed to re-run diagnosis: ${err.message}`);
+    } finally {
+      setIsIncidentActionPending(false);
+    }
+  };
+
   // "Keep Changes": apply the AI patch to the real workspace, then the backend
   // verifies it in an isolated copy of the pre-apply state. If verification
   // fails the workspace is rolled back automatically.
@@ -708,6 +733,7 @@ export default function App() {
       await fetchIncidentDetails(activeIncidentId);
     } catch (err) {
       setIsDiagnosing(false);
+      await fetchIncidentDetails(activeIncidentId);
       alert(`Keep Changes failed: ${err.message}`);
     } finally {
       setIsIncidentActionPending(false);
@@ -741,6 +767,9 @@ export default function App() {
       }
       await fetchIncidentDetails(activeIncidentId);
     } catch (err) {
+      // The failed apply event carries the conflict reason. Refresh so the
+      // panel replaces the unsafe Apply button with a one-click fresh diagnosis.
+      await fetchIncidentDetails(activeIncidentId);
       alert(`Failed to apply the patch: ${err.message}`);
     } finally {
       setIsIncidentActionPending(false);
@@ -885,7 +914,14 @@ export default function App() {
             isDiagnosing={isDiagnosing}
             isDiffMode={isDiffMode}
             setIsDiffMode={setIsDiffMode}
-            onApproveFix={handleApproveFix}
+            onApproveFix={(
+              !activeIncident?.activity?.some(
+                event => event.step === 'changes_applied' && event.status === 'failed'
+              ) && (
+                activeIncident?.status === 'AWAITING_FIX_APPROVAL'
+                || (incidentSandbox?.passed && !incidentDiff?.applied)
+              )
+            ) ? handleApproveFix : null}
             highlightLine={highlightLine}
             failureReason={failureReason}
             isProjectConnected={isConnected}
@@ -908,6 +944,7 @@ export default function App() {
             onKeepChanges={handleKeepChanges}
             onRejectChanges={handleRejectChanges}
             onApplyFix={handleApplyFix}
+            onRediagnose={handleRediagnose}
             onCommitChanges={handleCommitChanges}
             onApproveFileRead={handleApproveFileRead}
             onCreatePR={handleCreatePR}

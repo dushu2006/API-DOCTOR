@@ -1,8 +1,8 @@
 """Unified-diff parsing, validation and application.
 
-Diffs are applied with an internal Python patch engine in a sandboxed workspace,
-never on the production repository. Before applying we validate the diff
-structurally and restrict it to paths inside the workspace root.
+Diffs are applied with an internal Python patch engine to a caller-selected
+sandbox or approved project workspace. Before applying we validate the diff
+structurally and restrict it to paths inside that workspace root.
 
 LLM-generated diffs frequently carry git metadata headers (``diff --git``,
 ``index ...``) or paths that do not exactly match the repository layout.
@@ -238,7 +238,9 @@ def validate_diff(diff: str, allowed_roots: list[str] | None = None) -> list[str
     """Validate a unified diff.
 
     Returns the list of affected file paths (relative). Raises :class:`PatchError`
-    for malformed/unsafe diffs.
+    for malformed/unsafe diffs.  Both sides of every file header are checked;
+    for a deletion, where the new side is ``/dev/null``, the old path is the
+    affected path.
     """
     if not diff or not diff.strip():
         raise PatchError("Empty diff")
@@ -246,21 +248,27 @@ def validate_diff(diff: str, allowed_roots: list[str] | None = None) -> list[str
     if not lines[0].startswith("--- "):
         raise PatchError("Diff must start with a `--- a/...` header")
 
-    affected: list[str] = []
-    for i, line in enumerate(lines):
-        if line.startswith("+++ b/"):
-            path = line[6:].strip()
-            _check_path(path, allowed_roots)
-            affected.append(path)
-        elif line.startswith("+++ "):
-            path = line[4:].strip()
-            _check_path(path, allowed_roots)
-            affected.append(path)
-        elif line.startswith("@@ "):
-            if not _HUNK_HEADER.match(line):
-                raise PatchError(f"Malformed hunk header: {line!r}")
-    if not affected:
+    patches = _parse_unified_diff(diff)
+    if not patches:
         raise PatchError("No file headers found in diff")
+
+    affected: list[str] = []
+    for patch in patches:
+        if not patch["hunks"]:
+            raise PatchError("File section contains no hunks")
+        old_path = patch["old_path"]
+        new_path = patch["new_path"]
+        if old_path == "/dev/null" and new_path == "/dev/null":
+            raise PatchError("A patch cannot use /dev/null for both file paths")
+        if old_path != "/dev/null":
+            _check_path(_strip_prefix(old_path), allowed_roots)
+        if new_path != "/dev/null":
+            _check_path(_strip_prefix(new_path), allowed_roots)
+        target = new_path if new_path != "/dev/null" else old_path
+        rel_target = _strip_prefix(target)
+        if rel_target in affected:
+            raise PatchError(f"Duplicate file section in diff: {rel_target}")
+        affected.append(rel_target)
     return affected
 
 
@@ -286,9 +294,11 @@ def apply_patch(diff: str, workspace_root: Path) -> list[str]:
 
     The diff is normalized (git metadata stripped) and its paths are resolved
     against the workspace before application, so relocated files are still
-    found. Returns the list of affected relative paths. Raises
-    :class:`PatchError` on structural problems or when the patch fails to apply
-    cleanly.
+    found.  Every file is rendered in memory before the first write.  A bad
+    hunk in file two therefore cannot leave file one partially modified.
+
+    Returns the list of affected relative paths. Raises :class:`PatchError` on
+    structural problems or when the patch fails to apply cleanly.
     """
     resolved, _mapping = resolve_diff_paths(diff, workspace_root)
     affected = validate_diff(resolved, allowed_roots=[str(workspace_root)])
@@ -296,10 +306,80 @@ def apply_patch(diff: str, workspace_root: Path) -> list[str]:
     return affected
 
 
+def apply_patch_idempotent(
+    diff: str, workspace_root: Path
+) -> tuple[list[str], list[str]]:
+    """Apply ``diff`` while accepting files that already contain its result.
+
+    A client can lose the HTTP response after the workspace write but before
+    the incident's ``applied_files`` metadata is persisted.  Retrying that
+    request used to report a false "file changed since diagnosis" conflict.
+    For each file whose forward patch does not apply, this function tries the
+    exact reverse patch in memory.  If the reverse applies, the requested
+    change is already present and that file is safely treated as complete.
+
+    All still-required file writes are preflighted before any are committed.
+    The return value is ``(affected_paths, already_applied_paths)``.
+    """
+    root = Path(workspace_root)
+    resolved, _mapping = resolve_diff_paths(diff, root)
+    affected = validate_diff(resolved, allowed_roots=[str(root)])
+    patches = _parse_unified_diff(resolved)
+
+    operations: list[dict[str, Any]] = []
+    already_applied: list[str] = []
+    for patch in patches:
+        try:
+            operations.append(_prepare_file_patch(patch, root))
+        except PatchError as forward_error:
+            try:
+                _prepare_file_patch(_reverse_file_patch(patch), root)
+            except PatchError:
+                # Preserve the forward error: it identifies the stale hunk the
+                # user actually attempted to apply, rather than a less useful
+                # failure from the reverse probe.
+                raise forward_error
+            rel = _affected_path(patch)
+            if rel not in already_applied:
+                already_applied.append(rel)
+
+    _commit_file_operations(operations)
+    return affected, already_applied
+
+
+def reverse_applied_files(
+    diff: str, workspace_root: Path, paths: list[str] | set[str]
+) -> list[str]:
+    """Reverse selected, already-applied file patches in ``workspace_root``.
+
+    Keep-Changes uses this only on its *backup copy*.  It reconstructs the
+    pre-apply source when recovering an idempotent retry, allowing sandbox
+    verification to reproduce the original failure even though the live
+    workspace already contains the fix.
+    """
+    root = Path(workspace_root)
+    resolved, _mapping = resolve_diff_paths(diff, root)
+    wanted = set(paths)
+    operations: list[dict[str, Any]] = []
+    reverted: list[str] = []
+    for patch in _parse_unified_diff(resolved):
+        rel = _affected_path(patch)
+        if rel not in wanted:
+            continue
+        operations.append(_prepare_file_patch(_reverse_file_patch(patch), root))
+        reverted.append(rel)
+    _commit_file_operations(operations)
+    return reverted
+
+
 def _apply_diff(diff: str, workspace_root: Path) -> None:
-    file_patches = _parse_unified_diff(diff)
-    for patch in file_patches:
-        _apply_file_patch(patch, workspace_root)
+    # Preflight every hunk before touching the workspace.  This makes patch
+    # context failures transactional across a multi-file diff.
+    operations = [
+        _prepare_file_patch(patch, workspace_root)
+        for patch in _parse_unified_diff(diff)
+    ]
+    _commit_file_operations(operations)
 
 
 def _parse_unified_diff(diff: str) -> list[dict[str, Any]]:
@@ -309,11 +389,11 @@ def _parse_unified_diff(diff: str) -> list[dict[str, Any]]:
     while i < len(lines):
         line = lines[i]
         if line.startswith("--- "):
-            old_path = line[4:].strip()
+            old_path = _header_path(line)
             i += 1
             if i >= len(lines) or not lines[i].startswith("+++ "):
                 raise PatchError("Malformed unified diff: missing +++ header")
-            new_path = lines[i][4:].strip()
+            new_path = _header_path(lines[i])
             i += 1
             hunks: list[dict[str, Any]] = []
             while i < len(lines) and lines[i].startswith("@@ "):
@@ -328,6 +408,16 @@ def _parse_unified_diff(diff: str) -> list[dict[str, Any]]:
                 i += 1
                 hunk_lines: list[str] = []
                 while i < len(lines) and lines[i] and lines[i][0] in (" ", "+", "-", "\\"):
+                    # A multi-file unified diff commonly places the next file's
+                    # ---/+++ headers immediately after the previous hunk (no
+                    # blank separator). Those are headers, not removal/addition
+                    # lines belonging to this hunk.
+                    if (
+                        lines[i].startswith("--- ")
+                        and i + 1 < len(lines)
+                        and lines[i + 1].startswith("+++ ")
+                    ):
+                        break
                     hunk_lines.append(lines[i])
                     i += 1
                 hunks.append(
@@ -450,31 +540,104 @@ def _apply_hunks(orig_lines: list[str], hunks: list[dict[str, Any]]) -> list[str
     return result_lines
 
 
-def _apply_file_patch(patch: dict[str, Any], workspace_root: Path) -> None:
-    old_path = patch["old_path"]
-    new_path = patch["new_path"]
-    if old_path == "/dev/null":
-        orig_lines: list[str] = []
-    else:
-        rel_old = _strip_prefix(old_path)
-        old_file = workspace_root / rel_old
-        if not old_file.exists():
-            raise PatchError(f"Original file not found: {rel_old}")
-        orig_lines = old_file.read_text(encoding="utf-8", errors="replace").splitlines()
+def _affected_path(patch: dict[str, Any]) -> str:
+    path = patch["new_path"] if patch["new_path"] != "/dev/null" else patch["old_path"]
+    return _strip_prefix(path)
 
-    rel_new = _strip_prefix(new_path)
+
+def _render_file_patch(
+    patch: dict[str, Any], original_text: str
+) -> tuple[str | None, str | None, str | None]:
+    """Render one parsed patch without reading or writing the filesystem.
+
+    Returns ``(target_path, target_text, deleted_path)``.
+    """
+    orig_lines = original_text.splitlines()
     result_lines = _apply_hunks(orig_lines, patch["hunks"])
+    if patch["new_path"] == "/dev/null":
+        return None, None, _strip_prefix(patch["old_path"])
 
-    if new_path == "/dev/null":
-        # file deletion
-        (workspace_root / _strip_prefix(old_path)).unlink(missing_ok=True)
-        return
-    target_file = workspace_root / rel_new
-    target_file.parent.mkdir(parents=True, exist_ok=True)
     text = "\n".join(result_lines)
     if result_lines:
         text += "\n"
-    target_file.write_text(text, encoding="utf-8")
+    return _strip_prefix(patch["new_path"]), text, None
+
+
+def _prepare_file_patch(
+    patch: dict[str, Any], workspace_root: Path
+) -> dict[str, Any]:
+    """Read and render one file patch, returning a deferred write operation."""
+    old_path = patch["old_path"]
+    if old_path == "/dev/null":
+        # A creation patch must never silently replace an unrelated file.  The
+        # idempotent caller will reverse-probe an existing target and accept it
+        # only when its contents are the exact post-image of this patch.
+        rel_new = _strip_prefix(patch["new_path"])
+        if (workspace_root / rel_new).exists():
+            raise PatchError(f"New file already exists: {rel_new}")
+        original_text = ""
+    else:
+        rel_old = _strip_prefix(old_path)
+        old_file = workspace_root / rel_old
+        if not old_file.is_file():
+            raise PatchError(f"Original file not found: {rel_old}")
+        original_text = old_file.read_text(encoding="utf-8", errors="replace")
+
+    target_path, target_text, deleted_path = _render_file_patch(patch, original_text)
+    return {
+        "root": Path(workspace_root),
+        "target_path": target_path,
+        "target_text": target_text,
+        "deleted_path": deleted_path,
+    }
+
+
+def _commit_file_operations(operations: list[dict[str, Any]]) -> None:
+    for operation in operations:
+        root = Path(operation["root"])
+        deleted_path = operation.get("deleted_path")
+        if deleted_path:
+            (root / deleted_path).unlink(missing_ok=True)
+            continue
+        target_path = operation.get("target_path")
+        if target_path is None:
+            continue
+        target_file = root / target_path
+        target_file.parent.mkdir(parents=True, exist_ok=True)
+        target_file.write_text(operation.get("target_text") or "", encoding="utf-8")
+
+
+def _reverse_file_patch(patch: dict[str, Any]) -> dict[str, Any]:
+    """Return a parsed patch that exactly reverses ``patch``."""
+    reversed_hunks: list[dict[str, Any]] = []
+    for hunk in patch["hunks"]:
+        reversed_lines: list[str] = []
+        for line in hunk["lines"]:
+            if line.startswith("+"):
+                reversed_lines.append("-" + line[1:])
+            elif line.startswith("-"):
+                reversed_lines.append("+" + line[1:])
+            else:
+                reversed_lines.append(line)
+        reversed_hunks.append(
+            {
+                "old_start": hunk["new_start"],
+                "old_count": hunk["new_count"],
+                "new_start": hunk["old_start"],
+                "new_count": hunk["old_count"],
+                "lines": reversed_lines,
+            }
+        )
+    return {
+        "old_path": patch["new_path"],
+        "new_path": patch["old_path"],
+        "hunks": reversed_hunks,
+    }
+
+
+def _apply_file_patch(patch: dict[str, Any], workspace_root: Path) -> None:
+    """Backward-compatible single-file helper used by older callers/tests."""
+    _commit_file_operations([_prepare_file_patch(patch, workspace_root)])
 
 
 def _strip_prefix(path: str) -> str:

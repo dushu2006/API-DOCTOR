@@ -554,6 +554,9 @@ async def test_resume_after_file_read_approval_does_not_replay_setup(
     # The single file was read exactly once (running+done merge into one row).
     reads = [ev for ev in result.activity if ev.step == "file_read"]
     assert len(reads) == 1, [r.message for r in reads]
+    # The exact approved snapshot survives context assembly. Keep-Changes uses
+    # it to tell a genuine workspace edit from a lost-response retry.
+    assert result.context["file_contents"]["main.py"] == (ws / "main.py").read_text()
 
 
 # ---------------------------------------------------------------------------
