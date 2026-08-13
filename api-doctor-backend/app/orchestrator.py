@@ -786,8 +786,12 @@ class Orchestrator:
         if not diff:
             return {"applied": False, "reason": "no fix proposal to apply"}
 
-        # Idempotent: already applied earlier.
-        if proposal.get("applied_files") and self._load_apply_state(incident_id):
+        # Idempotent: an action may be retried after a slow UI refresh or after
+        # verification has discarded its temporary rollback backup.  Never try
+        # to apply the original hunk a second time: it will (correctly) no
+        # longer match the already-fixed file and used to surface as a confusing
+        # "File changed since diagnosis" conflict.
+        if proposal.get("applied_files"):
             return {"applied": True, "files": proposal["applied_files"]}
 
         project, ws = self._resolve_project_workspace(inc)

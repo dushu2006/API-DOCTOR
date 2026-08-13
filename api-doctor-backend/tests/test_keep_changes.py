@@ -180,6 +180,11 @@ async def test_keep_changes_applies_patch_and_keeps_it_after_verification(
     persisted = incident_store.get(inc.id)
     assert persisted.fix_proposal["applied_files"] == ["app/services/payment.py"]
 
+    # A delayed duplicate apply request must not attempt the old hunk again.
+    # The temporary rollback state is gone after a successful verification.
+    duplicate = await orch.stage_workspace_apply(inc.id)
+    assert duplicate == {"applied": True, "files": ["app/services/payment.py"]}
+
 
 async def test_keep_changes_rolls_back_when_verification_fails(
     tmp_path, monkeypatch, authenticated_user, project_factory

@@ -86,6 +86,7 @@ export default function App() {
   const [highlightLine, setHighlightLine] = useState(null);
   const [failureReason, setFailureReason] = useState('');
   const [fileContentVersion, setFileContentVersion] = useState(0);
+  const [isIncidentActionPending, setIsIncidentActionPending] = useState(false);
 
   // Ref mirror so the SSE subscription does not depend on the selected file.
   const selectedFileRef = useRef('');
@@ -290,10 +291,13 @@ export default function App() {
     setSelectedFile(path);
   }, [projectFiles]);
 
-  const isFetchingIncident = useRef(false);
+  // SSE updates and button handlers can request the same incident at nearly the
+  // same time. Keep the newest response, rather than dropping a required
+  // post-action refresh while an older request is in flight.
+  const incidentFetchVersion = useRef(0);
   const fetchIncidentDetails = useCallback(async (id) => {
-    if (!id || isFetchingIncident.current) return;
-    isFetchingIncident.current = true;
+    if (!id) return;
+    const requestVersion = ++incidentFetchVersion.current;
     try {
       const [inc, ctx, diff, sb, pr] = await Promise.allSettled([
         api.getIncident(id),
@@ -308,6 +312,10 @@ export default function App() {
       const diffData = diff.status === 'fulfilled' ? diff.value : null;
       const sandboxData = sb.status === 'fulfilled' ? sb.value : null;
       const prData = pr.status === 'fulfilled' ? pr.value : null;
+
+      // An older response must not restore a pause-state after an approval has
+      // already moved the incident forward.
+      if (requestVersion !== incidentFetchVersion.current) return;
 
       setActiveIncident(incidentData);
       setIncidentContext(contextData);
@@ -343,8 +351,6 @@ export default function App() {
       setFailureReason(reason);
     } catch (err) {
       console.error('Failed to fetch incident details:', err);
-    } finally {
-      isFetchingIncident.current = false;
     }
   }, []);
 
@@ -666,7 +672,8 @@ export default function App() {
   // verifies it in an isolated copy of the pre-apply state. If verification
   // fails the workspace is rolled back automatically.
   const handleKeepChanges = async () => {
-    if (!activeIncidentId) return;
+    if (!activeIncidentId || isIncidentActionPending) return;
+    setIsIncidentActionPending(true);
     try {
       setIsDiagnosing(true);
       if (activeIncident?.status === 'AWAITING_FIX_APPROVAL') {
@@ -679,6 +686,8 @@ export default function App() {
     } catch (err) {
       setIsDiagnosing(false);
       alert(`Keep Changes failed: ${err.message}`);
+    } finally {
+      setIsIncidentActionPending(false);
     }
   };
 
@@ -698,7 +707,8 @@ export default function App() {
   };
 
   const handleApplyFix = async () => {
-    if (!activeIncidentId) return;
+    if (!activeIncidentId || isIncidentActionPending) return;
+    setIsIncidentActionPending(true);
     try {
       const res = await api.applyFix(activeIncidentId);
       if (res?.applied) {
@@ -709,6 +719,8 @@ export default function App() {
       await fetchIncidentDetails(activeIncidentId);
     } catch (err) {
       alert(`Failed to apply the patch: ${err.message}`);
+    } finally {
+      setIsIncidentActionPending(false);
     }
   };
 
@@ -725,7 +737,8 @@ export default function App() {
   };
 
   const handleApproveFileRead = async (approved) => {
-    if (!activeIncidentId) return;
+    if (!activeIncidentId || isIncidentActionPending) return;
+    setIsIncidentActionPending(true);
     try {
       setIsDiagnosing(Boolean(approved));
       await api.approveFileRead(activeIncidentId, approved);
@@ -733,6 +746,8 @@ export default function App() {
     } catch (err) {
       setIsDiagnosing(false);
       alert(`Failed to record file read approval: ${err.message}`);
+    } finally {
+      setIsIncidentActionPending(false);
     }
   };
 
@@ -866,6 +881,7 @@ export default function App() {
             incidentPR={incidentPR}
             timelineEvents={timelineEvents}
             isDiagnosing={isDiagnosing}
+            isIncidentActionPending={isIncidentActionPending}
             onKeepChanges={handleKeepChanges}
             onRejectChanges={handleRejectChanges}
             onApplyFix={handleApplyFix}
