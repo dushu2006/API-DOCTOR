@@ -44,13 +44,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/diagnosis", tags=["diagnosis"], dependencies=[Depends(require_authenticated_user)])
 
-SCENARIOS = {
-    "external_api": ("GET", "/api/v1/external/status", None),
-    "config": ("GET", "/api/v1/config", None),
-    "null_pointer": ("POST", "/api/v1/users/user_2/charge", {"amount": 100.0}),
-    "schema": ("GET", "/api/v1/orders/order_2", None),
-}
-
 
 def _resolved_project_id(project_id: str | None = None, user_id: str | None = None) -> str | None:
     if project_id:
@@ -453,32 +446,6 @@ async def sync_render_logs(
     }
 
 
-# ---------------------------------------------------------------------------
-# Workflow triggers
-# ---------------------------------------------------------------------------
-@router.post("/trigger/{scenario}", response_model=DiagnoseResponse)
-async def trigger_scenario(
-    scenario: str,
-    user: UserResponse = Depends(require_authenticated_user),
-) -> DiagnoseResponse:
-    if not settings.DEMO_MODE:
-        raise HTTPException(404, "Demo scenarios are disabled when DEMO_MODE=false.")
-    if scenario not in SCENARIOS:
-        raise HTTPException(400, f"unknown scenario {scenario!r}; choose from {sorted(SCENARIOS)}")
-    method, path, payload = SCENARIOS[scenario]
-    project = project_store.get_current(user.id)
-    run = await orchestrator.detect_and_create(
-        path,
-        method,
-        payload,
-        project_id=project.id if project else "default",
-        owner_id=user.id,
-    )
-    if not orchestrator.start_diagnosis(run.id):
-        raise HTTPException(409, "diagnosis could not be started")
-    return DiagnoseResponse(run_id=run.id, status=run.status)
-
-
 @router.post("/{run_id}/diagnose", response_model=DiagnoseResponse)
 async def diagnose(run_id: str, req: DiagnoseRequest | None = None) -> DiagnoseResponse:
     run = _get_or_404(run_id)
@@ -618,10 +585,9 @@ async def approve_fix(run_id: str, req: ApproveRequest) -> dict:
 
     # Keep Changes: apply to the real workspace, then resume into sandbox
     # verification (which runs against the pre-apply snapshot). Never approve
-    # after an unexpected workspace failure; the only exception is the
-    # explicit read-only demo skip, which remains sandbox-only by design.
+    # after an unexpected workspace failure.
     outcome = await orchestrator.stage_workspace_apply(run_id)
-    if not outcome.get("applied") and not outcome.get("skipped"):
+    if not outcome.get("applied"):
         raise HTTPException(409, outcome.get("reason") or "Patch could not be applied.")
 
     success = await orchestrator.resume_fix(run_id)

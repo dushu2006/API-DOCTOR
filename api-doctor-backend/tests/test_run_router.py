@@ -152,30 +152,6 @@ async def test_approve_fix_calls_resume(monkeypatch, auth_headers):
     resume.assert_awaited_once_with(run.id)
 
 
-async def test_approve_fix_allows_explicit_read_only_demo_skip(
-    monkeypatch, auth_headers
-):
-    run = run_store.create(Run(status=RunStatus.AWAITING_FIX_APPROVAL))
-    stage = AsyncMock(return_value={
-        "applied": False,
-        "skipped": True,
-        "reason": "demo workspace is read-only",
-    })
-    resume = AsyncMock(return_value=True)
-    monkeypatch.setattr(orchestrator, "stage_workspace_apply", stage)
-    monkeypatch.setattr(orchestrator, "resume_fix", resume)
-
-    response = await _request(
-        "POST",
-        f"/api/diagnosis/{run.id}/approve-fix",
-        auth_headers,
-        json={"approved": True},
-    )
-
-    assert response.status_code == 200
-    resume.assert_awaited_once_with(run.id)
-
-
 async def test_approve_fix_does_not_resume_when_workspace_apply_fails(
     monkeypatch, auth_headers
 ):

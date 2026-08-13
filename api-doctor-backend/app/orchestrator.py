@@ -352,8 +352,6 @@ class Orchestrator:
             )
             if candidate.is_dir():
                 workspace_path = str(candidate)
-        elif settings.DEMO_MODE:
-            workspace_path = settings.INTERNAL_REPO_ROOT
         profile = project.profile if project else None
 
         if not workspace_path:
@@ -1017,22 +1015,7 @@ class Orchestrator:
 
         project, ws = self._resolve_project_workspace(run)
         if ws is None:
-            if settings.DEMO_MODE:
-                return {
-                    "applied": False,
-                    "skipped": True,
-                    "reason": "demo workspace is read-only",
-                }
             return {"applied": False, "reason": "Project workspace is not synchronized."}
-        if ws.resolve() == Path(settings.INTERNAL_REPO_ROOT).resolve():
-            # Never modify API Doctor's own source tree in demo mode. The
-            # approval route may still continue with isolated sandbox-only
-            # verification when this explicit skip marker is present.
-            return {
-                "applied": False,
-                "skipped": True,
-                "reason": "demo workspace is read-only",
-            }
 
         def _do() -> dict[str, Any]:
             from app.sandbox.patch_utils import _parse_unified_diff, _strip_prefix

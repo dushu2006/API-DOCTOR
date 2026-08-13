@@ -39,12 +39,8 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite:///./api_doctor.db"
 
     # ------------------------------------------------------------------
-    # Operational Mode
+    # NVIDIA NIM (AI provider)
     # ------------------------------------------------------------------
-    DEMO_MODE: bool = False
-
-    # ------------------------------------------------------------------
-    # NVIDIA NIM (initial AI provider)
     # ------------------------------------------------------------------
     NVIDIA_API_KEY: str = ""
     NVIDIA_BASE_URL: str = "https://integrate.api.nvidia.com/v1"
@@ -62,7 +58,7 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # AI behaviour
     # ------------------------------------------------------------------
-    AI_PROVIDER: str = "auto"
+    AI_PROVIDER: str = "nvidia"
     # Overall wall-clock budget for a single provider chat call, including
     # every retry and any fallback model. Keeps slow/hung endpoints from
     # stalling the diagnosis pipeline for minutes.

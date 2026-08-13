@@ -1,4 +1,10 @@
-"""Deterministic local AI mock client for development/testing."""
+"""TEST-ONLY deterministic mock AI client.
+
+NOT reachable from the running application. The production provider factory
+(:func:`app.ai.base.create_ai_client`) only ever builds the real NVIDIA NIM
+client and this mock is never selected. It exists solely so the automated test
+suite can exercise the diagnosis pipeline in CI without a real API key.
+"""
 
 from __future__ import annotations
 

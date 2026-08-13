@@ -41,7 +41,7 @@ async def _await_pipeline(orch: Orchestrator, run_id: str):
     return result
 
 
-async def test_full_pipeline_success(monkeypatch):
+async def test_full_pipeline_success(monkeypatch, default_workspace_project):
     orch = Orchestrator()
 
     monkeypatch.setattr(
@@ -88,7 +88,7 @@ async def test_full_pipeline_success(monkeypatch):
     assert any(a.step == "fix_verified" for a in result.activity)
 
 
-async def test_low_confidence_stops_pipeline(monkeypatch):
+async def test_low_confidence_stops_pipeline(monkeypatch, default_workspace_project):
     orch = Orchestrator()
     monkeypatch.setattr(orch.context_builder, "build", lambda run: _context())
     monkeypatch.setattr(
@@ -107,7 +107,7 @@ async def test_low_confidence_stops_pipeline(monkeypatch):
     assert result.fix_proposal is None
 
 
-async def test_repair_limit_reached(monkeypatch):
+async def test_repair_limit_reached(monkeypatch, default_workspace_project):
     orch = Orchestrator()
     monkeypatch.setattr(orch.context_builder, "build", lambda run: _context())
     monkeypatch.setattr(
@@ -215,7 +215,7 @@ def _mock_successful_agents(orch: Orchestrator, monkeypatch) -> None:
     )
 
 
-async def test_pipeline_pauses_for_file_read_approval(monkeypatch):
+async def test_pipeline_pauses_for_file_read_approval(monkeypatch, default_workspace_project):
     orch = Orchestrator()
     _mock_successful_agents(orch, monkeypatch)
     run = Run(request_snapshot=_context()["request_snapshot"], stack_trace="t")
@@ -228,7 +228,7 @@ async def test_pipeline_pauses_for_file_read_approval(monkeypatch):
     assert result.context is not None
 
 
-async def test_file_read_approval_continues_to_fix_approval(monkeypatch):
+async def test_file_read_approval_continues_to_fix_approval(monkeypatch, default_workspace_project):
     orch = Orchestrator()
     _mock_successful_agents(orch, monkeypatch)
     run = Run(request_snapshot=_context()["request_snapshot"], stack_trace="t")
@@ -246,7 +246,7 @@ async def test_file_read_approval_continues_to_fix_approval(monkeypatch):
     assert result.root_cause is not None
 
 
-async def test_fix_approval_continues_to_sandbox(monkeypatch):
+async def test_fix_approval_continues_to_sandbox(monkeypatch, default_workspace_project):
     orch = Orchestrator()
     _mock_successful_agents(orch, monkeypatch)
     run = Run(request_snapshot=_context()["request_snapshot"], stack_trace="t")
@@ -294,7 +294,7 @@ async def test_cancel_already_terminal_returns_false():
     assert await orch.cancel_diagnosis(run.id) is False
 
 
-async def test_start_diagnosis_recovers_stuck_collecting_context(monkeypatch):
+async def test_start_diagnosis_recovers_stuck_collecting_context(monkeypatch, default_workspace_project):
     orch = Orchestrator()
     _mock_successful_agents(orch, monkeypatch)
     run = run_store.create(Run(
@@ -312,13 +312,9 @@ async def test_start_diagnosis_recovers_stuck_collecting_context(monkeypatch):
 
 
 async def test_pipeline_fails_gracefully_when_no_workspace(monkeypatch):
-    """Regression: with no synchronized workspace and DEMO_MODE off, the pipeline
-    must mark the run FAILED instead of raising out of the background task
-    and leaving it stuck in RECEIVED."""
-    from app.core.config import settings
-
-    monkeypatch.setattr(settings, "DEMO_MODE", False)
-    # No project exists (autouse fixture reset projects), so no workspace resolves.
+    """Regression: with no synchronized workspace, the pipeline must mark the
+    run FAILED instead of raising out of the background task and leaving it
+    stuck in RECEIVED."""
     orch = Orchestrator()
     run = run_store.create(Run(stack_trace="t"))
     assert run.project_id == "default"
@@ -370,9 +366,6 @@ async def test_restart_replaces_run_without_stale_outputs(monkeypatch):
 async def test_create_pull_request_requires_synchronized_workspace(monkeypatch):
     """create_pull_request must refuse (clear error) when the project has no
     workspace, and not read from a stale repo_root."""
-    from app.core.config import settings
-
-    monkeypatch.setattr(settings, "DEMO_MODE", False)
     orch = Orchestrator()
     run = run_store.create(Run(
         status=RunStatus.FIX_VERIFIED,
@@ -391,7 +384,7 @@ async def test_create_pull_request_requires_synchronized_workspace(monkeypatch):
         await orch.create_pull_request(run.id)
 
 
-async def test_empty_coder_diff_fails_fix_generation(monkeypatch):
+async def test_empty_coder_diff_fails_fix_generation(monkeypatch, default_workspace_project):
     """An empty diff from the coder model must surface as a fix-generation
     failure, not proceed to a confusing sandbox verification failure."""
     orch = Orchestrator()

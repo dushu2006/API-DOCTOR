@@ -12,11 +12,16 @@ import { buildStages, runningCopy } from './diagnosisTimeline';
 // settled (a short "in progress" beat, then the checkmark) and how quickly the
 // next event is shown. The pacing clock is independent of event arrival time,
 // so a burst of replayed events cannot fast-forward the reveal.
-const STEP_RUN_MS = 900; // how long a finished step shows its in-progress beat
-const STEP_GAP_MS = 420; // pause between settling a step and revealing the next
-const RUN_POLL_MS = 200; // poll interval while a step is genuinely in flight
-const SETTLED_POLL_MS = 500; // poll interval after the whole flow has settled
-const TICK_MS = 120; // base scheduler tick
+// The backend often completes the early investigation steps in a few
+// milliseconds and then replays them to a newly-subscribed browser in a burst.
+// Revealing them instantly would make a diagnosis look scripted ("demo data").
+// Instead each step is deliberately paced so a viewer can follow it: appear →
+// work ("in progress") beat → settle with a tick → pause → next step.
+const STEP_RUN_MS = 1650; // how long a finished step shows its in-progress beat
+const STEP_GAP_MS = 620; // pause between settling a step and revealing the next
+const RUN_POLL_MS = 260; // poll interval while a step is genuinely in flight
+const SETTLED_POLL_MS = 650; // poll interval after the whole flow has settled
+const TICK_MS = 150; // base scheduler tick
 
 const TERMINAL = new Set(['done', 'failed', 'cancelled', 'skipped']);
 

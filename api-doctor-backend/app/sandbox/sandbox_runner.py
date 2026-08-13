@@ -296,8 +296,6 @@ class SandboxRunner:
         env = dict(os.environ)
         env["PYTHONPATH"] = str(workspace)
         env.setdefault("API_DOCTOR_LOG_LEVEL", "WARNING")
-        if settings.DEMO_MODE:
-            env["DEMO_MODE"] = "true"
         try:
             result = subprocess.run(
                 [sys.executable, "-c", script],
