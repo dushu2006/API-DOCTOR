@@ -20,8 +20,8 @@ import httpx
 
 from app.agent.fix_agent import FixProposal
 from app.agent.root_cause_agent import RootCauseAnalysis
-from app.incidents.models import IncidentStatus
-from app.incidents.store import incident_store
+from app.runs.models import RunStatus
+from app.runs.store import run_store
 from app.main import app
 from app.orchestrator import orchestrator
 from app.projects.discovery import discover_project
@@ -108,9 +108,9 @@ async def test_real_project_e2e_workflow(monkeypatch, auth_headers, project_fact
             "project_id": "test-proj",
             "auto_diagnose": False,
         }
-        ingest_res = await _request("POST", "/api/incidents/ingest", json_body=log_payload, headers=auth_headers)
+        ingest_res = await _request("POST", "/api/diagnosis/start", json_body=log_payload, headers=auth_headers)
         assert ingest_res.status_code == 200
-        incident_id = ingest_res.json()["incident_id"]
+        run_id = ingest_res.json()["run_id"]
 
         # 3. Mock AI root cause and fix agents for deterministic CI
         monkeypatch.setattr(
@@ -142,29 +142,29 @@ async def test_real_project_e2e_workflow(monkeypatch, auth_headers, project_fact
         )
 
         # 4. Run pipeline through interactive approval gates
-        result = await orchestrator.run_pipeline(incident_id)
+        result = await orchestrator.run_pipeline(run_id)
         assert result is not None
-        if result.status == IncidentStatus.AWAITING_FILE_READ_APPROVAL:
-            assert await orchestrator.resume_file_read(incident_id)
-            task = orchestrator._pipeline_tasks.get(incident_id)
-            result = await task if task else incident_store.get(incident_id)
-        if result.status == IncidentStatus.AWAITING_FIX_APPROVAL:
-            assert await orchestrator.resume_fix(incident_id)
-            task = orchestrator._pipeline_tasks.get(incident_id)
-            result = await task if task else incident_store.get(incident_id)
-        assert result.status == IncidentStatus.FIX_VERIFIED
+        if result.status == RunStatus.AWAITING_FILE_READ_APPROVAL:
+            assert await orchestrator.resume_file_read(run_id)
+            task = orchestrator._pipeline_tasks.get(run_id)
+            result = await task if task else run_store.get(run_id)
+        if result.status == RunStatus.AWAITING_FIX_APPROVAL:
+            assert await orchestrator.resume_fix(run_id)
+            task = orchestrator._pipeline_tasks.get(run_id)
+            result = await task if task else run_store.get(run_id)
+        assert result.status == RunStatus.FIX_VERIFIED
         assert result.sandbox_result["passed"] is True
 
         # Ensure base repo remains untouched
         assert (services_dir / "payment.py").read_text() == original_code
 
         # 5. Check Diff endpoint
-        diff_res = await _request("GET", f"/api/incidents/{incident_id}/diff", headers=auth_headers)
+        diff_res = await _request("GET", f"/api/diagnosis/{run_id}/diff", headers=auth_headers)
         assert diff_res.status_code == 200
         assert diff_res.json()["present"] is True
         assert "app/services/payment.py" in diff_res.json()["files_changed"]
 
         # 6. Check Context endpoint
-        ctx_res = await _request("GET", f"/api/incidents/{incident_id}/context", headers=auth_headers)
+        ctx_res = await _request("GET", f"/api/diagnosis/{run_id}/context", headers=auth_headers)
         assert ctx_res.status_code == 200
         assert "app/services/payment.py" in ctx_res.json()["implicated_files"]

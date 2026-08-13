@@ -404,7 +404,7 @@ def apply_patch_idempotent(
     """Apply ``diff`` while accepting files that already contain its result.
 
     A client can lose the HTTP response after the workspace write but before
-    the incident's ``applied_files`` metadata is persisted.  Retrying that
+    the current run's ``applied_files`` metadata is recorded in memory.  Retrying that
     request used to report a false "file changed since diagnosis" conflict.
     For each file whose forward patch does not apply, this function tries the
     exact reverse patch in memory.  If the reverse applies, the requested

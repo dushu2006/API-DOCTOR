@@ -1,4 +1,4 @@
-"""Incident state machine and data models."""
+"""Run state machine and data models."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import Any, Optional
 from pydantic import BaseModel, Field
 
 
-class IncidentStatus(str, Enum):
+class RunStatus(str, Enum):
     # Canonical Real Project States
     RECEIVED = "RECEIVED"
     DETECTING = "DETECTING"
@@ -48,33 +48,33 @@ class IncidentStatus(str, Enum):
     @property
     def is_terminal(self) -> bool:
         return self in {
-            IncidentStatus.FAILED,
-            IncidentStatus.CANCELLED,
-            IncidentStatus.REQUIRES_HUMAN_REVIEW,
-            IncidentStatus.PR_CREATED,
-            IncidentStatus.INVESTIGATION_FAILED,
-            IncidentStatus.FIX_GENERATION_FAILED,
-            IncidentStatus.VERIFICATION_FAILED,
-            IncidentStatus.REPAIR_LIMIT_REACHED,
-            IncidentStatus.AWAITING_REVIEW,
+            RunStatus.FAILED,
+            RunStatus.CANCELLED,
+            RunStatus.REQUIRES_HUMAN_REVIEW,
+            RunStatus.PR_CREATED,
+            RunStatus.INVESTIGATION_FAILED,
+            RunStatus.FIX_GENERATION_FAILED,
+            RunStatus.VERIFICATION_FAILED,
+            RunStatus.REPAIR_LIMIT_REACHED,
+            RunStatus.AWAITING_REVIEW,
         }
 
     @property
     def is_paused(self) -> bool:
         """Status is paused waiting for user approval."""
         return self in {
-            IncidentStatus.AWAITING_FILE_READ_APPROVAL,
-            IncidentStatus.AWAITING_FIX_APPROVAL,
+            RunStatus.AWAITING_FILE_READ_APPROVAL,
+            RunStatus.AWAITING_FIX_APPROVAL,
         }
 
     @property
     def is_failed(self) -> bool:
         return self in {
-            IncidentStatus.FAILED,
-            IncidentStatus.INVESTIGATION_FAILED,
-            IncidentStatus.FIX_GENERATION_FAILED,
-            IncidentStatus.VERIFICATION_FAILED,
-            IncidentStatus.REPAIR_LIMIT_REACHED,
+            RunStatus.FAILED,
+            RunStatus.INVESTIGATION_FAILED,
+            RunStatus.FIX_GENERATION_FAILED,
+            RunStatus.VERIFICATION_FAILED,
+            RunStatus.REPAIR_LIMIT_REACHED,
         }
 
 
@@ -85,10 +85,11 @@ class ProgressEvent(BaseModel):
     timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
-class Incident(BaseModel):
+class Run(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    owner_id: str = "local"
     project_id: str = "default"
-    status: IncidentStatus = IncidentStatus.DETECTED
+    status: RunStatus = RunStatus.DETECTED
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

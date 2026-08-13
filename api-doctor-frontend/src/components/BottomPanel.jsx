@@ -6,7 +6,6 @@ import {
   FileDiff, 
   CheckCircle2, 
   ChevronDown, 
-  ChevronUp, 
   Copy,
   Search,
   Check,
@@ -16,10 +15,10 @@ import {
 } from 'lucide-react';
 
 export default function BottomPanel({ 
-  activeIncident,
-  incidentContext,
-  incidentDiff,
-  incidentSandbox,
+  activeRun,
+  runContext,
+  runDiff,
+  runSandbox,
   renderLogs = [],
   renderLogsMeta,
   onRefreshRenderLogs,
@@ -35,14 +34,14 @@ export default function BottomPanel({
   const tabs = [
     { id: 'terminal', label: 'Terminal', icon: Terminal },
     { id: 'output', label: 'Output', icon: FileText },
-    { id: 'logs', label: 'Logs', icon: ListFilter, badge: activeIncident ? activeIncident.status : null },
-    { id: 'diff', label: 'Diff', icon: FileDiff, badge: incidentDiff?.present ? 'PATCH' : null },
-    { id: 'tests', label: 'Tests', icon: CheckCircle2, badge: incidentSandbox?.present ? (incidentSandbox.passed ? 'PASSED' : 'FAILED') : null },
+    { id: 'logs', label: 'Logs', icon: ListFilter, badge: activeRun ? activeRun.status : null },
+    { id: 'diff', label: 'Diff', icon: FileDiff, badge: runDiff?.present ? 'PATCH' : null },
+    { id: 'tests', label: 'Tests', icon: CheckCircle2, badge: runSandbox?.present ? (runSandbox.passed ? 'PASSED' : 'FAILED') : null },
   ];
 
   const handleCopyDiff = () => {
-    if (incidentDiff?.diff) {
-      navigator.clipboard.writeText(incidentDiff.diff);
+    if (runDiff?.diff) {
+      navigator.clipboard.writeText(runDiff.diff);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     }
@@ -62,15 +61,15 @@ export default function BottomPanel({
       .join('\n')
     : '';
   const isViewingRenderLogs = Boolean(renderLogText);
-  const incidentLogText = [
-    activeIncident?.detection?.raw_logs,
-    activeIncident?.detection?.stack_trace,
-    incidentContext?.stack_trace,
-    activeIncident?.error_message,
+  const runLogText = [
+    activeRun?.detection?.raw_logs,
+    activeRun?.detection?.stack_trace,
+    runContext?.stack_trace,
+    activeRun?.error_message,
   ].find(value => typeof value === 'string' && value.trim()) || '';
-  const rawLogText = renderLogText || incidentLogText;
+  const rawLogText = renderLogText || runLogText;
 
-  const extractedTrace = incidentContext?.stack_trace || activeIncident?.detection?.stack_trace || '';
+  const extractedTrace = runContext?.stack_trace || activeRun?.detection?.stack_trace || '';
   const normalizedLogFilter = logFilter.trim().toLowerCase();
   const filteredLogLines = rawLogText
     ? rawLogText.split('\n').filter(line => !normalizedLogFilter || line.toLowerCase().includes(normalizedLogFilter))
@@ -82,35 +81,7 @@ export default function BottomPanel({
     extractedTrace.trim() && rawLogText.trim() && extractedTrace.trim() !== rawLogText.trim()
   );
 
-  if (isBottomCollapsed) {
-    return (
-      <div style={{
-        height: '32px',
-        backgroundColor: 'var(--surface-1)',
-        borderTop: '1px solid var(--border-color)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        padding: '0 12px',
-        userSelect: 'none'
-      }}>
-        <div style={{ display: 'flex', gap: '16px' }}>
-          {tabs.map(t => (
-            <div 
-              key={t.id} 
-              onClick={() => { setActiveBottomTab(t.id); setIsBottomCollapsed(false); }}
-              style={{ fontSize: '11px', color: 'var(--text-muted)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px' }}
-            >
-              <span>{t.label}</span>
-            </div>
-          ))}
-        </div>
-        <button onClick={() => setIsBottomCollapsed(false)} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}>
-          <ChevronUp size={14} />
-        </button>
-      </div>
-    );
-  }
+  if (isBottomCollapsed) return null;
 
   return (
     <div style={{
@@ -187,13 +158,13 @@ export default function BottomPanel({
           <div style={{ color: 'var(--text-primary)', lineHeight: 1.6 }}>
             <div style={{ color: 'var(--text-muted)' }}>[WORKSPACE] API Doctor Diagnostic Environment</div>
             <div>[STATUS] Connected to backend service.</div>
-            {activeIncident ? (
+            {activeRun ? (
               <div style={{ color: 'var(--color-accent)', marginTop: '4px' }}>
-                [ACTIVE] Incident #{activeIncident.id.slice(0, 8)} ({activeIncident.status})
+                [ACTIVE] Run #{activeRun.id.slice(0, 8)} ({activeRun.status})
               </div>
             ) : (
               <div style={{ color: 'var(--text-muted)', marginTop: '4px' }}>
-                [READY] Select an incident or ingest production logs to begin diagnosis.
+                [READY] Paste production logs to start a fresh diagnosis.
               </div>
             )}
           </div>
@@ -202,18 +173,18 @@ export default function BottomPanel({
         {/* Output Tab */}
         {activeBottomTab === 'output' && (
           <div style={{ color: 'var(--text-primary)', lineHeight: 1.6 }}>
-            {activeIncident ? (
+            {activeRun ? (
               <>
-                <div>[{new Date(activeIncident.created_at).toLocaleTimeString()}] [INFO] Incident #{activeIncident.id.slice(0, 8)} ({activeIncident.detection?.source || 'production'})</div>
-                <div>[{new Date(activeIncident.updated_at).toLocaleTimeString()}] [STATUS] Current stage: {activeIncident.status}</div>
-                {incidentContext?.stack_trace && (
+                <div>[{new Date(activeRun.created_at).toLocaleTimeString()}] [INFO] Run #{activeRun.id.slice(0, 8)} ({activeRun.detection?.source || 'production'})</div>
+                <div>[{new Date(activeRun.updated_at).toLocaleTimeString()}] [STATUS] Current stage: {activeRun.status}</div>
+                {runContext?.stack_trace && (
                   <div style={{ color: 'var(--color-failure)', marginTop: '4px' }}>
-                    [ERROR] {incidentContext.stack_trace.split('\n')[0]}
+                    [ERROR] {runContext.stack_trace.split('\n')[0]}
                   </div>
                 )}
               </>
             ) : (
-              <div style={{ color: 'var(--text-muted)' }}>No active incident output.</div>
+              <div style={{ color: 'var(--text-muted)' }}>No active run output.</div>
             )}
           </div>
         )}
@@ -233,7 +204,7 @@ export default function BottomPanel({
                 />
               </div>
               {onRefreshRenderLogs && (
-                <button type="button" onClick={onRefreshRenderLogs} className="btn-outline" style={{ padding: '2px 7px', fontSize: '10px' }} title="Fetch the latest Render log entries without creating incidents">
+                <button type="button" onClick={onRefreshRenderLogs} className="btn-outline" style={{ padding: '2px 7px', fontSize: '10px' }} title="Fetch the latest Render log entries without creating runs">
                   <RefreshCw size={11} />
                   <span>Refresh Render Logs</span>
                 </button>
@@ -243,19 +214,19 @@ export default function BottomPanel({
                   RENDER: {renderLogsMeta.serviceName}
                 </span>
               )}
-              {activeIncident?.detection?.source && (
+              {activeRun?.detection?.source && (
                 <span style={{ fontSize: '10px', padding: '3px 6px', borderRadius: '4px', backgroundColor: 'rgba(124, 140, 248, 0.12)', color: 'var(--color-accent)' }}>
-                  SOURCE: {String(activeIncident.detection.source).toUpperCase()}
+                  SOURCE: {String(activeRun.detection.source).toUpperCase()}
                 </span>
               )}
-              {activeIncident?.detection?.service && (
+              {activeRun?.detection?.service && (
                 <span style={{ fontSize: '10px', padding: '3px 6px', borderRadius: '4px', backgroundColor: 'var(--surface-2)', color: 'var(--text-muted)', border: '1px solid var(--border-color)' }}>
-                  SERVICE: {activeIncident.detection.service}
+                  SERVICE: {activeRun.detection.service}
                 </span>
               )}
-              {activeIncident?.detection?.endpoint && (
+              {activeRun?.detection?.endpoint && (
                 <span style={{ fontSize: '10px', padding: '3px 6px', borderRadius: '4px', backgroundColor: 'var(--surface-2)', color: 'var(--text-muted)', border: '1px solid var(--border-color)' }}>
-                  {activeIncident.detection.method || 'GET'} {activeIncident.detection.endpoint}
+                  {activeRun.detection.method || 'GET'} {activeRun.detection.endpoint}
                 </span>
               )}
             </div>
@@ -266,7 +237,7 @@ export default function BottomPanel({
                   <div style={{ padding: '8px 10px', borderBottom: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <span style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '5px' }}>
                       {isViewingRenderLogs && <Server size={12} style={{ color: 'var(--color-accent)' }} />}
-                      {isViewingRenderLogs ? 'Render runtime logs' : 'Captured incident logs'}
+                      {isViewingRenderLogs ? 'Render runtime logs' : 'Captured run logs'}
                     </span>
                     <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>
                       {filteredLogLines.length}/{rawLogText.split('\n').length} lines{isViewingRenderLogs && renderLogsMeta?.retrieved !== undefined ? ` · ${renderLogsMeta.retrieved} retrieved` : ''}
@@ -299,7 +270,7 @@ export default function BottomPanel({
               </>
             ) : (
               <div style={{ color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-                <span>{renderLogsMeta?.message || 'No logs loaded yet. View Render Logs to inspect the connected service, or paste logs with Ingest Log.'}</span>
+                <span>{renderLogsMeta?.message || 'No logs loaded yet. View Render Logs or paste a log to start fresh.'}</span>
                 {onRefreshRenderLogs && (
                   <button type="button" onClick={onRefreshRenderLogs} className="btn-outline" style={{ padding: '3px 8px', fontSize: '10px' }}>
                     <Server size={11} />
@@ -314,7 +285,7 @@ export default function BottomPanel({
         {/* Diff Tab */}
         {activeBottomTab === 'diff' && (
           <div style={{ position: 'relative' }}>
-            {incidentDiff && incidentDiff.diff ? (
+            {runDiff && runDiff.diff ? (
               <>
                 <button 
                   onClick={handleCopyDiff}
@@ -339,7 +310,7 @@ export default function BottomPanel({
                 </button>
 
                 <pre style={{ whiteSpace: 'pre-wrap', lineHeight: 1.6, marginTop: '20px' }}>
-                  {incidentDiff.diff.split('\n').map((line, idx) => {
+                  {runDiff.diff.split('\n').map((line, idx) => {
                     let bg = 'transparent';
                     let color = 'var(--text-primary)';
                     if (line.startsWith('+') && !line.startsWith('+++')) {
@@ -366,12 +337,12 @@ export default function BottomPanel({
         {/* Tests Tab */}
         {activeBottomTab === 'tests' && (
           <div>
-            {incidentSandbox && incidentSandbox.present ? (
+            {runSandbox && runSandbox.present ? (
               <div>
-                <div style={{ marginBottom: '10px', color: incidentSandbox.passed ? 'var(--color-success)' : 'var(--color-failure)', fontWeight: 600 }}>
-                  Sandbox Result: {incidentSandbox.passed ? 'PASSED' : 'FAILED'}
+                <div style={{ marginBottom: '10px', color: runSandbox.passed ? 'var(--color-success)' : 'var(--color-failure)', fontWeight: 600 }}>
+                  Sandbox Result: {runSandbox.passed ? 'PASSED' : 'FAILED'}
                 </div>
-                {incidentSandbox.steps && incidentSandbox.steps.map((st, i) => (
+                {runSandbox.steps && runSandbox.steps.map((st, i) => (
                   <div key={i} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', padding: '4px 8px', backgroundColor: 'var(--surface-2)', borderRadius: '4px', marginBottom: '4px' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                       {st.passed
@@ -384,9 +355,9 @@ export default function BottomPanel({
                     </span>
                   </div>
                 ))}
-                {incidentSandbox.logs && (
+                {runSandbox.logs && (
                   <pre style={{ color: 'var(--text-muted)', fontSize: '10px', marginTop: '10px' }}>
-                    {incidentSandbox.logs}
+                    {runSandbox.logs}
                   </pre>
                 )}
               </div>

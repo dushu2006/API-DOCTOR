@@ -7,7 +7,6 @@ import {
   FileLock,
   Folder,
   FolderOpen,
-  Search,
   CheckCircle2,
   RefreshCw
 } from 'lucide-react';
@@ -51,7 +50,6 @@ export default function Explorer({
   onRefresh,
   isConnected = false
 }) {
-  const [searchQuery, setSearchQuery] = useState('');
   const [openFolders, setOpenFolders] = useState({});
   const [contextMenu, setContextMenu] = useState(null);
 
@@ -138,22 +136,12 @@ export default function Explorer({
     });
   };
 
-  const matchesSearch = (item) => {
-    if (!searchQuery) return true;
-    if (item.type === 'file') {
-      return (item.path || item.name).toLowerCase().includes(searchQuery.toLowerCase());
-    }
-    return item.children ? item.children.some(matchesSearch) : false;
-  };
-
   const renderTree = (items, depth = 0) => {
     return items.map((item) => {
-      if (!matchesSearch(item)) return null;
-
       const itemKey = item.key || item.path || item.name;
 
       if (item.type === 'folder' || item.children) {
-        const isOpen = searchQuery ? true : isFolderOpen(itemKey);
+        const isOpen = isFolderOpen(itemKey);
         return (
           <div key={itemKey}>
             <div
@@ -195,7 +183,7 @@ export default function Explorer({
               height: '26px',
               cursor: 'pointer',
               backgroundColor: isSelected ? 'var(--surface-2)' : 'transparent',
-              borderLeft: isSelected ? '2px solid var(--color-accent)' : '2px solid transparent',
+              borderLeft: isSelected ? '2px solid var(--color-failure)' : '2px solid transparent',
               color: isSelected ? 'var(--text-primary)' : 'var(--text-muted)',
               fontSize: '12px',
               fontFamily: 'var(--font-mono)'
@@ -214,90 +202,34 @@ export default function Explorer({
   };
 
   return (
-    <div 
+    <div
+      className="ide-explorer"
       onClick={() => setContextMenu(null)}
-      style={{
-        width: `${explorerWidth}px`,
-        height: '100%',
-        backgroundColor: 'var(--surface-1)',
-        borderRight: '1px solid var(--border-color)',
-        display: 'flex',
-        flexDirection: 'column',
-        userSelect: 'none',
-        position: 'relative'
-      }}
+      style={{ width: `${explorerWidth}px` }}
     >
-      {/* Header */}
-      <div style={{
-        height: '35px',
-        padding: '0 12px',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        borderBottom: '1px solid var(--border-color)'
-      }}>
-        <span style={{ 
-          fontSize: '11px', 
-          fontWeight: 700, 
-          letterSpacing: '0.08em', 
-          color: 'var(--text-muted)',
-          fontFamily: 'var(--font-heading)',
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap'
-        }}>
-          {projectName.toUpperCase()}
-        </span>
+      <div className="ide-explorer-header">
+        <span>EXPLORER</span>
         {onRefresh && (
-          <button 
-            onClick={onRefresh}
-            title="Refresh repository files"
-            style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', display: 'flex', alignItems: 'center' }}
-          >
-            <RefreshCw size={12} />
+          <button type="button" onClick={onRefresh} title="Refresh repository files">
+            <RefreshCw size={11} />
           </button>
         )}
       </div>
 
-      {/* Search Input */}
-      <div style={{ padding: '6px 8px', borderBottom: '1px solid var(--border-color)' }}>
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: '6px',
-          backgroundColor: 'var(--surface-2)',
-          border: '1px solid var(--border-color)',
-          borderRadius: '4px',
-          padding: '4px 8px'
-        }}>
-          <Search size={13} style={{ color: 'var(--text-muted)' }} />
-          <input 
-            type="text"
-            placeholder="Search repository files..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            style={{
-              background: 'none',
-              border: 'none',
-              color: 'var(--text-primary)',
-              fontSize: '11px',
-              outline: 'none',
-              width: '100%',
-              fontFamily: 'var(--font-mono)'
-            }}
-          />
+      <div className="ide-explorer-root">
+        <div className="ide-explorer-project">
+          <ChevronDown size={11} />
+          <span>{projectName.toUpperCase()}</span>
         </div>
-      </div>
-
-      {/* Tree Content */}
-      <div style={{ flex: 1, overflowY: 'auto', paddingTop: '4px' }}>
-        {fileTree.length > 0 ? (
-          renderTree(fileTree)
-        ) : (
-          <div style={{ padding: '20px 12px', fontSize: '11px', color: 'var(--text-muted)', textAlign: 'center', lineHeight: 1.5 }}>
-            {isConnected ? 'No repository files loaded yet.' : 'Connect a GitHub repository'}
-          </div>
-        )}
+        <div className="ide-explorer-tree">
+          {fileTree.length > 0 ? (
+            renderTree(fileTree)
+          ) : (
+            <div className="ide-explorer-empty">
+              {isConnected ? 'NO FILES LOADED' : 'CONNECT A REPOSITORY'}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Right Click Context Menu */}

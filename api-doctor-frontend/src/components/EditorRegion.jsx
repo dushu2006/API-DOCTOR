@@ -9,13 +9,13 @@ import {
   Sparkles,
   XCircle
 } from 'lucide-react';
-import CodeEditor, { languageForPath } from './CodeEditor';
+import CodeEditor from './CodeEditor';
 
 export default function EditorRegion({
   selectedFile,
   fileContent = '',
-  incidentContext,
-  incidentDiff,
+  runContext,
+  runDiff,
   isDiagnosing,
   isDiffMode,
   setIsDiffMode,
@@ -37,8 +37,8 @@ export default function EditorRegion({
   }, [selectedFile, openFiles.length]);
 
   const diffFiles = useMemo(
-    () => (incidentDiff?.present && Array.isArray(incidentDiff.files) ? incidentDiff.files : []),
-    [incidentDiff]
+    () => (runDiff?.present && Array.isArray(runDiff.files) ? runDiff.files : []),
+    [runDiff]
   );
 
   // Keep the selected diff file valid as the proposal changes.
@@ -67,12 +67,12 @@ export default function EditorRegion({
     }));
 
   // Determine code to display: prioritize real fileContent from workspace,
-  // then snippet from incidentContext.
+  // then snippet from runContext.
   let rawCode = fileContent || '';
   let errorLine = highlightLine;
 
-  if (!rawCode && incidentContext?.code_snippets?.[selectedFile]) {
-    const snippet = incidentContext.code_snippets[selectedFile];
+  if (!rawCode && runContext?.code_snippets?.[selectedFile]) {
+    const snippet = runContext.code_snippets[selectedFile];
     if (typeof snippet === 'string') {
       rawCode = snippet;
     } else if (snippet && typeof snippet === 'object') {
@@ -86,10 +86,10 @@ export default function EditorRegion({
   }
 
   const showConnectEmpty = !isProjectConnected && !rawCode;
-  const showDiff = isDiffMode && incidentDiff?.present && (diffFiles.length > 0 || incidentDiff.diff);
+  const showDiff = isDiffMode && runDiff?.present && (diffFiles.length > 0 || runDiff.diff);
   const activeDiffFile = diffFiles.find(f => f.path === activeDiffPath) || null;
   const failureText = failureReason
-    || (incidentContext?.stack_trace ? incidentContext.stack_trace.split('\n').pop() : '');
+    || (runContext?.stack_trace ? runContext.stack_trace.split('\n').pop() : '');
 
   return (
     <div style={{
@@ -163,7 +163,7 @@ export default function EditorRegion({
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          {incidentDiff && incidentDiff.present && (
+          {runDiff && runDiff.present && (
             <button
               onClick={() => setIsDiffMode(!isDiffMode)}
               className="btn-outline"
@@ -175,6 +175,17 @@ export default function EditorRegion({
           )}
         </div>
       </div>
+
+      {selectedFile && (
+        <div className="ide-breadcrumb">
+          {selectedFile.split('/').map((part, index, parts) => (
+            <React.Fragment key={`${part}-${index}`}>
+              <span className={index === parts.length - 1 ? 'is-file' : ''}>{part}</span>
+              {index < parts.length - 1 && <b>›</b>}
+            </React.Fragment>
+          ))}
+        </div>
+      )}
 
       {/* Read-Only Banner when agent is diagnosing */}
       {isDiagnosing && !showDiff && (
@@ -213,11 +224,11 @@ export default function EditorRegion({
               <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--color-accent)', fontWeight: 600, minWidth: 0 }}>
                 <Sparkles size={13} />
                 <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  AI Proposed Fix: {incidentDiff.summary || 'Proposed Patch'}
+                  AI Proposed Fix: {runDiff.summary || 'Proposed Patch'}
                 </span>
               </div>
 
-              {onApproveFix && !incidentDiff.applied && (
+              {onApproveFix && !runDiff.applied && (
                 <div style={{ display: 'flex', gap: '6px', flexShrink: 0 }}>
                   <button
                     onClick={() => onApproveFix(true)}
@@ -237,7 +248,7 @@ export default function EditorRegion({
                   </button>
                 </div>
               )}
-              {incidentDiff.applied && (
+              {runDiff.applied && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: '5px', color: 'var(--color-success)', fontWeight: 600, flexShrink: 0 }}>
                   <Check size={12} />
                   <span>Applied to workspace</span>
@@ -296,7 +307,7 @@ export default function EditorRegion({
                 /* Fallback: raw unified diff text if previews are unavailable */
                 <div style={{ height: '100%', overflowY: 'auto', padding: '12px', fontFamily: 'var(--font-mono)', fontSize: '12px' }}>
                   <pre style={{ whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>
-                    {(incidentDiff.diff || '').split('\n').map((line, idx) => {
+                    {(runDiff.diff || '').split('\n').map((line, idx) => {
                       let bg = 'transparent';
                       let color = 'var(--text-primary)';
                       if (line.startsWith('+') && !line.startsWith('+++')) {
@@ -375,9 +386,9 @@ export default function EditorRegion({
                     {failureText}
                   </p>
                 )}
-                {incidentContext?.root_cause?.reason && (
+                {runContext?.root_cause?.reason && (
                   <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px' }}>
-                    {incidentContext.root_cause.reason}
+                    {runContext.root_cause.reason}
                   </p>
                 )}
               </div>

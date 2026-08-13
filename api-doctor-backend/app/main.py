@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -25,6 +26,9 @@ async def lifespan(app: FastAPI):
 
     Path(settings.DATA_DIR).mkdir(parents=True, exist_ok=True)
     Path(settings.WORKSPACE_DIR).mkdir(parents=True, exist_ok=True)
+    # Remove rollback artifacts created by older builds. Current diagnosis
+    # snapshots live only in memory and disappear at reset/shutdown.
+    shutil.rmtree(Path(settings.DATA_DIR) / "apply_backups", ignore_errors=True)
     init_db()
 
     ai_provider = selected_ai_provider()
@@ -45,7 +49,10 @@ async def lifespan(app: FastAPI):
         project_store.count(),
     )
     yield
-    logger.info("API Doctor backend shutting down")
+    from app.runs.store import run_store
+
+    run_store.clear()
+    logger.info("API Doctor backend shutting down; current diagnosis state cleared")
 
 
 app = FastAPI(
@@ -80,7 +87,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 
 def _register_routes() -> None:
     from app.auth.router import router as auth_router
-    from app.incidents.router import router as incidents_router
+    from app.runs.router import router as runs_router
     from app.projects.router import router as projects_router
     from app.tools.registry import tool_registry
     from app.tools import tools  # noqa: F401
@@ -92,7 +99,7 @@ def _register_routes() -> None:
         logger.info("Mounted demo API endpoints at /api/v1 (DEMO_MODE=true)")
 
     app.include_router(auth_router)
-    app.include_router(incidents_router)
+    app.include_router(runs_router)
     app.include_router(projects_router)
 
     @app.get("/health")

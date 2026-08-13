@@ -9,7 +9,7 @@ where user-facing failures must never misreport. Covered:
   must be an idempotent success, not a 500/409 conflict
 - PR creation must fail with an actionable 409 when GitHub is not configured
 - "branch created" must only be reported after the branch actually exists
-- a failed PR attempt must record the failure on the incident timeline
+- a failed PR attempt must record the failure on the run timeline
 - committing must work for deletion patches and be idempotent on retry,
   including when the AI produced un-relocated file paths
 """
@@ -26,8 +26,8 @@ import httpx
 
 from app.agent.fix_agent import FixProposal
 from app.agent.root_cause_agent import RootCauseAnalysis
-from app.incidents.models import Incident, IncidentStatus
-from app.incidents.store import incident_store
+from app.runs.models import Run, RunStatus
+from app.runs.store import run_store
 from app.main import app
 from app.orchestrator import orchestrator
 from app.projects.discovery import discover_project
@@ -95,10 +95,10 @@ _RELOCATED_DIFF = (
 )
 
 
-def _incident_with_proposal(project_id: str, diff: str = _DIFF) -> Incident:
-    inc = Incident(
+def _run_with_proposal(project_id: str, diff: str = _DIFF) -> Run:
+    run = Run(
         project_id=project_id,
-        status=IncidentStatus.AWAITING_FIX_APPROVAL,
+        status=RunStatus.AWAITING_FIX_APPROVAL,
         stack_trace=(
             "Traceback (most recent call last):\n"
             '  File "app/services/payment.py", line 2, in process_payment\n'
@@ -122,16 +122,16 @@ def _incident_with_proposal(project_id: str, diff: str = _DIFF) -> Incident:
             risk="low",
         ).model_dump(),
     )
-    inc.add_activity("fix_approval", "pending", "proposed")
-    inc.add_activity("file_read_approval", "done", "pre-approved")
-    inc.context = {
-        "incident_id": inc.id,
-        "stack_trace": inc.stack_trace,
+    run.add_activity("fix_approval", "pending", "proposed")
+    run.add_activity("file_read_approval", "done", "pre-approved")
+    run.context = {
+        "run_id": run.id,
+        "stack_trace": run.stack_trace,
         "affected_files": ["app/services/payment.py"],
         "code_snippets": {},
         "_complete": True,
     }
-    return incident_store.create(inc)
+    return run_store.create(run)
 
 
 def _passing_verification(*args, **kwargs) -> SandboxResult:
@@ -178,7 +178,7 @@ async def test_approve_fix_while_verification_in_flight_is_idempotent(
     explode as 'Failed to resume fix' (500) or a misleading 409."""
     ws = _make_git_workspace(tmp_path)
     project_factory(project_id="dup-proj", workspace_path=str(ws), profile=discover_project(ws))
-    inc = _incident_with_proposal("dup-proj")
+    run = _run_with_proposal("dup-proj")
 
     # Park sandbox verification on a gate so the pipeline is genuinely running
     # when the duplicate approval arrives.
@@ -188,30 +188,30 @@ async def test_approve_fix_while_verification_in_flight_is_idempotent(
         MagicMock(side_effect=lambda *a, **k: (gate.wait(15), _passing_verification())[1]),
     )
 
-    first = await _request("POST", f"/api/incidents/{inc.id}/approve-fix", auth_headers, {"approved": True})
+    first = await _request("POST", f"/api/diagnosis/{run.id}/approve-fix", auth_headers, {"approved": True})
     assert first.status_code == 200, first.text
 
     # Wait until the pipeline is inside sandbox verification.
     for _ in range(200):
-        if incident_store.get(inc.id).status == IncidentStatus.SANDBOX_TESTING:
+        if run_store.get(run.id).status == RunStatus.SANDBOX_TESTING:
             break
         await asyncio.sleep(0.02)
-    assert incident_store.get(inc.id).status == IncidentStatus.SANDBOX_TESTING
+    assert run_store.get(run.id).status == RunStatus.SANDBOX_TESTING
 
-    second = await _request("POST", f"/api/incidents/{inc.id}/approve-fix", auth_headers, {"approved": True})
+    second = await _request("POST", f"/api/diagnosis/{run.id}/approve-fix", auth_headers, {"approved": True})
     assert second.status_code == 200, second.text
     assert second.json()["approved"] is True
 
     gate.set()
     for _ in range(300):
-        if incident_store.get(inc.id).status == IncidentStatus.FIX_VERIFIED:
+        if run_store.get(run.id).status == RunStatus.FIX_VERIFIED:
             break
         await asyncio.sleep(0.02)
-    assert incident_store.get(inc.id).status == IncidentStatus.FIX_VERIFIED
+    assert run_store.get(run.id).status == RunStatus.FIX_VERIFIED
 
     # Only one approval recorded on the timeline.
     approvals = [
-        ev for ev in incident_store.get(inc.id).activity
+        ev for ev in run_store.get(run.id).activity
         if ev.step == "fix_approval" and ev.status == "done"
     ]
     assert len(approvals) == 1
@@ -220,18 +220,18 @@ async def test_approve_fix_while_verification_in_flight_is_idempotent(
 async def test_resume_fix_twice_is_idempotent(tmp_path, monkeypatch, auth_headers, project_factory):
     ws = _make_git_workspace(tmp_path)
     project_factory(project_id="resume-proj", workspace_path=str(ws), profile=discover_project(ws))
-    inc = _incident_with_proposal("resume-proj")
+    run = _run_with_proposal("resume-proj")
 
     monkeypatch.setattr(
         orchestrator.sandbox_runner, "run_verification",
         MagicMock(side_effect=lambda *a, **k: _passing_verification()),
     )
-    assert await orchestrator.resume_fix(inc.id) is True
-    assert await orchestrator.resume_fix(inc.id) is True  # duplicate -> idempotent True
+    assert await orchestrator.resume_fix(run.id) is True
+    assert await orchestrator.resume_fix(run.id) is True  # duplicate -> idempotent True
 
-    task = orchestrator._pipeline_tasks.get(inc.id)
+    task = orchestrator._pipeline_tasks.get(run.id)
     result = await task
-    assert result.status == IncidentStatus.FIX_VERIFIED
+    assert result.status == RunStatus.FIX_VERIFIED
 
 
 # ---------------------------------------------------------------------------
@@ -243,7 +243,7 @@ async def test_keep_commit_pr_journey(tmp_path, monkeypatch, auth_headers, proje
     project_store.upsert_integration(
         project_id="journey-proj", provider="github", credentials={"token": "ghp_test"}
     )
-    inc = _incident_with_proposal("journey-proj")
+    run = _run_with_proposal("journey-proj")
     _mock_github(monkeypatch)
     monkeypatch.setattr(
         orchestrator.sandbox_runner, "run_verification",
@@ -251,39 +251,39 @@ async def test_keep_commit_pr_journey(tmp_path, monkeypatch, auth_headers, proje
     )
 
     # 1) Keep Changes
-    res = await _request("POST", f"/api/incidents/{inc.id}/approve-fix", auth_headers, {"approved": True})
+    res = await _request("POST", f"/api/diagnosis/{run.id}/approve-fix", auth_headers, {"approved": True})
     assert res.status_code == 200, res.text
-    task = orchestrator._pipeline_tasks.get(inc.id)
+    task = orchestrator._pipeline_tasks.get(run.id)
     result = await task
-    assert result.status == IncidentStatus.FIX_VERIFIED
+    assert result.status == RunStatus.FIX_VERIFIED
     assert "no payment method" in (ws / "app" / "services" / "payment.py").read_text()
 
     # 2) Commit
-    res = await _request("POST", f"/api/incidents/{inc.id}/commit", auth_headers)
+    res = await _request("POST", f"/api/diagnosis/{run.id}/commit", auth_headers)
     assert res.status_code == 200, res.text
     sha = res.json()["sha"]
     assert _git(ws, "rev-parse", "HEAD") == sha
-    assert "api-doctor incident" in _git(ws, "log", "-1", "--pretty=%B")
+    assert "api-doctor run" in _git(ws, "log", "-1", "--pretty=%B")
     # workspace clean afterwards for the touched file
     assert "app/services/payment.py" not in _git(ws, "status", "--porcelain")
 
     # 2b) Commit again -> idempotent success instead of a bogus error
-    res = await _request("POST", f"/api/incidents/{inc.id}/commit", auth_headers)
+    res = await _request("POST", f"/api/diagnosis/{run.id}/commit", auth_headers)
     assert res.status_code == 200, res.text
     assert res.json()["sha"] == sha
 
     # 3) Create PR
-    res = await _request("POST", f"/api/incidents/{inc.id}/create-pr", auth_headers, {"approved": True})
+    res = await _request("POST", f"/api/diagnosis/{run.id}/create-pr", auth_headers, {"approved": True})
     assert res.status_code == 200, res.text
     assert res.json()["pr_url"].endswith("/pull/7")
-    stored = incident_store.get(inc.id)
-    assert stored.status == IncidentStatus.PR_CREATED
+    stored = run_store.get(run.id)
+    assert stored.status == RunStatus.PR_CREATED
     steps = [(ev.step, ev.status) for ev in stored.activity]
     assert ("branch_created", "done") in steps
     assert ("pr_created", "done") in steps
 
     # 3b) Create PR again -> idempotent reuse
-    res = await _request("POST", f"/api/incidents/{inc.id}/create-pr", auth_headers, {"approved": True})
+    res = await _request("POST", f"/api/diagnosis/{run.id}/create-pr", auth_headers, {"approved": True})
     assert res.status_code == 200, res.text
     assert res.json()["pr_url"].endswith("/pull/7")
 
@@ -294,32 +294,32 @@ async def test_keep_commit_pr_journey(tmp_path, monkeypatch, auth_headers, proje
 async def test_create_pr_without_github_config_is_actionable(
     tmp_path, monkeypatch, auth_headers, project_factory
 ):
-    """No token configured: must be a 409 guidance response, and the incident
+    """No token configured: must be a 409 guidance response, and the run
     must never claim a branch was created."""
     ws = _make_git_workspace(tmp_path)
     project_factory(project_id="nogh-proj", workspace_path=str(ws), profile=discover_project(ws))
-    inc = _incident_with_proposal("nogh-proj")
-    inc.status = IncidentStatus.FIX_VERIFIED
-    inc.sandbox_result = {"passed": True, "steps": []}
-    incident_store.update(inc)
+    run = _run_with_proposal("nogh-proj")
+    run.status = RunStatus.FIX_VERIFIED
+    run.sandbox_result = {"passed": True, "steps": []}
+    run_store.update(run)
 
     emitted: list[tuple[str, str]] = []
     real_emit = __import__("app.events.hub", fromlist=["emit"]).emit
 
-    async def _capture(incident_id: str, step: str, status: str, message: str = "") -> None:
+    async def _capture(run_id: str, step: str, status: str, message: str = "") -> None:
         emitted.append((step, status))
-        await real_emit(incident_id, step, status, message)
+        await real_emit(run_id, step, status, message)
 
     monkeypatch.setattr("app.orchestrator.emit", _capture)
 
-    res = await _request("POST", f"/api/incidents/{inc.id}/create-pr", auth_headers, {"approved": True})
+    res = await _request("POST", f"/api/diagnosis/{run.id}/create-pr", auth_headers, {"approved": True})
 
     assert res.status_code == 409, res.text
     detail = res.json()["detail"].lower()
     assert "github" in detail and ("token" in detail or "configured" in detail)
 
-    stored = incident_store.get(inc.id)
-    assert stored.status != IncidentStatus.PR_CREATED
+    stored = run_store.get(run.id)
+    assert stored.status != RunStatus.PR_CREATED
     assert not any(
         ev.step == "branch_created" and ev.status == "done" for ev in stored.activity
     ), "timeline must not claim a branch was created when none exists"
@@ -337,21 +337,21 @@ async def test_create_pr_github_failure_records_failure(
     project_store.upsert_integration(
         project_id="badgh-proj", provider="github", credentials={"token": "ghp_expired"}
     )
-    inc = _incident_with_proposal("badgh-proj")
-    inc.status = IncidentStatus.FIX_VERIFIED
-    inc.sandbox_result = {"passed": True, "steps": []}
-    incident_store.update(inc)
+    run = _run_with_proposal("badgh-proj")
+    run.status = RunStatus.FIX_VERIFIED
+    run.sandbox_result = {"passed": True, "steps": []}
+    run_store.update(run)
 
     monkeypatch.setattr(
         GitHubClient, "list_pull_requests",
         AsyncMock(side_effect=GitHubError("GitHub API GET /pulls -> 401: bad credentials")),
     )
 
-    res = await _request("POST", f"/api/incidents/{inc.id}/create-pr", auth_headers, {"approved": True})
+    res = await _request("POST", f"/api/diagnosis/{run.id}/create-pr", auth_headers, {"approved": True})
 
     assert res.status_code == 502, res.text
-    stored = incident_store.get(inc.id)
-    assert stored.status != IncidentStatus.PR_CREATED
+    stored = run_store.get(run.id)
+    assert stored.status != RunStatus.PR_CREATED
     assert not any(
         ev.step == "branch_created" and ev.status == "done" for ev in stored.activity
     )
@@ -368,23 +368,23 @@ async def test_commit_handles_file_deletion_patch(
 ):
     ws = _make_git_workspace(tmp_path)
     project_factory(project_id="del-proj", workspace_path=str(ws), profile=discover_project(ws))
-    inc = _incident_with_proposal("del-proj", diff=_DELETE_DIFF)
-    inc.fix_proposal["files_changed"] = ["app/legacy.py"]
-    inc.fix_proposal["summary"] = "Remove legacy module"
-    incident_store.update(inc)
+    run = _run_with_proposal("del-proj", diff=_DELETE_DIFF)
+    run.fix_proposal["files_changed"] = ["app/legacy.py"]
+    run.fix_proposal["summary"] = "Remove legacy module"
+    run_store.update(run)
 
     monkeypatch.setattr(
         orchestrator.sandbox_runner, "run_verification",
         MagicMock(side_effect=lambda *a, **k: _passing_verification()),
     )
 
-    res = await _request("POST", f"/api/incidents/{inc.id}/approve-fix", auth_headers, {"approved": True})
+    res = await _request("POST", f"/api/diagnosis/{run.id}/approve-fix", auth_headers, {"approved": True})
     assert res.status_code == 200, res.text
-    task = orchestrator._pipeline_tasks.get(inc.id)
-    assert (await task).status == IncidentStatus.FIX_VERIFIED
+    task = orchestrator._pipeline_tasks.get(run.id)
+    assert (await task).status == RunStatus.FIX_VERIFIED
     assert not (ws / "app" / "legacy.py").exists()
 
-    res = await _request("POST", f"/api/incidents/{inc.id}/commit", auth_headers)
+    res = await _request("POST", f"/api/diagnosis/{run.id}/commit", auth_headers)
     assert res.status_code == 200, res.text
     assert "app/legacy.py" not in _git(ws, "ls-files"), "deletion must be staged and committed"
 
@@ -396,22 +396,22 @@ async def test_commit_retry_with_relocated_patch_paths(
     AI path (payment.py) does not exist in the workspace (app/services/...)."""
     ws = _make_git_workspace(tmp_path)
     project_factory(project_id="reloc-proj", workspace_path=str(ws), profile=discover_project(ws))
-    inc = _incident_with_proposal("reloc-proj", diff=_RELOCATED_DIFF)
-    inc.fix_proposal["files_changed"] = ["payment.py"]
-    incident_store.update(inc)
+    run = _run_with_proposal("reloc-proj", diff=_RELOCATED_DIFF)
+    run.fix_proposal["files_changed"] = ["payment.py"]
+    run_store.update(run)
 
     monkeypatch.setattr(
         orchestrator.sandbox_runner, "run_verification",
         MagicMock(side_effect=lambda *a, **k: _passing_verification()),
     )
 
-    res = await _request("POST", f"/api/incidents/{inc.id}/approve-fix", auth_headers, {"approved": True})
+    res = await _request("POST", f"/api/diagnosis/{run.id}/approve-fix", auth_headers, {"approved": True})
     assert res.status_code == 200, res.text
-    task = orchestrator._pipeline_tasks.get(inc.id)
-    assert (await task).status == IncidentStatus.FIX_VERIFIED
+    task = orchestrator._pipeline_tasks.get(run.id)
+    assert (await task).status == RunStatus.FIX_VERIFIED
 
-    first = await _request("POST", f"/api/incidents/{inc.id}/commit", auth_headers)
+    first = await _request("POST", f"/api/diagnosis/{run.id}/commit", auth_headers)
     assert first.status_code == 200, first.text
-    retry = await _request("POST", f"/api/incidents/{inc.id}/commit", auth_headers)
+    retry = await _request("POST", f"/api/diagnosis/{run.id}/commit", auth_headers)
     assert retry.status_code == 200, retry.text
     assert retry.json()["sha"] == first.json()["sha"]

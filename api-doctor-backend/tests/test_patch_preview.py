@@ -16,8 +16,8 @@ from pathlib import Path
 
 import httpx
 
-from app.incidents.models import Incident, IncidentStatus
-from app.incidents.store import incident_store
+from app.runs.models import Run, RunStatus
+from app.runs.store import run_store
 from app.main import app
 from app.orchestrator import Orchestrator
 from app.projects.discovery import discover_project
@@ -182,10 +182,10 @@ def test_preview_deleted_file_keeps_empty_green_side(tmp_path):
 # ---------------------------------------------------------------------------
 # Orchestrator: a pure patch mismatch must not blame a workspace change
 # ---------------------------------------------------------------------------
-def _mismatched_incident(project_id: str, file_contents: dict[str, str]) -> Incident:
-    inc = Incident(
+def _mismatched_run(project_id: str, file_contents: dict[str, str]) -> Run:
+    run = Run(
         project_id=project_id,
-        status=IncidentStatus.AWAITING_FIX_APPROVAL,
+        status=RunStatus.AWAITING_FIX_APPROVAL,
         stack_trace="Traceback ...",
         fix_proposal={
             "summary": "unrelated patch",
@@ -203,15 +203,15 @@ def _mismatched_incident(project_id: str, file_contents: dict[str, str]) -> Inci
             "risk": "low",
         },
     )
-    inc.context = {
-        "incident_id": inc.id,
-        "stack_trace": inc.stack_trace,
+    run.context = {
+        "run_id": run.id,
+        "stack_trace": run.stack_trace,
         "affected_files": ["app/services/payment.py"],
         "code_snippets": {},
         "file_contents": file_contents,
         "_complete": True,
     }
-    return incident_store.create(inc)
+    return run_store.create(run)
 
 
 async def test_pure_patch_mismatch_does_not_claim_workspace_changed(
@@ -227,9 +227,9 @@ async def test_pure_patch_mismatch_does_not_claim_workspace_changed(
 
     orch = Orchestrator()
     # The workspace still matches the diagnosis snapshot exactly.
-    inc = _mismatched_incident("pp-mismatch", {"app/services/payment.py": current})
+    run = _mismatched_run("pp-mismatch", {"app/services/payment.py": current})
 
-    outcome = await orch.stage_workspace_apply(inc.id)
+    outcome = await orch.stage_workspace_apply(run.id)
 
     assert outcome["applied"] is False
     assert outcome["conflict"] == "patch_mismatch"
@@ -252,9 +252,9 @@ async def test_diff_endpoint_returns_renderable_preview_for_stale_patch(
     (ws / "db.py").write_text(_FIXED_DB)  # fix already present in the workspace
     project_factory(project_id="pv-proj", workspace_path=str(ws), profile=discover_project(ws))
 
-    inc = incident_store.create(Incident(
+    run = run_store.create(Run(
         project_id="pv-proj",
-        status=IncidentStatus.AWAITING_FIX_APPROVAL,
+        status=RunStatus.AWAITING_FIX_APPROVAL,
         stack_trace="NameError: get_conn not defined",
         fix_proposal={
             "summary": "Fix NameError: get_conn not defined in db.py module scope",
@@ -267,7 +267,7 @@ async def test_diff_endpoint_returns_renderable_preview_for_stale_patch(
 
     transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get(f"/api/incidents/{inc.id}/diff", headers=auth_headers)
+        response = await client.get(f"/api/diagnosis/{run.id}/diff", headers=auth_headers)
 
     assert response.status_code == 200
     payload = response.json()

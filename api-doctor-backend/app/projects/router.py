@@ -14,7 +14,6 @@ from app.auth.schemas import UserResponse
 from app.core.config import settings
 from app.github.client import GitHubClient, GitHubError
 from app.github.service import GitHubService
-from app.incidents.store import incident_store
 from app.integrations.render_provider import RenderLogProvider
 from app.projects.discovery import discover_project
 from app.projects.models import Project, ProjectProfile, ProjectSettings, ProjectStatus
@@ -465,6 +464,9 @@ async def delete_project(project_id: str, user: UserResponse = Depends(require_a
     deleted = project_store.delete(project_id, user.id)
     if not deleted:
         raise HTTPException(404, f"project {project_id!r} not found")
+    from app.orchestrator import orchestrator
+
+    await orchestrator.reset_current(user.id)
     return {"status": "ok", "deleted": True}
 
 
@@ -473,6 +475,11 @@ async def activate_project(project_id: str, user: UserResponse = Depends(require
     project = project_store.set_current(project_id, user.id)
     if not project:
         raise HTTPException(404, f"project {project_id!r} not found")
+    # A project switch is always a clean console; live diagnosis state is not
+    # carried between workspaces.
+    from app.orchestrator import orchestrator
+
+    await orchestrator.reset_current(user.id)
     return project
 
 
@@ -500,7 +507,7 @@ async def get_project_status(project_id: str, user: UserResponse = Depends(requi
     project = _require_project(user.id, project_id)
     integrations = project_store.list_integrations(project_id)
     active_log_provider = next((item.provider for item in integrations if item.enabled and item.provider in {"render", "manual"}), None)
-    return ProjectStatus(project=project, incidents_count=len(incident_store.list_all(project_id)), integrations=integrations, workspace_ready=bool(project.workspace_path and Path(project.workspace_path).is_dir()), active_log_provider=active_log_provider)
+    return ProjectStatus(project=project, integrations=integrations, workspace_ready=bool(project.workspace_path and Path(project.workspace_path).is_dir()), active_log_provider=active_log_provider)
 
 
 @router.post("/{project_id}/sync", response_model=Project)
@@ -525,9 +532,3 @@ async def sync_project(project_id: str, user: UserResponse = Depends(require_aut
         settings_payload.test_command = profile.test_command or ""
     project_store.save_settings(project_id, settings_payload)
     return refreshed
-
-
-@router.get("/{project_id}/incidents")
-async def list_project_incidents(project_id: str, user: UserResponse = Depends(require_authenticated_user)) -> list[dict[str, Any]]:
-    _require_project(user.id, project_id)
-    return [item.model_dump(mode="json") for item in incident_store.list_all(project_id)]

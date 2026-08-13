@@ -203,7 +203,7 @@ async def test_service_repair_creates_pr(httpx_mock):
 
     project = Project(id="default", github_owner="acme", github_repo="demo", github_branch="main")
     info = await service.repair(
-        incident_id="inc1",
+        run_id="inc1",
         changes=[{"path": "app/x.py", "content": "def foo():\n    return 2\n"}],
         message="fix", title="Fix", body="body", project=project,
     )

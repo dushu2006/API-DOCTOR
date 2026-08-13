@@ -26,13 +26,13 @@ os.environ.setdefault("RENDER_API_BASE_URL", "https://api.render.com/v1")
 
 
 @pytest.fixture(autouse=True)
-def _clear_incidents():
+def _clear_runs():
     from app.db.base import init_db
-    from app.incidents.store import incident_store
+    from app.runs.store import run_store
     from app.projects.store import project_store
 
     init_db()
-    incident_store.clear()
+    run_store.clear()
     project_store.reset()
     # Clear AI cache between tests to avoid cross-test contamination
     try:
@@ -42,7 +42,7 @@ def _clear_incidents():
     except Exception:
         pass
     yield
-    incident_store.clear()
+    run_store.clear()
     project_store.reset()
     try:
         from app.ai.cache import get_global_cache

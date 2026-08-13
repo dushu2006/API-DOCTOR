@@ -1,4 +1,4 @@
-"""Structured operation logs must include incident id, status and error."""
+"""Structured operation logs must include run id, status and error."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ def _emit(logger: logging.Logger, **kwargs) -> dict:
     logger.addHandler(handler)
     logger.setLevel(logging.DEBUG)
     try:
-        log_operation(logger, "inc-123", "root_cause", **kwargs)
+        log_operation(logger, "run-123", "root_cause", **kwargs)
     finally:
         logger.removeHandler(handler)
 
@@ -37,7 +37,7 @@ def test_failed_operation_includes_error_in_json():
     )
     assert payload["message"] == "root_cause"
     assert payload["level"] == "ERROR"
-    assert payload["incident_id"] == "inc-123"
+    assert payload["run_id"] == "run-123"
     assert payload["operation"] == "root_cause"
     assert payload["status"] == "failed"
     assert payload["error"] == "root cause analysis failed: content is None"

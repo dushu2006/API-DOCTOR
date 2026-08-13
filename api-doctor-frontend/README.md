@@ -1,6 +1,6 @@
 # API Doctor frontend
 
-React/Vite dashboard for the API Doctor incident workflow. It consumes the FastAPI incident API, subscribes to live progress over Server-Sent Events, and renders retrieved source context, generated diffs, sandbox results, and pull-request details.
+React/Vite dashboard for API Doctor's current diagnosis workflow. It subscribes to live progress over Server-Sent Events and renders retrieved source context, generated diffs, sandbox results, and pull-request details. The UI has no history view: a fresh start clears the current report, and backend diagnosis data is never persisted.
 
 ## Run locally
 

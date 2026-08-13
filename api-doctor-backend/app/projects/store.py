@@ -551,8 +551,6 @@ class ProjectStore:
         return self.get(project_id)
 
     def status(self, project_id: str) -> Optional[ProjectStatus]:
-        from app.incidents.store import incident_store
-
         project = self.get(project_id)
         if not project:
             return None
@@ -560,7 +558,6 @@ class ProjectStore:
         active_log_provider = next((item.provider for item in integrations if item.provider in {"render", "manual"} and item.enabled), None)
         return ProjectStatus(
             project=project,
-            incidents_count=len(incident_store.list_all(project_id)),
             integrations=integrations,
             workspace_ready=bool(project.workspace_path),
             active_log_provider=active_log_provider,

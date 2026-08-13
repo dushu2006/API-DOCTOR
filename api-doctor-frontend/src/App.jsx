@@ -14,6 +14,7 @@ import ProjectSettingsModal from './components/ProjectSettingsModal';
 import { api } from './api';
 import { FileText, Loader2, Server, Sparkles, X } from 'lucide-react';
 import './index.css';
+import './reference-ui.css';
 
 const ACTIVE_DIAGNOSIS_STATUSES = new Set([
   'DETECTING',
@@ -55,13 +56,12 @@ export default function App() {
   const [openFiles, setOpenFiles] = useState([]);
   const [fileContent, setFileContent] = useState('');
 
-  const [incidentsList, setIncidentsList] = useState([]);
-  const [activeIncidentId, setActiveIncidentId] = useState(null);
-  const [activeIncident, setActiveIncident] = useState(null);
-  const [incidentContext, setIncidentContext] = useState(null);
-  const [incidentDiff, setIncidentDiff] = useState(null);
-  const [incidentSandbox, setIncidentSandbox] = useState(null);
-  const [incidentPR, setIncidentPR] = useState(null);
+  const [activeRunId, setActiveRunId] = useState(null);
+  const [activeRun, setActiveRun] = useState(null);
+  const [runContext, setRunContext] = useState(null);
+  const [runDiff, setRunDiff] = useState(null);
+  const [runSandbox, setRunSandbox] = useState(null);
+  const [runPR, setRunPR] = useState(null);
   const [timelineEvents, setTimelineEvents] = useState([]);
   const [isDiagnosing, setIsDiagnosing] = useState(false);
   const [renderLogs, setRenderLogs] = useState([]);
@@ -80,18 +80,18 @@ export default function App() {
   const [activeBottomTab, setActiveBottomTab] = useState('terminal');
   const [isExplorerOpen, setIsExplorerOpen] = useState(true);
   const [isDoctorOpen, setIsDoctorOpen] = useState(true);
-  const [isBottomCollapsed, setIsBottomCollapsed] = useState(false);
+  const [isBottomCollapsed, setIsBottomCollapsed] = useState(true);
   const [isDiffMode, setIsDiffMode] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
 
-  const [explorerWidth, setExplorerWidth] = useState(240);
-  const [doctorWidth, setDoctorWidth] = useState(380);
+  const [explorerWidth, setExplorerWidth] = useState(188);
+  const [doctorWidth, setDoctorWidth] = useState(280);
   const [bottomHeight, setBottomHeight] = useState(220);
 
   const [highlightLine, setHighlightLine] = useState(null);
   const [failureReason, setFailureReason] = useState('');
   const [fileContentVersion, setFileContentVersion] = useState(0);
-  const [isIncidentActionPending, setIsIncidentActionPending] = useState(false);
+  const [isRunActionPending, setIsRunActionPending] = useState(false);
 
   // Ref mirror so the SSE subscription does not depend on the selected file.
   const selectedFileRef = useRef('');
@@ -106,30 +106,30 @@ export default function App() {
     [currentProject]
   );
 
-  // Explorer badges per file, driven by the incident's real read timeline
+  // Explorer badges per file, driven by the run's real read timeline
   // rather than the coarse "diagnosing" flag:
   //   modified — touched by the current patch proposal
   //   reading  — a workspace read of this file is in flight right now
   //   analyzed — the agent finished reading this file
   // Files identified but not yet read (waiting for read approval) get no
-  // badge, and a paused/finished incident never shows a stale "reading".
+  // badge, and a paused/finished run never shows a stale "reading".
   const fileStatuses = useMemo(() => {
-    const modified = new Set(incidentDiff?.files_changed || []);
-    const implicated = incidentContext?.implicated_files || [];
+    const modified = new Set(runDiff?.files_changed || []);
+    const implicated = runContext?.implicated_files || [];
 
     // The backend records one `file_read` activity event per file read:
     // "Reading <path>" (running), updated in place to
     // "Read <path> · N lines" (done). The latest event per path is that
     // file's real read state.
     const readState = new Map();
-    for (const event of activeIncident?.activity || []) {
+    for (const event of activeRun?.activity || []) {
       if (event.step !== 'file_read' || !event.message) continue;
       const match = event.message.match(/^(?:Reading|Read)\s+(.+?)(?:\s+·\s*\d+\s*lines?)?$/);
       if (match) readState.set(match[1].trim(), event.status);
     }
 
     const statuses = {};
-    const awaitingReadApproval = activeIncident?.status === 'AWAITING_FILE_READ_APPROVAL';
+    const awaitingReadApproval = activeRun?.status === 'AWAITING_FILE_READ_APPROVAL';
     for (const path of implicated) {
       if (modified.has(path)) continue; // badge assigned below
       const state = readState.get(path);
@@ -143,25 +143,32 @@ export default function App() {
       statuses[path] = 'modified';
     }
     return statuses;
-  }, [incidentContext, incidentDiff, activeIncident, isDiagnosing]);
+  }, [runContext, runDiff, activeRun, isDiagnosing]);
 
-  // Reset only the incident-scoped surfaces (panel, diff editor, bottom
-  // panel, timeline) back to the "fresh console" state. Unlike
-  // clearIncidentWorkspace this keeps the incident history list so the
-  // user can still pick an older incident afterwards.
-  const resetActiveIncident = useCallback(() => {
-    setActiveIncidentId(null);
-    setActiveIncident(null);
-    setIncidentContext(null);
-    setIncidentDiff(null);
-    setIncidentSandbox(null);
-    setIncidentPR(null);
+  // Reset every diagnosis surface back to an empty, fresh console.
+  const resetActiveRun = useCallback(() => {
+    setActiveRunId(null);
+    setActiveRun(null);
+    setRunContext(null);
+    setRunDiff(null);
+    setRunSandbox(null);
+    setRunPR(null);
     setTimelineEvents([]);
     setIsDiagnosing(false);
     setHighlightLine(null);
     setFailureReason('');
     setIsDiffMode(false);
   }, []);
+
+  const handleFreshStart = useCallback(async () => {
+    try {
+      await api.resetCurrentRun();
+    } catch (err) {
+      if (!err?.isNetworkError) console.warn('Could not clear diagnosis state:', err);
+    } finally {
+      resetActiveRun();
+    }
+  }, [resetActiveRun]);
 
   const clearProjectWorkspace = useCallback(() => {
     setProjectFiles({ files: [], tree: [] });
@@ -193,14 +200,13 @@ export default function App() {
     if (!neighbour) setFileContent('');
   };
 
-  const clearIncidentWorkspace = useCallback(() => {
-    setIncidentsList([]);
-    setActiveIncidentId(null);
-    setActiveIncident(null);
-    setIncidentContext(null);
-    setIncidentDiff(null);
-    setIncidentSandbox(null);
-    setIncidentPR(null);
+  const clearRunWorkspace = useCallback(() => {
+    setActiveRunId(null);
+    setActiveRun(null);
+    setRunContext(null);
+    setRunDiff(null);
+    setRunSandbox(null);
+    setRunPR(null);
     setTimelineEvents([]);
     setIsDiagnosing(false);
     setRenderLogs([]);
@@ -246,7 +252,7 @@ export default function App() {
           setShowProfileModal(false);
           setShowProjectSettings(false);
           clearProjectWorkspace();
-          clearIncidentWorkspace();
+          clearRunWorkspace();
           return;
         }
         throw err;
@@ -258,13 +264,13 @@ export default function App() {
 
       if (!projectList || projectList.length === 0) {
         setCurrentProject(null);
-        // Demo mode skips the mandatory setup wizard so operators can run the
+        // Demo mode skips the mandatory setup wizard so operators ca run the
         // built-in demo diagnosis straight away. Use the locally fetched
         // health (state is not committed yet inside this async flow).
         setShowProjectWizard(!health?.demo_mode);
         setShowProjectSelector(false);
         clearProjectWorkspace();
-        clearIncidentWorkspace();
+        clearRunWorkspace();
         return;
       }
 
@@ -299,7 +305,7 @@ export default function App() {
     } finally {
       setIsBootstrapping(false);
     }
-  }, [clearIncidentWorkspace, clearProjectWorkspace]);
+  }, [clearRunWorkspace, clearProjectWorkspace]);
 
   const loadProjectFiles = useCallback(async (projectId, keepSelected = true) => {
     if (!projectId) return;
@@ -322,26 +328,12 @@ export default function App() {
   const refreshProjectData = useCallback(async (projectId) => {
     if (!projectId) return;
     try {
-      const [project, incidents] = await Promise.all([
+      const [project, currentRun] = await Promise.all([
         api.getProject(projectId),
-        api.listIncidents(projectId),
+        api.getCurrentRun(projectId),
       ]);
       setCurrentProject(project);
-      setIncidentsList(incidents || []);
-
-      // Fresh-start rule: never auto-open an incident just because one
-      // exists — the workspace boots to an idle console with only the
-      // Start Diagnosis affordance, and an incident opens only when the
-      // user explicitly picks it (or a new sync/diagnosis creates one).
-      // A previously selected incident that vanished from the list simply
-      // clears back to the fresh state. Demo-scenario incidents live under
-      // the built-in demo project, so they are kept pinned even though they
-      // never appear in the current project's incident list.
-      setActiveIncidentId(prev => {
-        if (!prev) return null;
-        if (prev === demoIncidentIdRef.current) return prev;
-        return (incidents || []).some(item => item.id === prev) ? prev : null;
-      });
+      setActiveRunId(currentRun?.id || null);
 
       if (project?.is_connected) {
         await loadProjectFiles(project.id);
@@ -416,42 +408,42 @@ export default function App() {
     setSelectedFile(path);
   }, [projectFiles]);
 
-  // SSE updates and button handlers can request the same incident at nearly the
+  // SSE updates and button handlers can request the same run at nearly the
   // same time. Keep the newest response, rather than dropping a required
   // post-action refresh while an older request is in flight.
-  const incidentFetchVersion = useRef(0);
-  const fetchIncidentDetails = useCallback(async (id) => {
+  const runFetchVersion = useRef(0);
+  const fetchRunDetails = useCallback(async (id) => {
     if (!id) return;
-    const requestVersion = ++incidentFetchVersion.current;
+    const requestVersion = ++runFetchVersion.current;
     try {
-      const [inc, ctx, diff, sb, pr] = await Promise.allSettled([
-        api.getIncident(id),
-        api.getIncidentContext(id),
-        api.getIncidentDiff(id),
-        api.getIncidentSandbox(id),
-        api.getIncidentPR(id)
+      const [run, ctx, diff, sb, pr] = await Promise.allSettled([
+        api.getRun(id),
+        api.getRunContext(id),
+        api.getRunDiff(id),
+        api.getRunSandbox(id),
+        api.getRunPR(id)
       ]);
 
-      const incidentData = inc.status === 'fulfilled' ? inc.value : null;
+      const runData = run.status === 'fulfilled' ? run.value : null;
       const contextData = ctx.status === 'fulfilled' ? ctx.value : null;
       const diffData = diff.status === 'fulfilled' ? diff.value : null;
       const sandboxData = sb.status === 'fulfilled' ? sb.value : null;
       const prData = pr.status === 'fulfilled' ? pr.value : null;
 
       // An older response must not restore a pause-state after an approval has
-      // already moved the incident forward.
-      if (requestVersion !== incidentFetchVersion.current) return;
+      // already moved the run forward.
+      if (requestVersion !== runFetchVersion.current) return;
 
-      setActiveIncident(incidentData);
-      setIncidentContext(contextData);
-      setIncidentDiff(diffData);
-      setIncidentSandbox(sandboxData);
-      setIncidentPR(prData);
+      setActiveRun(runData);
+      setRunContext(contextData);
+      setRunDiff(diffData);
+      setRunSandbox(sandboxData);
+      setRunPR(prData);
 
       // Drive the diagnosing indicator off the canonical backend status so the
-      // UI stays in sync as the incident progresses (including SSE refetches).
+      // UI stays in sync as the run progresses (including SSE refetches).
       setIsDiagnosing(
-        Boolean(incidentData?.status) && ACTIVE_DIAGNOSIS_STATUSES.has(incidentData.status)
+        Boolean(runData?.status) && ACTIVE_DIAGNOSIS_STATUSES.has(runData.status)
       );
 
       // Highlight the offending line for the selected file in the editor.
@@ -471,29 +463,29 @@ export default function App() {
       setHighlightLine(nextHighlightLine);
 
       // Populate the failure callout with the most informative text available.
-      const rootCause = incidentData?.root_cause;
-      const reason = rootCause?.reason || rootCause?.root_cause || incidentData?.error_message || '';
+      const rootCause = runData?.root_cause;
+      const reason = rootCause?.reason || rootCause?.root_cause || runData?.error_message || '';
       setFailureReason(reason);
     } catch (err) {
-      console.error('Failed to fetch incident details:', err);
+      console.error('Failed to fetch run details:', err);
     }
   }, []);
 
   useEffect(() => {
-    if (activeIncidentId) {
-      fetchIncidentDetails(activeIncidentId);
+    if (activeRunId) {
+      fetchRunDetails(activeRunId);
     } else {
-      // Fresh state — drop any stale incident data so the panel, editor and
+      // Fresh state — drop any stale run data so the panel, editor and
       // bottom panel render the idle console instead of a previous report.
-      resetActiveIncident();
+      resetActiveRun();
     }
-  }, [activeIncidentId, fetchIncidentDetails, resetActiveIncident]);
+  }, [activeRunId, fetchRunDetails, resetActiveRun]);
 
   useEffect(() => {
-    if (!activeIncidentId) return;
+    if (!activeRunId) return;
     setTimelineEvents([]);
-    const unsubscribe = api.subscribeIncidentStream(
-      activeIncidentId,
+    const unsubscribe = api.subscribeRunStream(
+      activeRunId,
       (eventData) => {
         if (eventData.step || eventData.message) {
           setTimelineEvents(prev => [...prev, eventData]);
@@ -505,13 +497,13 @@ export default function App() {
           setIsDiffMode(false);
           setFileContentVersion(v => v + 1);
         }
-        fetchIncidentDetails(activeIncidentId);
+        fetchRunDetails(activeRunId);
       },
       () => console.log('SSE stream closed')
     );
     return () => unsubscribe();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeIncidentId, fetchIncidentDetails, currentProject?.id]);
+  }, [activeRunId, fetchRunDetails, currentProject?.id]);
 
   useEffect(() => {
     const handleMouseMove = (e) => {
@@ -555,7 +547,7 @@ export default function App() {
     setShowProjectWizard(false);
     setShowProjectSelector(false);
     clearProjectWorkspace();
-    clearIncidentWorkspace();
+    clearRunWorkspace();
     setIsBootstrapping(false);
   };
 
@@ -573,7 +565,7 @@ export default function App() {
     setShowProjectWizard(false);
     setShowProjectSelector(false);
     clearProjectWorkspace();
-    clearIncidentWorkspace();
+    clearRunWorkspace();
     setIsBootstrapping(false);
   };
 
@@ -599,7 +591,7 @@ export default function App() {
     const refreshedProjects = await api.listProjects();
     setProjects(refreshedProjects || []);
     if (currentProject?.id === project.id) {
-      clearIncidentWorkspace();
+      clearRunWorkspace();
       clearProjectWorkspace();
       if (refreshedProjects?.length > 0) {
         await handleSelectProject(refreshedProjects[0]);
@@ -633,7 +625,7 @@ export default function App() {
       setShowProjectSelector(false);
       setShowProjectWizard(false);
       setCurrentProject(activated);
-      clearIncidentWorkspace();
+      clearRunWorkspace();
       clearProjectWorkspace();
       await refreshProjectData(activated.id);
     } catch (err) {
@@ -679,22 +671,19 @@ export default function App() {
         alert(res.message || 'Failed to retrieve logs.');
         return;
       }
-      // Sync returns the sanitized source entries as well as detector results, so
-      // users can inspect an all-healthy log window instead of seeing only "0 incidents".
+      // Sync exposes this point-in-time log window and, when an error is found,
+      // starts exactly one fresh diagnosis.
       showRenderLogs(res);
-      if (res.incidents_created?.length > 0) {
-        setActiveIncidentId(res.incidents_created[0]);
+      if (res.run_id) {
+        setActiveRunId(res.run_id);
         if (res.diagnosis_started) setIsDiagnosing(true);
-        await refreshProjectData(currentProject.id);
-        fetchIncidentDetails(res.incidents_created[0]);
-      } else if (!res.incidents_created?.length) {
-        // No incidents detected - surface this clearly to the user
+        fetchRunDetails(res.run_id);
+      } else {
+        resetActiveRun();
         alert(
-          `Synced ${res.logs_retrieved ?? 0} log entries but found no ` +
-          `new incidents. Check the Logs tab, or use "Ingest & Start ` +
-          `Diagnosis" to manually diagnose a specific error.`
+          `Synced ${res.logs_retrieved ?? 0} log entries but found no error. ` +
+          `Check the Logs tab, or paste a specific error to start diagnosis.`
         );
-        return;
       }
     } catch (err) {
       alert(`Failed to sync logs: ${err.message}`);
@@ -706,7 +695,7 @@ export default function App() {
     await handleSyncRender();
   };
 
-  const handleIngestIncident = async (e) => {
+  const handleIngestRun = async (e) => {
     if (e) e.preventDefault();
     if (!currentProject?.id) {
       setShowProjectSelector(true);
@@ -719,22 +708,22 @@ export default function App() {
 
     setIsIngesting(true);
     try {
-      const res = await api.ingestIncident({
+      const res = await api.ingestRun({
         ...ingestForm,
         project_id: currentProject.id,
         raw_logs: ingestForm.log_text,
         stack_trace: ingestForm.log_text,
         auto_diagnose: true,
       });
-      if (res?.incident_id) {
-        setActiveIncidentId(res.incident_id);
+      if (res?.run_id) {
+        setActiveRunId(res.run_id);
         setActiveBottomTab('logs');
         setIsBottomCollapsed(false);
         setShowIngestModal(false);
         setIsDiagnosing(true);
         setIngestForm({ source: 'manual', message: '', log_text: '', endpoint: '', method: 'GET' });
         await refreshProjectData(currentProject.id);
-        fetchIncidentDetails(res.incident_id);
+        fetchRunDetails(res.run_id);
       }
     } catch (err) {
       alert(`Ingestion failed: ${err.message}`);
@@ -745,7 +734,6 @@ export default function App() {
 
   // Demo-mode trigger: runs a real diagnosis against the built-in demo API
   // (deterministic bugs). Only offered while the backend reports demo mode.
-  const demoIncidentIdRef = useRef(null);
   const [isDemoPending, setIsDemoPending] = useState(false);
   const handleRunDemoScenario = async (scenario = 'external_api') => {
     if (isDemoPending) return;
@@ -753,13 +741,12 @@ export default function App() {
     setIsDiagnosing(true);
     try {
       const res = await api.triggerDemoScenario(scenario);
-      if (res?.incident_id) {
-        demoIncidentIdRef.current = res.incident_id;
-        setActiveIncidentId(res.incident_id);
-        fetchIncidentDetails(res.incident_id);
+      if (res?.run_id) {
+        setActiveRunId(res.run_id);
+        fetchRunDetails(res.run_id);
       } else {
         setIsDiagnosing(false);
-        alert('Demo scenario did not return an incident.');
+        alert('Demo scenario did not return a run.');
       }
     } catch (err) {
       setIsDiagnosing(false);
@@ -775,15 +762,14 @@ export default function App() {
       return;
     }
 
-    // Resume only when the current incident is genuinely mid-flight (running
-    // or paused waiting for approval). A finished/failed historical incident
-    // is never re-diagnosed silently — the button starts a NEW diagnosis for
-    // the current production state instead.
-    if (activeIncidentId && activeIncident && ACTIVE_DIAGNOSIS_STATUSES.has(activeIncident.status)) {
+    // Resume only when the current run is genuinely mid-flight (running
+    // or paused waiting for approval). A completed run is never restarted
+    // silently — the button starts from the current production state.
+    if (activeRunId && activeRun && ACTIVE_DIAGNOSIS_STATUSES.has(activeRun.status)) {
       try {
         setIsDiagnosing(true);
-        await api.diagnoseIncident(activeIncidentId);
-        await fetchIncidentDetails(activeIncidentId);
+        await api.diagnoseRun(activeRunId);
+        await fetchRunDetails(activeRunId);
       } catch (err) {
         alert(`Diagnosis failed: ${err.message}`);
         setIsDiagnosing(false);
@@ -799,17 +785,17 @@ export default function App() {
   };
 
   const handleStopDiagnosis = async () => {
-    if (!activeIncidentId) return;
+    if (!activeRunId) return;
     try {
-      await api.cancelDiagnosis(activeIncidentId);
+      await api.cancelDiagnosis(activeRunId);
       setIsDiagnosing(false);
-      await fetchIncidentDetails(activeIncidentId);
+      await fetchRunDetails(activeRunId);
     } catch (err) {
-      // A paused/stuck incident has no running worker, but the user still
+      // A paused/stuck run has no running worker, but the user still
       // expects Stop to clear the diagnosing state. Refresh and only surface
       // unexpected failures.
       setIsDiagnosing(false);
-      await fetchIncidentDetails(activeIncidentId);
+      await fetchRunDetails(activeRunId);
       const detail = String(err.message || '');
       if (!/no active diagnosis/i.test(detail)) {
         alert(`Failed to stop diagnosis: ${detail}`);
@@ -823,28 +809,28 @@ export default function App() {
     return handleRejectChanges();
   };
 
-  const handleRediagnose = async () => {
-    if (!activeIncidentId || isIncidentActionPending) return;
-    setIsIncidentActionPending(true);
+  const handleRestart = async () => {
+    if (!activeRunId || isRunActionPending) return;
+    setIsRunActionPending(true);
     setIsDiagnosing(true);
     try {
-      const res = await api.rediagnoseIncident(activeIncidentId);
-      if (!res?.incident_id) throw new Error('Backend did not return a new incident.');
-      // Keep the stale incident as history, but move every active surface and
-      // the SSE subscription to the fresh diagnosis immediately.
+      const res = await api.restartRun(activeRunId);
+      if (!res?.run_id) throw new Error('Backend did not return a new run.');
+      // The backend has already discarded the old run. Move every visible
+      // surface and the SSE subscription to the fresh diagnosis immediately.
       setTimelineEvents([]);
-      setIncidentContext(null);
-      setIncidentDiff(null);
-      setIncidentSandbox(null);
-      setIncidentPR(null);
-      setActiveIncidentId(res.incident_id);
+      setRunContext(null);
+      setRunDiff(null);
+      setRunSandbox(null);
+      setRunPR(null);
+      setActiveRunId(res.run_id);
       if (currentProject?.id) await refreshProjectData(currentProject.id);
-      await fetchIncidentDetails(res.incident_id);
+      await fetchRunDetails(res.run_id);
     } catch (err) {
       setIsDiagnosing(false);
       alert(`Failed to re-run diagnosis: ${err.message}`);
     } finally {
-      setIsIncidentActionPending(false);
+      setIsRunActionPending(false);
     }
   };
 
@@ -852,118 +838,106 @@ export default function App() {
   // verifies it in an isolated copy of the pre-apply state. If verification
   // fails the workspace is rolled back automatically.
   const handleKeepChanges = async () => {
-    if (!activeIncidentId || isIncidentActionPending) return;
-    setIsIncidentActionPending(true);
+    if (!activeRunId || isRunActionPending) return;
+    setIsRunActionPending(true);
     try {
       setIsDiagnosing(true);
-      if (activeIncident?.status === 'AWAITING_FIX_APPROVAL') {
-        await api.approveFixProposal(activeIncidentId, true);
+      if (activeRun?.status === 'AWAITING_FIX_APPROVAL') {
+        await api.approveFixProposal(activeRunId, true);
       } else {
-        await api.applyFix(activeIncidentId);
+        await api.applyFix(activeRunId);
       }
       setFileContentVersion(v => v + 1);
-      await fetchIncidentDetails(activeIncidentId);
+      await fetchRunDetails(activeRunId);
     } catch (err) {
       setIsDiagnosing(false);
-      await fetchIncidentDetails(activeIncidentId);
+      await fetchRunDetails(activeRunId);
       alert(`Keep Changes failed: ${err.message}`);
     } finally {
-      setIsIncidentActionPending(false);
+      setIsRunActionPending(false);
     }
   };
 
   const handleRejectChanges = async () => {
-    if (!activeIncidentId) return;
+    if (!activeRunId) return;
     try {
-      if (activeIncident?.status === 'AWAITING_FIX_APPROVAL') {
-        await api.approveFixProposal(activeIncidentId, false);
+      if (activeRun?.status === 'AWAITING_FIX_APPROVAL') {
+        await api.approveFixProposal(activeRunId, false);
       } else {
-        await api.approveFix(activeIncidentId, false);
+        await api.approveFix(activeRunId, false);
       }
       setIsDiagnosing(false);
-      await fetchIncidentDetails(activeIncidentId);
+      await fetchRunDetails(activeRunId);
     } catch (err) {
       alert(`Failed to reject the patch: ${err.message}`);
     }
   };
 
   const handleApplyFix = async () => {
-    if (!activeIncidentId || isIncidentActionPending) return;
-    setIsIncidentActionPending(true);
+    if (!activeRunId || isRunActionPending) return;
+    setIsRunActionPending(true);
     try {
-      const res = await api.applyFix(activeIncidentId);
+      const res = await api.applyFix(activeRunId);
       if (res?.applied) {
         if (currentProject?.id) await loadProjectFiles(currentProject.id, true);
         setFileContentVersion(v => v + 1);
         setIsDiffMode(false);
       }
-      await fetchIncidentDetails(activeIncidentId);
+      await fetchRunDetails(activeRunId);
     } catch (err) {
       // The failed apply event carries the conflict reason. Refresh so the
       // panel replaces the unsafe Apply button with a one-click fresh diagnosis.
-      await fetchIncidentDetails(activeIncidentId);
+      await fetchRunDetails(activeRunId);
       alert(`Failed to apply the patch: ${err.message}`);
     } finally {
-      setIsIncidentActionPending(false);
+      setIsRunActionPending(false);
     }
   };
 
   const handleCommitChanges = async () => {
-    if (!activeIncidentId || isIncidentActionPending) return;
-    setIsIncidentActionPending(true);
+    if (!activeRunId || isRunActionPending) return;
+    setIsRunActionPending(true);
     try {
-      const res = await api.commitFix(activeIncidentId);
+      const res = await api.commitFix(activeRunId);
       if (res?.sha) {
-        await fetchIncidentDetails(activeIncidentId);
+        await fetchRunDetails(activeRunId);
       }
     } catch (err) {
-      await fetchIncidentDetails(activeIncidentId);
+      await fetchRunDetails(activeRunId);
       alert(`Commit failed: ${err.message}`);
     } finally {
-      setIsIncidentActionPending(false);
+      setIsRunActionPending(false);
     }
   };
 
   const handleApproveFileRead = async (approved) => {
-    if (!activeIncidentId || isIncidentActionPending) return;
-    setIsIncidentActionPending(true);
+    if (!activeRunId || isRunActionPending) return;
+    setIsRunActionPending(true);
     try {
       setIsDiagnosing(Boolean(approved));
-      await api.approveFileRead(activeIncidentId, approved);
-      await fetchIncidentDetails(activeIncidentId);
+      await api.approveFileRead(activeRunId, approved);
+      await fetchRunDetails(activeRunId);
     } catch (err) {
       setIsDiagnosing(false);
       alert(`Failed to record file read approval: ${err.message}`);
     } finally {
-      setIsIncidentActionPending(false);
-    }
-  };
-
-  const handleApproveFixProposal = async (approved) => {
-    if (!activeIncidentId) return;
-    try {
-      setIsDiagnosing(Boolean(approved));
-      await api.approveFixProposal(activeIncidentId, approved);
-      await fetchIncidentDetails(activeIncidentId);
-    } catch (err) {
-      setIsDiagnosing(false);
-      alert(`Failed to record fix approval: ${err.message}`);
+      setIsRunActionPending(false);
     }
   };
 
   const handleCreatePR = async () => {
-    if (!activeIncidentId || isIncidentActionPending) return;
-    setIsIncidentActionPending(true);
+    if (!activeRunId || isRunActionPending) return;
+    setIsRunActionPending(true);
     try {
-      await api.createPR(activeIncidentId);
-      await fetchIncidentDetails(activeIncidentId);
+      await api.createPR(activeRunId);
+      await fetchRunDetails(activeRunId);
     } catch (err) {
       // Refresh so the timeline shows the branch_created failure record and
       // any configuration guidance from the backend.
-      await fetchIncidentDetails(activeIncidentId);
+      await fetchRunDetails(activeRunId);
       alert(`Failed to create GitHub PR: ${err.message}`);
     } finally {
-      setIsIncidentActionPending(false);
+      setIsRunActionPending(false);
     }
   };
 
@@ -998,11 +972,16 @@ export default function App() {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', width: '100vw', height: '100vh', overflow: 'hidden' }}>
+    <div className="ide-desktop">
+      <div className="ide-window-title">
+        <span>▣ API Doctor - Workspace ({isDiagnosing ? 'Diagnosing' : activeRun ? 'Complete' : 'Idle'})</span>
+        <span>☆ ♡ ♧</span>
+      </div>
+      <div className="ide-shell">
       <TopBar
         projects={projects}
         currentUser={currentUser}
-        activeIncident={activeIncident}
+        activeRun={activeRun}
         onStartDiagnosis={handleStartDiagnosis}
         onStopDiagnosis={handleStopDiagnosis}
         onSyncRender={handleSyncRender}
@@ -1027,7 +1006,7 @@ export default function App() {
             setIsDoctorOpen={setIsDoctorOpen}
             isExplorerOpen={isExplorerOpen}
             setIsExplorerOpen={setIsExplorerOpen}
-            hasActiveIncident={Boolean(activeIncident)}
+            hasActiveRun={Boolean(activeRun)}
           />
 
           <Explorer
@@ -1050,17 +1029,17 @@ export default function App() {
           <EditorRegion
             selectedFile={selectedFile}
             fileContent={fileContent}
-            incidentContext={incidentContext}
-            incidentDiff={incidentDiff}
+            runContext={runContext}
+            runDiff={runDiff}
             isDiagnosing={isDiagnosing}
             isDiffMode={isDiffMode}
             setIsDiffMode={setIsDiffMode}
             onApproveFix={(
-              !activeIncident?.activity?.some(
+              !activeRun?.activity?.some(
                 event => event.step === 'changes_applied' && event.status === 'failed'
               ) && (
-                activeIncident?.status === 'AWAITING_FIX_APPROVAL'
-                || (incidentSandbox?.passed && !incidentDiff?.applied)
+                activeRun?.status === 'AWAITING_FIX_APPROVAL'
+                || (runSandbox?.passed && !runDiff?.applied)
               )
             ) ? handleApproveFix : null}
             highlightLine={highlightLine}
@@ -1076,32 +1055,32 @@ export default function App() {
           )}
 
           <APIDoctorPanel
-            incidentsList={incidentsList}
-            activeIncident={activeIncident}
-            incidentContext={incidentContext}
-            incidentDiff={incidentDiff}
-            incidentSandbox={incidentSandbox}
-            incidentPR={incidentPR}
+            activeRun={activeRun}
+            runContext={runContext}
+            runDiff={runDiff}
+            runSandbox={runSandbox}
+            runPR={runPR}
             timelineEvents={timelineEvents}
             isDiagnosing={isDiagnosing}
-            isIncidentActionPending={isIncidentActionPending}
+            isRunActionPending={isRunActionPending}
             onKeepChanges={handleKeepChanges}
             onRejectChanges={handleRejectChanges}
             onApplyFix={handleApplyFix}
-            onRediagnose={handleRediagnose}
+            onRestart={handleRestart}
             onCommitChanges={handleCommitChanges}
             onApproveFileRead={handleApproveFileRead}
             onCreatePR={handleCreatePR}
-            onSelectIncident={(id) => { setActiveIncidentId(id); setIsDoctorOpen(true); }}
-            onNewDiagnosis={resetActiveIncident}
-            onSyncRender={handleSyncRender}
+            onNewDiagnosis={handleFreshStart}
+            onStartDiagnosis={handleStartDiagnosis}
             onOpenIngestModal={() => setShowIngestModal(true)}
             demoMode={Boolean(backendHealth?.demo_mode)}
             onRunDemoScenario={handleRunDemoScenario}
             isDemoPending={isDemoPending}
             doctorWidth={doctorWidth}
+            projectProfile={currentProject?.profile}
             isDoctorOpen={isDoctorOpen}
             setIsDoctorOpen={setIsDoctorOpen}
+            selectedFile={selectedFile}
             setSelectedFile={openProjectFile}
             setIsDiffMode={setIsDiffMode}
           />
@@ -1112,10 +1091,10 @@ export default function App() {
         )}
 
         <BottomPanel
-          activeIncident={activeIncident}
-          incidentContext={incidentContext}
-          incidentDiff={incidentDiff}
-          incidentSandbox={incidentSandbox}
+          activeRun={activeRun}
+          runContext={runContext}
+          runDiff={runDiff}
+          runSandbox={runSandbox}
           renderLogs={renderLogs}
           renderLogsMeta={renderLogsMeta}
           onRefreshRenderLogs={currentLogProvider === 'render' ? handleViewRenderLogs : undefined}
@@ -1156,7 +1135,6 @@ export default function App() {
         user={currentUser}
         projects={projects}
         currentProject={currentProject}
-        incidentsCount={incidentsList.length}
         onClose={() => setShowProfileModal(false)}
         onUpdated={handleProfileUpdated}
         onLogout={handleLogout}
@@ -1169,7 +1147,7 @@ export default function App() {
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <FileText size={18} style={{ color: 'var(--color-accent)' }} />
-                <h3 style={{ fontSize: '15px', fontWeight: 600, color: 'var(--text-primary)' }}>Ingest Production Failure or Stack Trace</h3>
+                <h3 style={{ fontSize: '15px', fontWeight: 600, color: 'var(--text-primary)' }}>Start a Fresh Diagnosis</h3>
               </div>
               <button onClick={() => setShowIngestModal(false)} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}>
                 <X size={16} />
@@ -1177,7 +1155,7 @@ export default function App() {
             </div>
 
             <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '16px', lineHeight: 1.5 }}>
-              Paste runtime logs or an error traceback when you want to diagnose a manual incident.
+              Paste runtime logs or an error traceback when you want to diagnose a manual run.
               {currentLogProvider === 'render' ? ' This project also supports automatic Render log retrieval.' : ''}
             </p>
 
@@ -1185,7 +1163,7 @@ export default function App() {
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', padding: '12px', marginBottom: '14px', backgroundColor: 'rgba(124, 140, 248, 0.08)', border: '1px solid rgba(124, 140, 248, 0.25)', borderRadius: '8px' }}>
                 <div>
                   <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '2px' }}>Pull logs automatically from Render</div>
-                  <div style={{ fontSize: '11px', color: 'var(--text-muted)', lineHeight: 1.4 }}>API Doctor will fetch runtime logs from the configured service, create incidents from detected failures, and open them in the Logs tab.</div>
+                  <div style={{ fontSize: '11px', color: 'var(--text-muted)', lineHeight: 1.4 }}>API Doctor will fetch the current runtime logs and start one fresh diagnosis from the first detected failure.</div>
                 </div>
                 <button type="button" onClick={handleUseRenderLogs} className="btn-outline" style={{ whiteSpace: 'nowrap' }}>
                   <Server size={14} />
@@ -1194,7 +1172,7 @@ export default function App() {
               </div>
             )}
 
-            <form onSubmit={handleIngestIncident} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            <form onSubmit={handleIngestRun} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
               <div style={{ display: 'flex', gap: '12px' }}>
                 <div style={{ flex: 1 }}>
                   <label style={{ display: 'block', fontSize: '11px', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '4px' }}>Source:</label>
@@ -1219,7 +1197,7 @@ export default function App() {
                 <button type="button" onClick={() => setShowIngestModal(false)} className="btn-outline">Cancel</button>
                 <button type="submit" disabled={isIngesting} className="btn-primary" style={{ padding: '8px 16px', display: 'flex', alignItems: 'center', gap: '6px' }}>
                   {isIngesting ? <Loader2 size={14} className="spin" /> : <Sparkles size={14} />}
-                  <span>Ingest & Start Diagnosis</span>
+                  <span>Start Fresh Diagnosis</span>
                 </button>
               </div>
             </form>
@@ -1234,6 +1212,7 @@ export default function App() {
         setIsDiffMode={setIsDiffMode}
         setActiveBottomTab={setActiveBottomTab}
       />
+      </div>
     </div>
   );
 }

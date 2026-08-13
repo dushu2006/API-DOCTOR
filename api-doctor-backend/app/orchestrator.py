@@ -1,6 +1,6 @@
 """Central workflow engine.
 
-Drives: detect/ingest -> create incident -> collect context -> retrieve relevant code
+Drives: detect/ingest -> create run -> collect context -> retrieve relevant code
 -> root cause analysis -> fix generation -> sandbox (reproduce/patch/tests/
 verify) -> GitHub PR.
 
@@ -15,12 +15,11 @@ Guarantees:
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
-import re
 import shutil
 import subprocess
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,15 +32,14 @@ from app.core.config import settings
 from app.core.logging_config import log_operation
 from app.detector.failure_detector import FailureDetector
 from app.events.hub import emit
-from app.incidents.models import Incident, IncidentStatus
-from app.incidents.store import incident_store
+from app.runs.models import Run, RunStatus
+from app.runs.store import run_store
 from app.projects.store import project_store
 from app.sandbox.patch_utils import (
     PatchError,
     apply_patch,
     apply_patch_idempotent,
     resolve_diff_paths,
-    reverse_applied_files,
     validate_diff,
 )
 from app.sandbox.sandbox_runner import SandboxResult, SandboxRunner
@@ -50,39 +48,29 @@ from app.security.sanitizer import redact_text, sanitize
 logger = logging.getLogger(__name__)
 
 # How many times the coder model may be re-invoked with corrective feedback
-# after a FixProposal references file paths that do not exist in the incident's
+# after a FixProposal references file paths that do not exist in the run's
 # known context (see _generate_validated_fix). Bounded so a stubborn model can
 # never loop forever.
 _FIX_PATH_RETRIES = 2
 
-# Statuses an incident can be in AFTER the fix-approval gate has been crossed
+# Statuses a run can be in AFTER the fix-approval gate has been crossed
 # (verification running/done, downstream failure, PR opened). Once a
-# "fix_approval: done" activity was recorded and the incident sits in one of
+# "fix_approval: done" activity was recorded and the run sits in one of
 # these, a repeated "Keep Changes" request is a duplicate (double click,
 # browser retry on a dropped response) and must be treated as an idempotent
 # success — never as a conflict.
 POST_FIX_GATE_STATUSES = frozenset({
-    IncidentStatus.SANDBOX_TESTING,
-    IncidentStatus.SANDBOX_RUNNING,
-    IncidentStatus.TESTING,
-    IncidentStatus.VERIFYING,
-    IncidentStatus.FIX_VERIFIED,
-    IncidentStatus.PR_READY,
-    IncidentStatus.PR_CREATED,
-    IncidentStatus.VERIFICATION_FAILED,
-    IncidentStatus.REPAIR_LIMIT_REACHED,
-    IncidentStatus.FAILED,
+    RunStatus.SANDBOX_TESTING,
+    RunStatus.SANDBOX_RUNNING,
+    RunStatus.TESTING,
+    RunStatus.VERIFYING,
+    RunStatus.FIX_VERIFIED,
+    RunStatus.PR_READY,
+    RunStatus.PR_CREATED,
+    RunStatus.VERIFICATION_FAILED,
+    RunStatus.REPAIR_LIMIT_REACHED,
+    RunStatus.FAILED,
 })
-
-# Lines that do not start a Python exception type when scanning a traceback.
-_NON_EXCEPTION_LEADERS = {"Traceback", "File", "During", "The", "Error", "Warning"}
-
-_EXCEPTION_LEADER_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.]*)(?::|\s|$)")
-
-
-def _apply_backups_root() -> Path:
-    return Path(settings.DATA_DIR) / "apply_backups"
-
 
 def _utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -95,17 +83,50 @@ class Orchestrator:
         self.root_cause_agent = RootCauseAgent()
         self.fix_agent = FixAgent()
         self.sandbox_runner = SandboxRunner()
-        self._pipeline_tasks: dict[str, asyncio.Task[Incident | None]] = {}
-        # incident_id -> Keep-Changes application state (backup location, files)
+        self._pipeline_tasks: dict[str, asyncio.Task[Run | None]] = {}
+        # run_id -> Keep-Changes application state (rollback snapshot and affected files)
         self._workspace_apply: dict[str, dict[str, Any]] = {}
         # Applying a patch is a read/check/write transaction. Serialize it so a
-        # duplicate click (or two incidents targeting the same workspace) can
+        # duplicate click (or two runs targeting the same workspace) can
         # never race between the context check and the metadata update.
         self._workspace_apply_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Entry points
     # ------------------------------------------------------------------
+    async def reset_current(self, owner_id: str) -> bool:
+        """Cancel and forget the owner's current run without archiving it."""
+        current = run_store.get_current(owner_id)
+        if not current:
+            return False
+
+        task = self._pipeline_tasks.get(current.id)
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        # If a patch was staged but never verified, restore the source before
+        # forgetting its only in-memory state. Completed changes remain in the
+        # workspace because the user explicitly kept them.
+        completed = current.status in {
+            RunStatus.FIX_VERIFIED,
+            RunStatus.PR_READY,
+            RunStatus.PR_CREATED,
+        }
+        if self._load_apply_state(current.id):
+            if completed:
+                self._discard_apply_snapshot(current.id)
+            else:
+                await self._restore_workspace_files(current.id)
+
+        self._pipeline_tasks.pop(current.id, None)
+        await emit(current.id, "reset", "done", "Diagnosis state cleared")
+        run_store.clear(owner_id)
+        return True
+
     async def detect_and_create(
         self,
         endpoint: str,
@@ -113,23 +134,26 @@ class Orchestrator:
         payload: dict | None = None,
         headers: dict[str, str] | None = None,
         project_id: str = "default",
-    ) -> Incident:
+        owner_id: str = "local",
+    ) -> Run:
+        await self.reset_current(owner_id)
         detection = await self.detector.trigger_diagnosis(endpoint, method, payload, headers)
-        incident = Incident(
+        run = Run(
+            owner_id=owner_id,
             project_id=project_id,
-            status=IncidentStatus.DETECTED,
+            status=RunStatus.DETECTED,
             detection=detection,
             request_snapshot=detection.get("request_snapshot", {}),
             stack_trace=detection.get("stack_trace", ""),
         )
-        incident_store.create(incident)
-        incident.add_activity("error_detected", "done", f"HTTP {detection.get('status_code')} on {method} {endpoint}")
-        incident_store.update(incident)
-        log_operation(logger, incident.id, "detect", "ok", error=str(detection.get("error_message") or "")[:200])
-        await emit(incident.id, "error_detected", "done", f"{method} {endpoint}")
-        return incident
+        run_store.create(run)
+        run.add_activity("error_detected", "done", f"HTTP {detection.get('status_code')} on {method} {endpoint}")
+        run_store.update(run)
+        log_operation(logger, run.id, "detect", "ok", error=str(detection.get("error_message") or "")[:200])
+        await emit(run.id, "error_detected", "done", f"{method} {endpoint}")
+        return run
 
-    async def ingest_incident(
+    async def ingest_run(
         self,
         *,
         source: str = "manual",
@@ -141,13 +165,15 @@ class Orchestrator:
         status_code: int = 500,
         service_id: str = "",
         project_id: str = "default",
+        owner_id: str = "local",
         request_snapshot: dict | None = None,
-    ) -> Incident:
-        """Create an incident from external log ingestion (Render, CI, manual)."""
+    ) -> Run:
+        """Start a fresh diagnosis from external logs."""
+        await self.reset_current(owner_id)
         safe_raw_logs = redact_text(raw_logs or "")
         safe_trace = redact_text(stack_trace or safe_raw_logs or message)
         safe_message = redact_text(
-            message or (safe_trace.splitlines()[-1] if safe_trace else "Incident detected from logs")
+            message or (safe_trace.splitlines()[-1] if safe_trace else "Run detected from logs")
         )
         safe_request_snapshot = sanitize(
             request_snapshot or {"method": method, "path": endpoint}
@@ -167,139 +193,115 @@ class Orchestrator:
             "response_snapshot": {},
         }
 
-        # Deduplicate: sync-render polls the same production error repeatedly.
-        # If an incident for this project+error is still open, reuse it instead
-        # of piling up another RECEIVED row (the 22-stuck-incidents symptom).
-        existing = self._find_open_duplicate(project_id, detection)
-        if existing is not None:
-            log_operation(
-                logger, existing.id, "ingest", "deduped",
-                error=f"reusing open incident for {safe_message[:120]}",
-            )
-            existing.add_activity(
-                "duplicate_suppressed", "done",
-                "Same error already tracked — reusing existing incident",
-            )
-            incident_store.update(existing)
-            await emit(
-                existing.id, "duplicate_suppressed", "done",
-                "Same error already tracked — reusing existing incident",
-            )
-            return existing
-
-        incident = Incident(
+        run = Run(
+            owner_id=owner_id,
             project_id=project_id,
-            status=IncidentStatus.RECEIVED,
+            status=RunStatus.RECEIVED,
             detection=detection,
             request_snapshot=safe_request_snapshot,
             stack_trace=safe_trace,
         )
-        incident_store.create(incident)
-        incident.add_activity("logs_retrieved", "done", "Logs retrieved")
-        incident.add_activity("error_detected", "done", "Error detected")
-        incident_store.update(incident)
+        run_store.create(run)
+        line_count = len(safe_raw_logs.splitlines()) if safe_raw_logs else 0
+        log_detail = f"Fetched {line_count} line(s) from {source}"
+        error_detail = f"{method.upper()} {endpoint or 'runtime'} - {status_code}"
+        run.add_activity("logs_retrieved", "done", log_detail)
+        run.add_activity("error_detected", "done", error_detail)
+        run_store.update(run)
 
-        log_operation(logger, incident.id, "ingest", "ok", error=safe_message[:200])
-        await emit(incident.id, "logs_retrieved", "done", "Logs retrieved")
-        await emit(incident.id, "error_detected", "done", "Error detected")
-        return incident
+        log_operation(logger, run.id, "ingest", "ok", error=safe_message[:200])
+        await emit(run.id, "logs_retrieved", "done", log_detail)
+        await emit(run.id, "error_detected", "done", error_detail)
+        return run
 
-    async def rediagnose(self, incident_id: str) -> Incident:
-        """Create and start a fresh incident from an existing incident's input.
+    async def restart(self, run_id: str) -> Run:
+        """Replace the current run and diagnose its sanitized input again."""
+        current = run_store.get(run_id)
+        if not current:
+            raise ValueError(f"run not found: {run_id}")
+        if self.has_active_pipeline(run_id):
+            raise ValueError("Cannot restart while diagnosis is still running.")
 
-        A stale patch must never be forced onto changed source.  This gives the
-        UI a one-click recovery that retains the original sanitized logs and
-        request snapshot while deliberately discarding every cached source
-        read, root cause, patch, approval, and sandbox result.
-        """
-        original = incident_store.get(incident_id)
-        if not original:
-            raise ValueError(f"incident not found: {incident_id}")
-        if self.has_active_pipeline(incident_id):
-            raise ValueError("Cannot re-run diagnosis while the original diagnosis is still running.")
+        detection = json.loads(json.dumps(current.detection or {}))
+        request_snapshot = json.loads(json.dumps(current.request_snapshot or {}))
+        owner_id = current.owner_id
+        project_id = current.project_id
+        stack_trace = current.stack_trace
+        await self.reset_current(owner_id)
 
-        # Database payloads are JSON-compatible; a JSON round trip gives the
-        # new incident independent nested dictionaries/lists without carrying
-        # mutable references from the historical record.
-        detection = json.loads(json.dumps(original.detection or {}))
-        detection["rediagnosis_of"] = original.id
-        request_snapshot = json.loads(json.dumps(original.request_snapshot or {}))
-        fresh = Incident(
-            project_id=original.project_id,
-            status=IncidentStatus.RECEIVED,
+        fresh = Run(
+            owner_id=owner_id,
+            project_id=project_id,
+            status=RunStatus.RECEIVED,
             detection=detection,
             request_snapshot=request_snapshot,
-            stack_trace=original.stack_trace,
+            stack_trace=stack_trace,
         )
-        fresh.add_activity(
-            "rediagnosis_requested",
-            "done",
-            f"Fresh diagnosis requested from incident {original.id[:8]}",
-        )
-        fresh.add_activity("logs_retrieved", "done", "Reusing sanitized incident logs")
+        fresh.add_activity("fresh_start", "done", "Fresh diagnosis started")
+        fresh.add_activity("logs_retrieved", "done", "Current input loaded")
         fresh.add_activity("error_detected", "done", "Error detected")
-        fresh = incident_store.create(fresh)
+        fresh = run_store.create(fresh)
         if not self.start_diagnosis(fresh.id):
-            fresh.status = IncidentStatus.FAILED
+            fresh.status = RunStatus.FAILED
             fresh.error_message = "Fresh diagnosis could not be started."
-            incident_store.update(fresh)
+            run_store.update(fresh)
             raise ValueError(fresh.error_message)
         return fresh
 
-    def has_active_pipeline(self, incident_id: str) -> bool:
-        task = self._pipeline_tasks.get(incident_id)
+    def has_active_pipeline(self, run_id: str) -> bool:
+        task = self._pipeline_tasks.get(run_id)
         return bool(task and not task.done())
 
-    def start_diagnosis(self, incident_id: str) -> bool:
-        """Start or resume one background pipeline for an incident."""
-        inc = incident_store.get(incident_id)
-        if not inc:
+    def start_diagnosis(self, run_id: str) -> bool:
+        """Start or resume one background pipeline for a run."""
+        run = run_store.get(run_id)
+        if not run:
             return False
 
-        if self.has_active_pipeline(incident_id):
+        if self.has_active_pipeline(run_id):
             return False
 
         # Allow resume from paused/stuck in-progress states as long as no
         # worker is running. PR_CREATED is the only non-restartable success.
-        if inc.status == IncidentStatus.PR_CREATED:
+        if run.status == RunStatus.PR_CREATED:
             return False
 
         task = asyncio.create_task(
-            self.run_pipeline(incident_id),
-            name=f"api-doctor-pipeline-{incident_id}",
+            self.run_pipeline(run_id),
+            name=f"api-doctor-pipeline-{run_id}",
         )
-        self._pipeline_tasks[incident_id] = task
+        self._pipeline_tasks[run_id] = task
         task.add_done_callback(
-            lambda completed, iid=incident_id: self._pipeline_finished(iid, completed)
+            lambda completed, iid=run_id: self._pipeline_finished(iid, completed)
         )
         return True
 
     def _pipeline_finished(
-        self, incident_id: str, task: asyncio.Task[Incident | None]
+        self, run_id: str, task: asyncio.Task[Run | None]
     ) -> None:
-        if self._pipeline_tasks.get(incident_id) is task:
-            self._pipeline_tasks.pop(incident_id, None)
+        if self._pipeline_tasks.get(run_id) is task:
+            self._pipeline_tasks.pop(run_id, None)
         try:
             task.result()
         except asyncio.CancelledError:
-            logger.info("Diagnosis pipeline cancelled for incident %s", incident_id)
+            logger.info("Diagnosis pipeline cancelled for run %s", run_id)
         except Exception:
-            logger.exception("Unhandled diagnosis task failure for %s", incident_id)
+            logger.exception("Unhandled diagnosis task failure for %s", run_id)
 
-    async def cancel_diagnosis(self, incident_id: str) -> bool:
-        """Cancel a running, paused, or stuck diagnosis and persist a terminal state.
+    async def cancel_diagnosis(self, run_id: str) -> bool:
+        """Cancel a running, paused, or stuck diagnosis and close its current state.
 
         The pipeline task exits when it pauses for user approval, so cancel must
         still succeed for AWAITING_* and other non-terminal statuses even when
         no asyncio task is registered.
         """
-        inc = incident_store.get(incident_id)
-        if not inc:
+        run = run_store.get(run_id)
+        if not run:
             return False
-        if inc.status.is_terminal:
+        if run.status.is_terminal:
             return False
 
-        task = self._pipeline_tasks.get(incident_id)
+        task = self._pipeline_tasks.get(run_id)
         if task and not task.done():
             task.cancel()
             try:
@@ -307,35 +309,35 @@ class Orchestrator:
             except asyncio.CancelledError:
                 pass
 
-        inc = incident_store.get(incident_id)
-        if not inc:
+        run = run_store.get(run_id)
+        if not run:
             return False
-        if inc.status == IncidentStatus.CANCELLED:
+        if run.status == RunStatus.CANCELLED:
             return True
-        if inc.status.is_terminal:
+        if run.status.is_terminal:
             return False
 
-        inc.status = IncidentStatus.CANCELLED
-        inc.error_message = "Diagnosis cancelled by user"
-        for ev in inc.activity:
+        run.status = RunStatus.CANCELLED
+        run.error_message = "Diagnosis cancelled by user"
+        for ev in run.activity:
             if ev.status in {"running", "pending"}:
                 ev.status = "cancelled"
-        inc.add_activity("pipeline", "cancelled", inc.error_message)
-        incident_store.update(inc)
-        await emit(incident_id, "pipeline", "cancelled", inc.error_message)
+        run.add_activity("pipeline", "cancelled", run.error_message)
+        run_store.update(run)
+        await emit(run_id, "pipeline", "cancelled", run.error_message)
         return True
 
     # ------------------------------------------------------------------
     # Pipeline
     # ------------------------------------------------------------------
-    async def run_pipeline(self, incident_id: str) -> Incident | None:
-        inc = incident_store.get(incident_id)
-        if not inc:
-            logger.error("Incident %s not found", incident_id)
+    async def run_pipeline(self, run_id: str) -> Run | None:
+        run = run_store.get(run_id)
+        if not run:
+            logger.error("Run %s not found", run_id)
             return None
 
         # Determine the project and workspace
-        project = project_store.get(inc.project_id) or project_store.get_current()
+        project = project_store.get(run.project_id) or project_store.get_current()
         workspace_path = None
         if project and project.workspace_path and Path(project.workspace_path).is_dir():
             workspace_path = project.workspace_path
@@ -344,7 +346,7 @@ class Orchestrator:
             # project created before the sync completed). Fall back to the
             # canonical per-repository workspace layout managed by
             # WorkspaceManager so the sandbox/context runners are bound to THIS
-            # incident's repository and never to a shared global default.
+            # run's repository and never to a shared global default.
             candidate = self.sandbox_runner.workspace_mgr.get_project_workspace_path(
                 project.github_owner, project.github_repo
             )
@@ -355,28 +357,28 @@ class Orchestrator:
         profile = project.profile if project else None
 
         if not workspace_path:
-            # No workspace to operate on. Fail the incident explicitly instead
+            # No workspace to operate on. Fail the run explicitly instead
             # of raising out of the background task, which previously left the
-            # incident stuck in RECEIVED/DETECTED with no error surfaced. The
+            # run stuck in RECEIVED/DETECTED with no error surfaced. The
             # user can retry once the project is connected (start_diagnosis
             # permits restart from any non-PR_CREATED status).
-            inc.status = IncidentStatus.FAILED
-            inc.error_message = (
+            run.status = RunStatus.FAILED
+            run.error_message = (
                 "No synchronized workspace is available for the selected project. "
                 "Connect the repository and try again."
             )
-            inc.add_activity("pipeline", "failed", inc.error_message)
-            incident_store.update(inc)
-            await emit(incident_id, "pipeline", "failed", inc.error_message)
-            log_operation(logger, incident_id, "pipeline", "failed", error=inc.error_message)
-            return inc
+            run.add_activity("pipeline", "failed", run.error_message)
+            run_store.update(run)
+            await emit(run_id, "pipeline", "failed", run.error_message)
+            log_operation(logger, run_id, "pipeline", "failed", error=run.error_message)
+            return run
 
         self.context_builder.set_repo_root(workspace_path)
         self.sandbox_runner.set_repo_root(workspace_path, profile)
 
         t_start = time.perf_counter()
         try:
-            await emit(inc.id, "pipeline", "running", "Starting diagnosis pipeline")
+            await emit(run.id, "pipeline", "running", "Starting diagnosis pipeline")
 
             # Every timeline step below corresponds to a real operation. The
             # repository state is actually inspected (git branch/commit/dirty
@@ -385,90 +387,90 @@ class Orchestrator:
             # interactive approval pause these setup steps already ran once and
             # are deliberately NOT re-emitted — replaying them is what made the
             # timeline look scripted.
-            if not self._has_activity(inc, "repository_connected", "done"):
-                profile = await self._verify_repository(inc, project, workspace_path, profile)
+            if not self._has_activity(run, "repository_connected", "done"):
+                profile = await self._verify_repository(run, project, workspace_path, profile)
                 self.sandbox_runner.set_repo_root(workspace_path, profile)
 
-            resuming_approved_fix = self._should_resume_approved_fix(inc)
+            resuming_approved_fix = self._should_resume_approved_fix(run)
 
             # Context collection (may pause for file read approval). Skip when
             # we already have context and are only resuming sandbox testing.
-            if not (resuming_approved_fix and inc.context):
-                await self._collect_context(inc, profile)
-                if inc.status == IncidentStatus.AWAITING_FILE_READ_APPROVAL:
-                    await emit(inc.id, "pipeline", "paused", "Waiting for file read approval")
-                    return inc
+            if not (resuming_approved_fix and run.context):
+                await self._collect_context(run, profile)
+                if run.status == RunStatus.AWAITING_FILE_READ_APPROVAL:
+                    await emit(run.id, "pipeline", "paused", "Waiting for file read approval")
+                    return run
 
             # Investigation (may pause for fix approval). Skip when the user
             # already approved an existing proposal so we don't re-call the LLM.
             if not resuming_approved_fix:
-                await self._investigate(inc, profile)
-                if inc.status == IncidentStatus.AWAITING_FIX_APPROVAL:
-                    await emit(inc.id, "pipeline", "paused", "Waiting for fix approval")
-                    return inc
+                await self._investigate(run, profile)
+                if run.status == RunStatus.AWAITING_FIX_APPROVAL:
+                    await emit(run.id, "pipeline", "paused", "Waiting for fix approval")
+                    return run
 
-            if inc.status in (
-                IncidentStatus.FAILED,
-                IncidentStatus.INVESTIGATION_FAILED,
-                IncidentStatus.FIX_GENERATION_FAILED,
-                IncidentStatus.REQUIRES_HUMAN_REVIEW,
+            if run.status in (
+                RunStatus.FAILED,
+                RunStatus.INVESTIGATION_FAILED,
+                RunStatus.FIX_GENERATION_FAILED,
+                RunStatus.REQUIRES_HUMAN_REVIEW,
             ):
-                await emit(inc.id, "pipeline", "failed", inc.error_message or "investigation failed")
-                return inc
+                await emit(run.id, "pipeline", "failed", run.error_message or "investigation failed")
+                return run
 
-            if inc.fix_proposal:
-                await self._sandbox_and_verify(inc, profile)
-            await emit(inc.id, "pipeline", "done", f"status={inc.status}")
+            if run.fix_proposal:
+                await self._sandbox_and_verify(run, profile)
+            await emit(run.id, "pipeline", "done", f"status={run.status}")
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
-            inc.error_message = f"{type(exc).__name__}: {exc}"
-            if inc.status not in (
-                IncidentStatus.FAILED,
-                IncidentStatus.INVESTIGATION_FAILED,
-                IncidentStatus.FIX_GENERATION_FAILED,
-                IncidentStatus.VERIFICATION_FAILED,
-                IncidentStatus.REPAIR_LIMIT_REACHED,
-                IncidentStatus.CANCELLED,
+            run.error_message = f"{type(exc).__name__}: {exc}"
+            if run.status not in (
+                RunStatus.FAILED,
+                RunStatus.INVESTIGATION_FAILED,
+                RunStatus.FIX_GENERATION_FAILED,
+                RunStatus.VERIFICATION_FAILED,
+                RunStatus.REPAIR_LIMIT_REACHED,
+                RunStatus.CANCELLED,
             ):
-                inc.status = IncidentStatus.VERIFICATION_FAILED
-            inc.add_activity("pipeline_error", "failed", str(exc))
-            log_operation(logger, incident_id, "pipeline", "failed", error=str(exc))
-            await emit(incident_id, "pipeline_error", "failed", str(exc)[:500])
+                run.status = RunStatus.VERIFICATION_FAILED
+            run.add_activity("pipeline_error", "failed", str(exc))
+            log_operation(logger, run_id, "pipeline", "failed", error=str(exc))
+            await emit(run_id, "pipeline_error", "failed", str(exc)[:500])
         finally:
             # Don't clobber an explicit user cancel that landed during unwind.
-            latest = incident_store.get(incident_id)
-            if latest and latest.status == IncidentStatus.CANCELLED:
-                inc = latest
+            latest = run_store.get(run_id)
+            if latest and latest.status == RunStatus.CANCELLED:
+                run = latest
             else:
-                incident_store.update(inc)
+                run_store.update(run)
             log_operation(
-                logger, incident_id, "pipeline", "done",
+                logger, run_id, "pipeline", "done",
                 duration=time.perf_counter() - t_start,
-                error=inc.error_message,
+                error=run.error_message,
             )
-        return inc
+        return run
 
     @staticmethod
-    def _has_activity(inc: Incident, step: str, status: str) -> bool:
-        return any(ev.step == step and ev.status == status for ev in inc.activity)
+    def _has_activity(run: Run, step: str, status: str) -> bool:
+        return any(ev.step == step and ev.status == status for ev in run.activity)
 
-    def _should_resume_approved_fix(self, inc: Incident) -> bool:
+    def _should_resume_approved_fix(self, run: Run) -> bool:
         """True when we should continue from sandbox instead of regenerating a fix."""
-        if not inc.fix_proposal or not self._has_activity(inc, "fix_approval", "done"):
+        if not run.fix_proposal or not self._has_activity(run, "fix_approval", "done"):
             return False
-        return inc.status in {
-            IncidentStatus.AWAITING_FIX_APPROVAL,
-            IncidentStatus.FIX_PLANNED,
-            IncidentStatus.FIX_READY,
-            IncidentStatus.SANDBOX_TESTING,
-            IncidentStatus.SANDBOX_RUNNING,
-            IncidentStatus.TESTING,
-            IncidentStatus.VERIFYING,
+        return run.status in {
+            RunStatus.AWAITING_FIX_APPROVAL,
+            RunStatus.FIX_PLANNED,
+            RunStatus.FIX_READY,
+            RunStatus.SANDBOX_TESTING,
+            RunStatus.SANDBOX_RUNNING,
+            RunStatus.TESTING,
+            RunStatus.VERIFYING,
         }
 
     # ------------------------------------------------------------------
-    async def _collect_context(self, inc: Incident, profile: Any = None) -> None:
+    async def _collect_context(self, run: Run, profile: Any = None) -> None:
         """Two-phase context collection driven by real operations.
 
         Phase 1 (before approval): parse the stack trace and identify relevant
@@ -476,142 +478,142 @@ class Orchestrator:
         Phase 2 (after approval): read each approved file from disk one by one
         (emitting a live event per real read), then assemble the full context.
         """
-        # Resuming from the file-read approval pause: the incident already
+        # Resuming from the file-read approval pause: the run already
         # carries the identification result (affected_files) from the first
         # pass, so we must not re-run or re-emit the setup steps.
         resuming = bool(
-            inc.context
-            and (inc.context.get("_complete") or inc.context.get("affected_files"))
+            run.context
+            and (run.context.get("_complete") or run.context.get("affected_files"))
         )
         if not resuming:
-            inc.status = IncidentStatus.COLLECTING_CONTEXT
-            inc.add_activity("collecting_context", "running")
-            incident_store.update(inc)
-            await emit(inc.id, "collecting_context", "running", "Parsing stack trace and identifying relevant files")
+            run.status = RunStatus.COLLECTING_CONTEXT
+            run.add_activity("collecting_context", "running")
+            run_store.update(run)
+            await emit(run.id, "collecting_context", "running", "Parsing stack trace and identifying relevant files")
         t0 = time.perf_counter()
         try:
-            if not inc.context or not inc.context.get("_complete"):
-                if not (inc.context and inc.context.get("affected_files")):
+            if not run.context or not run.context.get("_complete"):
+                if not (run.context and run.context.get("affected_files")):
                     # Phase 1a — actually parse the stack trace.
-                    parsed = await asyncio.to_thread(self.context_builder.parse_trace, inc)
+                    parsed = await asyncio.to_thread(self.context_builder.parse_trace, run)
                     trace_detail = (
                         f"{len(parsed.frames)} frame(s)"
                         + (f" · {parsed.exception_type}" if parsed.exception_type else "")
                     )
-                    inc.add_activity("stack_trace_parsed", "done", trace_detail)
-                    incident_store.update(inc)
-                    await emit(inc.id, "stack_trace_parsed", "done", trace_detail)
+                    run.add_activity("stack_trace_parsed", "done", trace_detail)
+                    run_store.update(run)
+                    await emit(run.id, "stack_trace_parsed", "done", trace_detail)
 
                     # Phase 1b — identify relevant files (paths only, no reads).
                     identified = await asyncio.to_thread(
-                        self.context_builder.identify_files, inc, profile
+                        self.context_builder.identify_files, run, profile
                     )
-                    inc.add_activity(
+                    run.add_activity(
                         "relevant_source_identified", "done", f"{len(identified)} file(s) identified"
                     )
-                    incident_store.update(inc)
+                    run_store.update(run)
                     await emit(
-                        inc.id,
+                        run.id,
                         "relevant_source_identified",
                         "done",
                         f"{len(identified)} relevant file(s) identified",
                     )
 
-                    # Carry the identification result on the incident so the
+                    # Carry the identification result on the run so the
                     # pause point can show the file list without having read
                     # anything.
-                    inc.context = {
-                        "incident_id": inc.id,
-                        "stack_trace": (inc.stack_trace or "")[-4000:],
+                    run.context = {
+                        "run_id": run.id,
+                        "stack_trace": (run.stack_trace or "")[-4000:],
                         "affected_files": identified,
                         "code_snippets": {},
                     }
-                    incident_store.update(inc)
+                    run_store.update(run)
                 else:
                     # Resume after file-read approval — reuse the identification
                     # already stored at the pause point (no re-discovery).
-                    identified = list(inc.context.get("affected_files") or [])
+                    identified = list(run.context.get("affected_files") or [])
 
                 # Pause for file read approval unless the user already approved.
                 # The timeline events only carry counts here — filenames first
                 # appear in their own per-file "Reading <file>" events once the
                 # approval is granted. (The approval card itself still renders
-                # the list from the incident context API.)
-                if identified and not self._has_activity(inc, "file_read_approval", "done"):
-                    inc.add_activity(
+                # the list from the run context API.)
+                if identified and not self._has_activity(run, "file_read_approval", "done"):
+                    run.add_activity(
                         "files_to_read", "pending", f"{len(identified)} files identified for reading"
                     )
-                    inc.add_activity(
+                    run.add_activity(
                         "file_read_approval", "pending", f"Approval needed: {len(identified)} files"
                     )
-                    inc.set_activity("collecting_context", "running", "Waiting for file read approval")
-                    inc.status = IncidentStatus.AWAITING_FILE_READ_APPROVAL
-                    incident_store.update(inc)
+                    run.set_activity("collecting_context", "running", "Waiting for file read approval")
+                    run.status = RunStatus.AWAITING_FILE_READ_APPROVAL
+                    run_store.update(run)
                     await emit(
-                        inc.id, "files_to_read", "pending", f"{len(identified)} files identified for reading"
+                        run.id, "files_to_read", "pending", f"{len(identified)} files identified for reading"
                     )
                     await emit(
-                        inc.id, "file_read_approval", "pending", f"Approval needed: {len(identified)} files"
+                        run.id, "file_read_approval", "pending", f"Approval needed: {len(identified)} files"
                     )
-                    await emit(inc.id, "pipeline", "paused", "Waiting for file read approval")
+                    await emit(run.id, "pipeline", "paused", "Waiting for file read approval")
                     return
 
                 # Phase 2 — actually read every file, one at a time. Each event
                 # is emitted only after the real read completes, and the full
-                # content is cached on the incident so later stages (fix
+                # content is cached on the run so later stages (fix
                 # generation, retries) never re-read the workspace unless the
                 # file's staleness is explicitly suspected.
-                affected_files = list(inc.context.get("affected_files", []))
+                affected_files = list(run.context.get("affected_files", []))
                 for rel in affected_files:
-                    inc.add_activity("file_read", "running", f"Reading {rel}")
-                    incident_store.update(inc)
-                    await emit(inc.id, "file_read", "running", f"Reading {rel}")
+                    run.add_activity("file_read", "running", f"Reading {rel}")
+                    run_store.update(run)
+                    await emit(run.id, "file_read", "running", f"Reading {rel}")
                     read_info = await asyncio.to_thread(self._read_workspace_file, rel)
                     if read_info:
-                        inc.context.setdefault("file_contents", {})[rel] = read_info["content"]
-                    inc.set_activity("file_read", "done", f"Reading {rel}")
-                    incident_store.update(inc)
+                        run.context.setdefault("file_contents", {})[rel] = read_info["content"]
+                    run.set_activity("file_read", "done", f"Reading {rel}")
+                    run_store.update(run)
                     detail = f"Reading {rel}"
                     if read_info:
                         detail = f"Read {rel} · {read_info['lines']} lines"
-                    await emit(inc.id, "file_read", "done", detail)
+                    await emit(run.id, "file_read", "done", detail)
 
                 # Assemble the full context bundle for the investigator. Keep
                 # the exact approved source snapshot alongside the sanitized
-                # retrieval payload.  Replacing ``inc.context`` here used to
+                # retrieval payload.  Replacing ``run.context`` here used to
                 # discard ``file_contents`` immediately after reading it, so a
                 # later apply could not distinguish a genuinely changed file
                 # from a malformed or already-applied patch.
-                file_contents = dict(inc.context.get("file_contents") or {})
+                file_contents = dict(run.context.get("file_contents") or {})
                 try:
-                    context = self.context_builder.build(inc, project_profile=profile)
+                    context = self.context_builder.build(run, project_profile=profile)
                 except TypeError:
-                    context = self.context_builder.build(inc)
+                    context = self.context_builder.build(run)
                 if not context.get("affected_files"):
                     context["affected_files"] = affected_files
                 context["file_contents"] = file_contents
                 context["_complete"] = True
-                inc.context = context
-                incident_store.update(inc)
+                run.context = context
+                run_store.update(run)
 
-            affected_count = len((inc.context or {}).get("affected_files", []))
-            inc.set_activity("collecting_context", "done", f"{affected_count} files")
-            log_operation(logger, inc.id, "collect_context", "ok", duration=time.perf_counter() - t0)
-            await emit(inc.id, "collecting_context", "done", f"{affected_count} relevant file(s) in context")
+            affected_count = len((run.context or {}).get("affected_files", []))
+            run.set_activity("collecting_context", "done", f"{affected_count} files")
+            log_operation(logger, run.id, "collect_context", "ok", duration=time.perf_counter() - t0)
+            await emit(run.id, "collecting_context", "done", f"{affected_count} relevant file(s) in context")
         except Exception as exc:
-            inc.status = IncidentStatus.INVESTIGATION_FAILED
-            inc.error_message = f"context build failed: {exc}"
-            inc.set_activity("collecting_context", "failed", str(exc)[:200])
-            log_operation(logger, inc.id, "collect_context", "failed", error=str(exc))
-            await emit(inc.id, "collecting_context", "failed", str(exc)[:500])
+            run.status = RunStatus.INVESTIGATION_FAILED
+            run.error_message = f"context build failed: {exc}"
+            run.set_activity("collecting_context", "failed", str(exc)[:200])
+            log_operation(logger, run.id, "collect_context", "failed", error=str(exc))
+            await emit(run.id, "collecting_context", "failed", str(exc)[:500])
             raise
         finally:
-            incident_store.update(inc)
+            run_store.update(run)
 
     def _read_workspace_file(self, rel: str) -> dict[str, Any] | None:
         """Really read one workspace file from disk (used for live progress).
 
-        Returns the full content as well so it can be cached on the incident;
+        Returns the full content as well so it can be cached on the run;
         the fix pipeline then never needs to re-read the workspace unless a
         file's staleness is explicitly suspected.
         """
@@ -629,12 +631,12 @@ class Orchestrator:
             return None
 
     async def _verify_repository(
-        self, inc: Incident, project: Any, workspace_path: str, profile: Any
+        self, run: Run, project: Any, workspace_path: str, profile: Any
     ) -> Any:
         """Actually inspect the workspace repository and emit real results."""
-        await emit(inc.id, "repository_check", "running", "Verifying repository workspace")
-        inc.add_activity("repository_check", "running", "Verifying repository workspace")
-        incident_store.update(inc)
+        await emit(run.id, "repository_check", "running", "Verifying repository workspace")
+        run.add_activity("repository_check", "running", "Verifying repository workspace")
+        run_store.update(run)
 
         ws = Path(workspace_path)
         branch, sha, dirty = await asyncio.to_thread(self._inspect_git_workspace, ws)
@@ -650,18 +652,18 @@ class Orchestrator:
             detail = f"{repo_label} @ {branch} · {sha}"
         else:
             detail = f"{repo_label} · local workspace"
-        inc.set_activity("repository_check", "done", detail)
-        inc.add_activity("repository_connected", "done", detail)
-        incident_store.update(inc)
-        await emit(inc.id, "repository_connected", "done", detail)
+        run.set_activity("repository_check", "done", detail)
+        run.add_activity("repository_connected", "done", detail)
+        run_store.update(run)
+        await emit(run.id, "repository_connected", "done", detail)
 
         if branch:
             sync_detail = f"workspace clean @ {sha}" if dirty == 0 else f"{dirty} uncommitted change(s) in workspace"
         else:
             sync_detail = "workspace directory present"
-        inc.add_activity("repository_synced", "done", sync_detail)
-        incident_store.update(inc)
-        await emit(inc.id, "repository_synced", "done", sync_detail)
+        run.add_activity("repository_synced", "done", sync_detail)
+        run_store.update(run)
+        await emit(run.id, "repository_synced", "done", sync_detail)
 
         # Re-detect the project type from the actual files on disk.
         from app.projects.discovery import discover_project
@@ -671,9 +673,9 @@ class Orchestrator:
             lang = getattr(detected, "language", None) or "unknown"
             fw = getattr(detected, "framework", None) or ""
             disc = f"{lang} · {fw}" if fw else str(lang)
-            inc.add_activity("project_discovered", "done", disc)
-            incident_store.update(inc)
-            await emit(inc.id, "project_discovered", "done", disc)
+            run.add_activity("project_discovered", "done", disc)
+            run_store.update(run)
+            await emit(run.id, "project_discovered", "done", disc)
             if profile is None:
                 profile = detected
         return profile
@@ -702,114 +704,142 @@ class Orchestrator:
         dirty = len([ln for ln in status.splitlines() if ln.strip()]) if status else 0
         return branch, sha, dirty
 
-    async def _investigate(self, inc: Incident, profile: Any = None) -> None:
-        inc.status = IncidentStatus.INVESTIGATING
-        inc.add_activity("investigating", "running")
-        incident_store.update(inc)
-        await emit(inc.id, "investigating", "running", "Investigating root cause")
+    async def _investigate(self, run: Run, profile: Any = None) -> None:
+        run.status = RunStatus.INVESTIGATING
+        run.add_activity("investigating", "running")
+        run_store.update(run)
+        await emit(run.id, "investigating", "running", "Investigating root cause")
         t0 = time.perf_counter()
         try:
-            analysis: RootCauseAnalysis = await self.root_cause_agent.analyze(inc.context or {})
-            inc.root_cause = analysis.model_dump()
+            analysis: RootCauseAnalysis = await self.root_cause_agent.analyze(run.context or {})
+            run.root_cause = analysis.model_dump()
             if analysis.confidence < settings.MIN_ROOT_CAUSE_CONFIDENCE:
-                inc.status = IncidentStatus.INVESTIGATION_FAILED
-                inc.error_message = (
+                run.status = RunStatus.INVESTIGATION_FAILED
+                run.error_message = (
                     f"Low confidence ({analysis.confidence:.2f} < "
                     f"{settings.MIN_ROOT_CAUSE_CONFIDENCE}): {analysis.reason}"
                 )
-                inc.add_activity("root_cause_identified", "failed", inc.error_message)
-                inc.set_activity("investigating", "failed", inc.error_message[:200])
-                log_operation(logger, inc.id, "root_cause", "failed", duration=time.perf_counter() - t0, error=inc.error_message)
-                await emit(inc.id, "investigating", "failed", inc.error_message)
+                run.add_activity("root_cause_identified", "failed", run.error_message)
+                run.set_activity("investigating", "failed", run.error_message[:200])
+                log_operation(logger, run.id, "root_cause", "failed", duration=time.perf_counter() - t0, error=run.error_message)
+                await emit(run.id, "investigating", "failed", run.error_message)
                 return
 
-            inc.status = IncidentStatus.ROOT_CAUSE_FOUND
-            inc.add_activity("root_cause_identified", "done", "Root cause identified")
-            inc.set_activity("investigating", "done", "Root cause identified")
-            log_operation(logger, inc.id, "root_cause", "ok", duration=time.perf_counter() - t0, error=f"confidence={analysis.confidence:.2f}")
-            await emit(inc.id, "root_cause_identified", "done", "Root cause identified")
-            await emit(inc.id, "investigating", "done", "Root cause identified")
+            run.status = RunStatus.ROOT_CAUSE_FOUND
+            run.add_activity("root_cause_identified", "done", "Root cause identified")
+            run.set_activity("investigating", "done", "Root cause identified")
+            log_operation(logger, run.id, "root_cause", "ok", duration=time.perf_counter() - t0, error=f"confidence={analysis.confidence:.2f}")
+            await emit(run.id, "root_cause_identified", "done", "Root cause identified")
+            await emit(run.id, "investigating", "done", "Root cause identified")
         except Exception as exc:
-            inc.status = IncidentStatus.INVESTIGATION_FAILED
-            inc.error_message = f"root cause analysis failed: {exc}"
-            inc.add_activity("root_cause_identified", "failed", str(exc))
-            inc.set_activity("investigating", "failed", str(exc)[:200])
-            log_operation(logger, inc.id, "root_cause", "failed", error=str(exc))
-            await emit(inc.id, "investigating", "failed", str(exc)[:500])
+            run.status = RunStatus.INVESTIGATION_FAILED
+            run.error_message = f"root cause analysis failed: {exc}"
+            run.add_activity("root_cause_identified", "failed", str(exc))
+            run.set_activity("investigating", "failed", str(exc)[:200])
+            log_operation(logger, run.id, "root_cause", "failed", error=str(exc))
+            await emit(run.id, "investigating", "failed", str(exc)[:500])
             raise
         finally:
-            incident_store.update(inc)
+            run_store.update(run)
 
-        if inc.status in (IncidentStatus.FAILED, IncidentStatus.REQUIRES_HUMAN_REVIEW, IncidentStatus.INVESTIGATION_FAILED):
+        if run.status in (RunStatus.FAILED, RunStatus.REQUIRES_HUMAN_REVIEW, RunStatus.INVESTIGATION_FAILED):
             return
 
         # Fix generation
-        inc.status = IncidentStatus.FIX_PLANNED
-        inc.add_activity("fix_generated", "running")
-        incident_store.update(inc)
-        await emit(inc.id, "fix_generated", "running", "Generating fix")
+        run.status = RunStatus.FIX_PLANNED
+        run.add_activity("fix_generated", "running")
+        run_store.update(run)
+        await emit(run.id, "fix_generated", "running", "Generating fix")
         t0 = time.perf_counter()
         try:
             # Hard validation gate: the proposal may ONLY reference files that
-            # were actually identified/read for this incident. A hallucinated
+            # were actually identified/read for this run. A hallucinated
             # path (e.g. "app/main.py" when the repo is flat) is rejected and
             # the model regenerates with corrective feedback instead of being
             # silently handed to the sandbox / apply step, where it would fail
             # with "Original file not found".
             proposal: FixProposal = await self._generate_validated_fix(
-                analysis, inc, profile
+                analysis, run, profile
             )
-            inc.fix_proposal = proposal.model_dump()
-            inc.set_activity("fix_generated", "done", proposal.summary)
-            log_operation(logger, inc.id, "fix_generation", "ok", duration=time.perf_counter() - t0)
-            await emit(inc.id, "fix_generated", "done", proposal.summary)
+            run.fix_proposal = proposal.model_dump()
+            run.set_activity("fix_generated", "done", proposal.summary)
+            log_operation(logger, run.id, "fix_generation", "ok", duration=time.perf_counter() - t0)
+            await emit(run.id, "fix_generated", "done", proposal.summary)
             
             # Pause for fix approval - show user the proposed fix before sandbox testing
-            if proposal and proposal.diff and not self._has_activity(inc, "fix_approval", "done"):
-                inc.status = IncidentStatus.AWAITING_FIX_APPROVAL
-                inc.add_activity("fix_approval", "pending", f"Fix proposed: {proposal.summary}")
-                inc.add_activity("diff_ready", "pending", f"Files to change: {', '.join(proposal.files_changed or [])}")
-                incident_store.update(inc)
-                await emit(inc.id, "fix_approval", "pending", "Approval needed: review proposed fix")
-                await emit(inc.id, "pipeline", "paused", "Waiting for fix approval")
+            if proposal and proposal.diff and not self._has_activity(run, "fix_approval", "done"):
+                run.status = RunStatus.AWAITING_FIX_APPROVAL
+                run.add_activity("fix_approval", "pending", f"Fix proposed: {proposal.summary}")
+                run.add_activity("diff_ready", "pending", f"Files to change: {', '.join(proposal.files_changed or [])}")
+                run_store.update(run)
+                await emit(run.id, "fix_approval", "pending", "Approval needed: review proposed fix")
+                await emit(run.id, "pipeline", "paused", "Waiting for fix approval")
                 return
         except Exception as exc:
-            inc.status = IncidentStatus.FIX_GENERATION_FAILED
-            inc.error_message = f"fix generation failed: {exc}"
-            inc.set_activity("fix_generated", "failed", str(exc)[:200])
-            log_operation(logger, inc.id, "fix_generation", "failed", error=str(exc))
-            await emit(inc.id, "fix_generated", "failed", str(exc)[:500])
+            run.status = RunStatus.FIX_GENERATION_FAILED
+            run.error_message = f"fix generation failed: {exc}"
+            run.set_activity("fix_generated", "failed", str(exc)[:200])
+            log_operation(logger, run.id, "fix_generation", "failed", error=str(exc))
+            await emit(run.id, "fix_generated", "failed", str(exc)[:500])
         finally:
-            incident_store.update(inc)
+            run_store.update(run)
 
-    async def _sandbox_and_verify(self, inc: Incident, profile: Any = None) -> None:
-        proposal_data = inc.fix_proposal
+    async def _sandbox_and_verify(self, run: Run, profile: Any = None) -> None:
+        proposal_data = run.fix_proposal
         if not proposal_data:
             return
         proposal = FixProposal.model_validate(proposal_data)
         analysis = (
-            RootCauseAnalysis.model_validate(inc.root_cause)
-            if inc.root_cause else None
+            RootCauseAnalysis.model_validate(run.root_cause)
+            if run.root_cause else None
         )
 
         # When the user chose "Keep Changes", the patch has already been
         # applied to the real workspace. Verification must then run against the
         # pre-apply snapshot so the failure can still be reproduced.
-        apply_state = self._load_apply_state(inc.id)
+        apply_state = self._load_apply_state(run.id)
+        verification_tmp: tempfile.TemporaryDirectory[str] | None = None
         if apply_state:
-            backup_root = Path(apply_state["backup"])
-            if backup_root.is_dir():
-                self.sandbox_runner.set_repo_root(backup_root, profile)
+            from app.sandbox.workspace_manager import _IGNORE_PATTERNS
+
+            workspace = Path(apply_state.get("workspace") or "")
+            if workspace.is_dir():
+                # Build a short-lived pre-apply workspace for verification.
+                # It lives under the OS temp directory and is destroyed when
+                # this function returns; no diagnosis snapshot is archived.
+                verification_tmp = tempfile.TemporaryDirectory(prefix="api-doctor-verify-")
+                verification_root = Path(verification_tmp.name) / "workspace"
+                shutil.copytree(
+                    workspace,
+                    verification_root,
+                    ignore=_IGNORE_PATTERNS,
+                    dirs_exist_ok=True,
+                )
+                for rel, content in (apply_state.get("snapshots") or {}).items():
+                    destination = verification_root / rel
+                    if content is None:
+                        destination.unlink(missing_ok=True)
+                    else:
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        destination.write_bytes(content)
+                self.sandbox_runner.set_repo_root(verification_root, profile)
             proposal_data = dict(proposal_data)
             proposal_data["diff"] = apply_state.get("resolved_diff") or proposal_data["diff"]
             proposal = FixProposal.model_validate(proposal_data)
 
-        inc.status = IncidentStatus.SANDBOX_TESTING
-        inc.add_activity("sandbox_started", "running")
-        inc.add_activity("tests_started", "running")
-        incident_store.update(inc)
-        await emit(inc.id, "sandbox_started", "running", "Running sandbox verification on isolated copy")
-        await emit(inc.id, "tests_started", "running", "Running tests")
+        def _cleanup_verification_workspace() -> None:
+            if verification_tmp is not None:
+                verification_tmp.cleanup()
+            _project, real_workspace = self._resolve_project_workspace(run)
+            if real_workspace is not None:
+                self.sandbox_runner.set_repo_root(real_workspace, profile)
+
+        run.status = RunStatus.SANDBOX_TESTING
+        run.add_activity("sandbox_started", "running")
+        run.add_activity("tests_started", "running")
+        run_store.update(run)
+        await emit(run.id, "sandbox_started", "running", "Running sandbox verification on isolated copy")
+        await emit(run.id, "tests_started", "running", "Running tests")
 
         # With changes already applied to the workspace we run a single
         # verification pass — regenerating a different fix would desynchronize
@@ -820,28 +850,29 @@ class Orchestrator:
         result: SandboxResult | None = None
         while attempt < max_attempts:
             attempt += 1
-            inc.attempt_count = attempt
-            inc.set_activity("sandbox_started", "running", f"attempt {attempt}")
-            incident_store.update(inc)
-            await emit(inc.id, "sandbox_started", "running", f"attempt {attempt}")
+            run.attempt_count = attempt
+            run.set_activity("sandbox_started", "running", f"attempt {attempt}")
+            run_store.update(run)
+            await emit(run.id, "sandbox_started", "running", f"attempt {attempt}")
             t0 = time.perf_counter()
             try:
                 result = await asyncio.to_thread(
-                    self.sandbox_runner.run_verification, proposal, inc.request_snapshot
+                    self.sandbox_runner.run_verification, proposal, run.request_snapshot
                 )
             except Exception as exc:
-                inc.status = IncidentStatus.VERIFICATION_FAILED
-                inc.error_message = f"sandbox error: {exc}"
-                inc.set_activity("sandbox_started", "failed", str(exc)[:200])
-                inc.set_activity("tests_started", "failed", str(exc)[:200])
-                log_operation(logger, inc.id, "sandbox", "failed", error=str(exc))
-                incident_store.update(inc)
-                await emit(inc.id, "sandbox_started", "failed", str(exc)[:500])
-                await emit(inc.id, "tests_started", "failed", str(exc)[:500])
+                run.status = RunStatus.VERIFICATION_FAILED
+                run.error_message = f"sandbox error: {exc}"
+                run.set_activity("sandbox_started", "failed", str(exc)[:200])
+                run.set_activity("tests_started", "failed", str(exc)[:200])
+                log_operation(logger, run.id, "sandbox", "failed", error=str(exc))
+                run_store.update(run)
+                await emit(run.id, "sandbox_started", "failed", str(exc)[:500])
+                await emit(run.id, "tests_started", "failed", str(exc)[:500])
+                _cleanup_verification_workspace()
                 return
 
             log_operation(
-                logger, inc.id, "sandbox_attempt", "ok" if result.passed else "failed",
+                logger, run.id, "sandbox_attempt", "ok" if result.passed else "failed",
                 duration=time.perf_counter() - t0,
                 error="" if result.passed else result.error,
             )
@@ -851,102 +882,103 @@ class Orchestrator:
             if attempt < max_attempts:
                 # A single explicit retry marker replaces any replay of the
                 # setup sequence: repository sync, file discovery and file
-                # reads already happened once and are cached on the incident.
+                # reads already happened once and are cached on the run.
                 retry_marker = f"Attempt {attempt + 1} of {max_attempts} — regenerating fix"
-                inc.set_activity("fix_regenerating", "running", retry_marker)
-                incident_store.update(inc)
-                await emit(inc.id, "fix_regenerating", "running", retry_marker)
+                run.set_activity("fix_regenerating", "running", retry_marker)
+                run_store.update(run)
+                await emit(run.id, "fix_regenerating", "running", retry_marker)
                 try:
                     if analysis:
                         proposal = await self._generate_validated_fix(
                             analysis,
-                            inc,
+                            run,
                             profile,
                             feedback=result.logs[-3000:] or result.error,
                         )
-                        inc.fix_proposal = proposal.model_dump()
+                        run.fix_proposal = proposal.model_dump()
                         # Keep the marker text on the closing "done" so the
                         # timeline row reads "Attempt 2 of 2 — regenerating fix".
-                        inc.set_activity("fix_regenerating", "done", retry_marker)
-                        incident_store.update(inc)
-                        await emit(inc.id, "fix_regenerating", "done", retry_marker)
+                        run.set_activity("fix_regenerating", "done", retry_marker)
+                        run_store.update(run)
+                        await emit(run.id, "fix_regenerating", "done", retry_marker)
                 except Exception:
-                    inc.set_activity("fix_regenerating", "failed", "regeneration failed")
-                    incident_store.update(inc)
-                    await emit(inc.id, "fix_regenerating", "failed", "regeneration failed")
+                    run.set_activity("fix_regenerating", "failed", "regeneration failed")
+                    run_store.update(run)
+                    await emit(run.id, "fix_regenerating", "failed", "regeneration failed")
                     break
 
-        inc.sandbox_result = result.model_dump() if result else {"passed": False, "error": "no result"}
+        _cleanup_verification_workspace()
+        run.sandbox_result = result.model_dump() if result else {"passed": False, "error": "no result"}
 
         if result and result.passed:
-            inc.status = IncidentStatus.FIX_VERIFIED
+            run.status = RunStatus.FIX_VERIFIED
             # The retry loop flipped fix_generated to "running" for the
             # regeneration marker; restore it to a completed state so the
             # timeline does not end on a dangling "regenerating" row.
-            inc.set_activity(
+            run.set_activity(
                 "fix_generated", "done",
-                (inc.fix_proposal or {}).get("summary") or "fix regenerated",
+                (run.fix_proposal or {}).get("summary") or "fix regenerated",
             )
-            inc.set_activity("sandbox_started", "done")
-            inc.set_activity("tests_started", "done", "tests passed")
-            inc.add_activity("test_passed", "done", "all sandbox steps passed")
+            run.set_activity("sandbox_started", "done")
+            run.set_activity("tests_started", "done", "tests passed")
+            run.add_activity("test_passed", "done", "all sandbox steps passed")
             for step in result.steps:
-                inc.add_activity(step.name, "done" if step.passed else "failed", _summarize_step(step))
-            inc.add_activity("fix_verified", "done")
-            await emit(inc.id, "test_passed", "done", "Sandbox tests passed")
-            await emit(inc.id, "tests_started", "done", "All sandbox tests passed")
-            await emit(inc.id, "sandbox_started", "done", "Verification passed")
-            await emit(inc.id, "fix_verified", "done", "Fix verified")
+                run.add_activity(step.name, "done" if step.passed else "failed", _summarize_step(step))
+            run.add_activity("fix_verified", "done")
+            await emit(run.id, "test_passed", "done", "Sandbox tests passed")
+            await emit(run.id, "tests_started", "done", "All sandbox tests passed")
+            await emit(run.id, "sandbox_started", "done", "Verification passed")
+            await emit(run.id, "fix_verified", "done", "Fix verified")
         else:
-            inc.status = IncidentStatus.REPAIR_LIMIT_REACHED if attempt >= max_attempts else IncidentStatus.VERIFICATION_FAILED
-            inc.error_message = result.error if result else "verification failed"
-            inc.set_activity("sandbox_started", "failed", inc.error_message[:200])
-            inc.set_activity("tests_started", "failed", inc.error_message[:200])
-            inc.add_activity("fix_verified", "failed", inc.error_message[:200])
-            await emit(inc.id, "tests_started", "failed", inc.error_message[:500])
-            await emit(inc.id, "fix_verified", "failed", inc.error_message[:500])
+            run.status = RunStatus.REPAIR_LIMIT_REACHED if attempt >= max_attempts else RunStatus.VERIFICATION_FAILED
+            run.error_message = result.error if result else "verification failed"
+            run.set_activity("sandbox_started", "failed", run.error_message[:200])
+            run.set_activity("tests_started", "failed", run.error_message[:200])
+            run.add_activity("fix_verified", "failed", run.error_message[:200])
+            await emit(run.id, "tests_started", "failed", run.error_message[:500])
+            await emit(run.id, "fix_verified", "failed", run.error_message[:500])
 
         # Finalize the Keep-Changes workspace application based on the result.
         if apply_state:
             if result and result.passed:
-                self._discard_apply_backup(inc.id)
-                inc.add_activity(
+                self._discard_apply_snapshot(run.id)
+                run.add_activity(
                     "workspace_updated",
                     "done",
                     f"Verified fix kept in workspace: {', '.join(apply_state.get('files', []))}",
                 )
-                await emit(inc.id, "workspace_updated", "done", "Verified changes kept in workspace")
+                await emit(run.id, "workspace_updated", "done", "Verified changes kept in workspace")
             else:
-                await self._restore_workspace_files(inc.id)
-                if inc.fix_proposal:
-                    inc.fix_proposal.pop("applied_files", None)
-                    inc.fix_proposal.pop("applied_at", None)
-                inc.add_activity(
+                await self._restore_workspace_files(run.id)
+                if run.fix_proposal:
+                    run.fix_proposal.pop("applied_files", None)
+                    run.fix_proposal.pop("applied_at", None)
+                run.add_activity(
                     "changes_rolled_back", "done", "Workspace restored to original state after failed verification"
                 )
                 await emit(
-                    inc.id,
+                    run.id,
                     "changes_rolled_back",
                     "done",
-                    f"Verification failed — workspace restored ({(inc.error_message or '')[:120]})",
+                    f"Verification failed — workspace restored ({(run.error_message or '')[:120]})",
                 )
 
-        incident_store.update(inc)
+        run_store.update(run)
 
         # PR Gate
-        if inc.status == IncidentStatus.FIX_VERIFIED and settings.AUTO_CREATE_PR:
+        if run.status == RunStatus.FIX_VERIFIED and settings.AUTO_CREATE_PR:
             try:
-                await self.create_pull_request(inc.id)
+                await self.create_pull_request(run.id)
             except Exception as exc:  # noqa: BLE001
-                inc.error_message = f"PR creation failed: {exc}"
-                incident_store.update(inc)
-                await emit(inc.id, "pr_created", "failed", str(exc)[:500])
+                run.error_message = f"PR creation failed: {exc}"
+                run_store.update(run)
+                await emit(run.id, "pr_created", "failed", str(exc)[:500])
 
     # ------------------------------------------------------------------
     # Keep Changes — real patch application to the project workspace
     # ------------------------------------------------------------------
-    def _resolve_project_workspace(self, inc: Incident) -> tuple[Any, Path | None]:
-        project = project_store.get(inc.project_id) or project_store.get_current()
+    def _resolve_project_workspace(self, run: Run) -> tuple[Any, Path | None]:
+        project = project_store.get(run.project_id) or project_store.get_current()
         if not project or not project.workspace_path:
             return project, None
         ws = Path(project.workspace_path)
@@ -954,12 +986,12 @@ class Orchestrator:
             return project, None
         return project, ws
 
-    async def stage_workspace_apply(self, incident_id: str) -> dict[str, Any]:
-        """Apply one incident patch as a serialized workspace transaction."""
+    async def stage_workspace_apply(self, run_id: str) -> dict[str, Any]:
+        """Apply one run patch as a serialized workspace transaction."""
         async with self._workspace_apply_lock:
-            return await self._stage_workspace_apply_locked(incident_id)
+            return await self._stage_workspace_apply_locked(run_id)
 
-    async def _stage_workspace_apply_locked(self, incident_id: str) -> dict[str, Any]:
+    async def _stage_workspace_apply_locked(self, run_id: str) -> dict[str, Any]:
         """Apply the proposed patch to the REAL project workspace.
 
         Called when the user chooses "Keep Changes". A pre-apply snapshot is
@@ -967,23 +999,23 @@ class Orchestrator:
         and so the workspace can be rolled back if verification fails.
         The public wrapper serializes this method to make retries idempotent.
         """
-        inc = incident_store.get(incident_id)
-        if not inc:
-            return {"applied": False, "reason": "incident not found"}
-        proposal = inc.fix_proposal or {}
+        run = run_store.get(run_id)
+        if not run:
+            return {"applied": False, "reason": "run not found"}
+        proposal = run.fix_proposal or {}
         diff = (proposal.get("resolved_diff") or proposal.get("diff") or "").strip()
         if not diff:
             return {"applied": False, "reason": "no fix proposal to apply"}
 
         # Idempotent: an action may be retried after a slow UI refresh or after
-        # verification has discarded its temporary rollback backup.  Never try
+        # verification has discarded its in-memory rollback snapshot.  Never try
         # to apply the original hunk a second time: it will (correctly) no
         # longer match the already-fixed file and used to surface as a confusing
         # "File changed since diagnosis" conflict.
         if proposal.get("applied_files"):
             return {"applied": True, "files": proposal["applied_files"]}
 
-        project, ws = self._resolve_project_workspace(inc)
+        project, ws = self._resolve_project_workspace(run)
         if ws is None:
             if settings.DEMO_MODE:
                 return {
@@ -1004,7 +1036,6 @@ class Orchestrator:
 
         def _do() -> dict[str, Any]:
             from app.sandbox.patch_utils import _parse_unified_diff, _strip_prefix
-            from app.sandbox.workspace_manager import _IGNORE_PATTERNS
 
             try:
                 resolved, mapping = resolve_diff_paths(diff, ws)
@@ -1013,27 +1044,26 @@ class Orchestrator:
             except PatchError as exc:
                 return {"applied": False, "reason": f"Invalid patch: {exc}"}
 
-            backup_root = _apply_backups_root() / incident_id
-            backup = backup_root / "workspace"
+            # Rollback data exists only in memory for the lifetime of this run.
+            # None marks a file that did not exist before the patch.
+            snapshots: dict[str, bytes | None] = {}
             try:
-                if backup_root.exists():
-                    shutil.rmtree(backup_root, ignore_errors=True)
-                backup_root.mkdir(parents=True, exist_ok=True)
-                shutil.copytree(ws, backup, ignore=_IGNORE_PATTERNS, dirs_exist_ok=True)
-            except Exception as exc:  # noqa: BLE001
-                return {"applied": False, "reason": f"Could not create safety backup: {exc}"}
-
-            def _restore_affected_from_backup() -> None:
-                """Best-effort rollback for an unexpected filesystem error."""
                 for rel in affected_paths:
-                    src = backup / rel
-                    dst = ws / rel
+                    source = ws / rel
+                    snapshots[rel] = source.read_bytes() if source.is_file() else None
+            except Exception as exc:  # noqa: BLE001
+                return {"applied": False, "reason": f"Could not create safety snapshot: {exc}"}
+
+            def _restore_affected_from_snapshot() -> None:
+                """Best-effort rollback for an unexpected filesystem error."""
+                for rel, content in snapshots.items():
+                    destination = ws / rel
                     try:
-                        if src.is_file():
-                            dst.parent.mkdir(parents=True, exist_ok=True)
-                            shutil.copy2(src, dst)
-                        elif dst.exists():
-                            dst.unlink(missing_ok=True)
+                        if content is None:
+                            destination.unlink(missing_ok=True)
+                        else:
+                            destination.parent.mkdir(parents=True, exist_ok=True)
+                            destination.write_bytes(content)
                     except Exception:
                         logger.warning("Failed to restore %s after patch apply error", rel)
 
@@ -1042,19 +1072,18 @@ class Orchestrator:
                 # is idempotent.  It recognizes an exact post-image left by a
                 # request whose response/metadata write was interrupted.
                 affected, already_applied = apply_patch_idempotent(resolved, ws)
-
-                # The safety copy must represent the source *before* this fix.
-                # If a retry discovered that some files were already patched,
-                # reverse only those files in the copy. Verification can then
-                # still reproduce the original failure and apply the full diff.
                 if already_applied:
-                    reverse_applied_files(resolved, backup, already_applied)
+                    diagnosed = (run.context or {}).get("file_contents") or {}
+                    for rel in already_applied:
+                        original = diagnosed.get(rel)
+                        if isinstance(original, str):
+                            snapshots[rel] = original.encode("utf-8")
+
             except PatchError as exc:
-                _restore_affected_from_backup()
-                shutil.rmtree(backup_root, ignore_errors=True)
+                _restore_affected_from_snapshot()
                 message = str(exc)
                 stale_files: list[str] = []
-                diagnosed = (inc.context or {}).get("file_contents") or {}
+                diagnosed = (run.context or {}).get("file_contents") or {}
                 for patch in file_patches:
                     if patch["old_path"] == "/dev/null":
                         continue
@@ -1092,23 +1121,18 @@ class Orchestrator:
                     "stale_files": stale_files,
                 }
             except Exception as exc:  # noqa: BLE001
-                _restore_affected_from_backup()
-                shutil.rmtree(backup_root, ignore_errors=True)
+                _restore_affected_from_snapshot()
                 return {"applied": False, "reason": f"Could not apply patch safely: {exc}"}
 
             state = {
-                "backup": str(backup),
+                "snapshots": snapshots,
                 "files": affected,
                 "resolved_diff": resolved,
                 "mapping": mapping,
                 "workspace": str(ws),
                 "already_applied_files": already_applied,
             }
-            try:
-                (backup_root / "state.json").write_text(json.dumps(state), encoding="utf-8")
-            except Exception:
-                logger.warning("Could not persist apply state for %s", incident_id)
-            self._workspace_apply[incident_id] = state
+            self._workspace_apply[run_id] = state
             return {
                 "applied": True,
                 "files": affected,
@@ -1119,92 +1143,76 @@ class Orchestrator:
         outcome = await asyncio.to_thread(_do)
         if outcome.get("applied"):
             files = outcome.get("files", [])
-            if inc.fix_proposal is not None:
-                inc.fix_proposal["applied_files"] = files
-                inc.fix_proposal["applied_at"] = _utc_iso()
+            if run.fix_proposal is not None:
+                run.fix_proposal["applied_files"] = files
+                run.fix_proposal["applied_at"] = _utc_iso()
                 if outcome.get("mapping"):
-                    inc.fix_proposal["path_mapping"] = outcome["mapping"]
+                    run.fix_proposal["path_mapping"] = outcome["mapping"]
                 # Sandbox + PR creation should use the resolved diff.
                 try:
                     resolved_diff, _ = resolve_diff_paths(diff, ws)
-                    inc.fix_proposal["resolved_diff"] = resolved_diff
+                    run.fix_proposal["resolved_diff"] = resolved_diff
                 except PatchError:
                     pass
-            inc.add_activity("changes_applied", "done", f"Applied to {', '.join(files)}")
-            incident_store.update(inc)
-            await emit(inc.id, "changes_applied", "done", f"Changes applied to workspace: {', '.join(files)}")
-            log_operation(logger, incident_id, "apply_fix", "ok")
+            run.add_activity("changes_applied", "done", f"Applied to {', '.join(files)}")
+            run_store.update(run)
+            await emit(run.id, "changes_applied", "done", f"Changes applied to workspace: {', '.join(files)}")
+            log_operation(logger, run_id, "apply_fix", "ok")
         else:
-            inc.add_activity("changes_applied", "failed", outcome.get("reason", "apply failed")[:200])
-            incident_store.update(inc)
-            await emit(inc.id, "changes_applied", "failed", outcome.get("reason", "apply failed")[:300])
-            log_operation(logger, incident_id, "apply_fix", "failed", error=outcome.get("reason"))
+            run.add_activity("changes_applied", "failed", outcome.get("reason", "apply failed")[:200])
+            run_store.update(run)
+            await emit(run.id, "changes_applied", "failed", outcome.get("reason", "apply failed")[:300])
+            log_operation(logger, run_id, "apply_fix", "failed", error=outcome.get("reason"))
         return outcome
 
-    def _load_apply_state(self, incident_id: str) -> dict[str, Any] | None:
-        state = self._workspace_apply.get(incident_id)
-        if state and Path(state.get("backup", "")).is_dir():
-            return state
-        state_file = _apply_backups_root() / incident_id / "state.json"
-        if state_file.is_file():
-            try:
-                loaded = json.loads(state_file.read_text(encoding="utf-8"))
-                if Path(loaded.get("backup", "")).is_dir():
-                    self._workspace_apply[incident_id] = loaded
-                    return loaded
-            except Exception:
-                return None
-        return None
+    def _load_apply_state(self, run_id: str) -> dict[str, Any] | None:
+        return self._workspace_apply.get(run_id)
 
-    def _discard_apply_backup(self, incident_id: str) -> None:
-        self._workspace_apply.pop(incident_id, None)
-        shutil.rmtree(_apply_backups_root() / incident_id, ignore_errors=True)
+    def _discard_apply_snapshot(self, run_id: str) -> None:
+        self._workspace_apply.pop(run_id, None)
 
-    async def _restore_workspace_files(self, incident_id: str) -> None:
-        """Restore the workspace files from the pre-apply snapshot."""
-        state = self._load_apply_state(incident_id)
+    async def _restore_workspace_files(self, run_id: str) -> None:
+        """Restore workspace files from the current run's memory snapshot."""
+        state = self._load_apply_state(run_id)
         if not state:
             return
 
         def _do() -> None:
-            backup = Path(state["backup"])
-            ws = Path(state.get("workspace") or "")
-            if not ws.is_dir():
+            workspace = Path(state.get("workspace") or "")
+            if not workspace.is_dir():
                 return
-            for rel in state.get("files", []):
-                src = backup / rel
-                dst = ws / rel
+            for rel, content in (state.get("snapshots") or {}).items():
+                destination = workspace / rel
                 try:
-                    if src.is_file():
-                        dst.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(src, dst)
-                    elif dst.exists():
-                        # The patch created this file — remove it to restore.
-                        dst.unlink(missing_ok=True)
+                    if content is None:
+                        destination.unlink(missing_ok=True)
+                    else:
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        destination.write_bytes(content)
                 except Exception:
                     logger.warning("Rollback could not restore %s", rel)
 
         await asyncio.to_thread(_do)
-        self._discard_apply_backup(incident_id)
+        self._discard_apply_snapshot(run_id)
 
-    async def commit_changes(self, incident_id: str) -> dict[str, Any]:
+    async def commit_changes(self, run_id: str) -> dict[str, Any]:
         """Create a real git commit in the project workspace for applied changes."""
-        inc = incident_store.get(incident_id)
-        if not inc:
-            raise ValueError(f"incident not found: {incident_id}")
-        proposal = inc.fix_proposal or {}
+        run = run_store.get(run_id)
+        if not run:
+            raise ValueError(f"run not found: {run_id}")
+        proposal = run.fix_proposal or {}
         files = proposal.get("applied_files") or []
         if not files:
             raise ValueError("No applied changes to commit. Use Keep Changes first.")
 
-        project, ws = self._resolve_project_workspace(inc)
+        project, ws = self._resolve_project_workspace(run)
         if ws is None:
             raise ValueError("Project workspace is not synchronized.")
         if not (ws / ".git").is_dir():
             raise ValueError("Project workspace is not a git repository.")
 
         summary = proposal.get("summary") or "automated repair"
-        message = f"fix: {summary}\n\napi-doctor incident {incident_id}"
+        message = f"fix: {summary}\n\napi-doctor run {run_id}"
 
         def _git(*args: str) -> subprocess.CompletedProcess:
             return subprocess.run(
@@ -1261,98 +1269,98 @@ class Orchestrator:
         try:
             outcome = await asyncio.to_thread(_do)
         except Exception as exc:  # noqa: BLE001
-            inc.add_activity("local_commit", "failed", str(exc)[:200])
-            incident_store.update(inc)
-            await emit(inc.id, "local_commit", "failed", str(exc)[:300])
+            run.add_activity("local_commit", "failed", str(exc)[:200])
+            run_store.update(run)
+            await emit(run.id, "local_commit", "failed", str(exc)[:300])
             raise
 
         proposal["commit_sha"] = outcome["sha"]
-        inc.add_activity("local_commit", "done", outcome["sha"][:12])
-        incident_store.update(inc)
-        await emit(inc.id, "local_commit", "done", f"Committed {outcome['sha'][:12]} in workspace")
+        run.add_activity("local_commit", "done", outcome["sha"][:12])
+        run_store.update(run)
+        await emit(run.id, "local_commit", "done", f"Committed {outcome['sha'][:12]} in workspace")
         return {"sha": outcome["sha"], "message": message, "files": outcome["files"]}
 
     # ------------------------------------------------------------------
     # Resume from approval pause points
     # ------------------------------------------------------------------
-    async def resume_file_read(self, incident_id: str) -> bool:
+    async def resume_file_read(self, run_id: str) -> bool:
         """Mark file-read as approved and continue the diagnosis pipeline."""
-        inc = incident_store.get(incident_id)
-        if not inc:
-            logger.error("Incident %s not found", incident_id)
+        run = run_store.get(run_id)
+        if not run:
+            logger.error("Run %s not found", run_id)
             return False
-        if inc.status != IncidentStatus.AWAITING_FILE_READ_APPROVAL:
-            logger.warning("Incident %s not in AWAITING_FILE_READ_APPROVAL state", incident_id)
+        if run.status != RunStatus.AWAITING_FILE_READ_APPROVAL:
+            logger.warning("Run %s not in AWAITING_FILE_READ_APPROVAL state", run_id)
             return False
 
-        inc.add_activity("file_read_approval", "done", "User approved file reading")
-        inc.status = IncidentStatus.COLLECTING_CONTEXT
-        inc.set_activity("collecting_context", "running", "Reading approved files")
-        incident_store.update(inc)
-        await emit(inc.id, "file_read_approval", "done", "File read approved")
-        await emit(inc.id, "collecting_context", "running", "Reading approved files")
+        run.add_activity("file_read_approval", "done", "User approved file reading")
+        run.status = RunStatus.COLLECTING_CONTEXT
+        run.set_activity("collecting_context", "running", "Reading approved files")
+        run_store.update(run)
+        await emit(run.id, "file_read_approval", "done", "File read approved")
+        await emit(run.id, "collecting_context", "running", "Reading approved files")
 
-        if not self.start_diagnosis(incident_id):
-            logger.error("Failed to resume diagnosis after file-read approval for %s", incident_id)
+        if not self.start_diagnosis(run_id):
+            logger.error("Failed to resume diagnosis after file-read approval for %s", run_id)
             return False
         return True
 
-    async def resume_fix(self, incident_id: str) -> bool:
+    async def resume_fix(self, run_id: str) -> bool:
         """Mark the proposed fix as approved and continue into sandbox testing."""
-        inc = incident_store.get(incident_id)
-        if not inc:
-            logger.error("Incident %s not found", incident_id)
+        run = run_store.get(run_id)
+        if not run:
+            logger.error("Run %s not found", run_id)
             return False
-        if inc.status != IncidentStatus.AWAITING_FIX_APPROVAL:
+        if run.status != RunStatus.AWAITING_FIX_APPROVAL:
             # Idempotent: a duplicate resume (double click, browser retry on a
             # dropped response) can legitimately land after the gate was
             # already crossed and the pipeline is past the approval pause.
             if (
-                self._has_activity(inc, "fix_approval", "done")
-                and inc.status in POST_FIX_GATE_STATUSES
+                self._has_activity(run, "fix_approval", "done")
+                and run.status in POST_FIX_GATE_STATUSES
             ):
                 return True
-            logger.warning("Incident %s not in AWAITING_FIX_APPROVAL state", incident_id)
+            logger.warning("Run %s not in AWAITING_FIX_APPROVAL state", run_id)
             return False
 
-        if not self._has_activity(inc, "fix_approval", "done"):
-            inc.add_activity("fix_approval", "done", "User approved fix")
+        if not self._has_activity(run, "fix_approval", "done"):
+            run.add_activity("fix_approval", "done", "User approved fix")
         # Flip out of the awaiting state in the SAME store write as the
         # recorded approval, so an overlapping approval request observes the
         # gate as already crossed instead of resuming a second time and
         # hitting "no active pipeline slots" (which used to surface as a
         # bogus 500 'Failed to resume fix').
-        inc.status = IncidentStatus.SANDBOX_TESTING
-        incident_store.update(inc)
-        await emit(inc.id, "fix_approval", "done", "Fix approved")
+        run.status = RunStatus.SANDBOX_TESTING
+        run_store.update(run)
+        await emit(run.id, "fix_approval", "done", "Fix approved")
 
-        if not self.start_diagnosis(incident_id):
+        if not self.start_diagnosis(run_id):
             # A racing earlier resume already started the pipeline — that is
             # the in-flight duplicate case, not a failure.
-            if self.has_active_pipeline(incident_id):
+            if self.has_active_pipeline(run_id):
                 return True
-            logger.error("Failed to resume diagnosis after fix approval for %s", incident_id)
+            logger.error("Failed to resume diagnosis after fix approval for %s", run_id)
             return False
         return True
 
     # ------------------------------------------------------------------
     # GitHub PR
     # ------------------------------------------------------------------
-    def _full_files(self, inc: Incident) -> dict[str, str]:
-        """Full content of affected files, preferring the per-incident cache.
+    def _full_files(self, run: Run) -> dict[str, str]:
+        """Full content of affected files, preferring the per-run cache.
 
-        Files read during context collection are cached on the incident
+        Files read during context collection are cached on the run
         (``context.file_contents``), so fix generation and sandbox retries do
         not re-read the workspace. Disk is only consulted for files that were
         never cached.
         """
         files: dict[str, str] = {}
-        cached = (inc.context or {}).get("file_contents") or {}
+        cached = (run.context or {}).get("file_contents") or {}
         affected: list[str] = []
-        for rel in (inc.context or {}).get("affected_files") or []:
+        for rel in (run.context or {}).get("affected_files") or []:
             if rel not in affected:
                 affected.append(rel)
-        for rel in (inc.root_cause or {}).get("affected_files") or []:
+        for rel in (run.root_cause or {}).get("affected_files") or []:
             if rel not in affected:
                 affected.append(rel)
         for rel in affected:
@@ -1363,8 +1371,8 @@ class Orchestrator:
             full = self.sandbox_runner.repo_root / rel
             if full.is_file():
                 files[rel] = full.read_text(encoding="utf-8", errors="replace")
-        if not files and inc.context and inc.context.get("code_snippets"):
-            for rel, data in inc.context["code_snippets"].items():
+        if not files and run.context and run.context.get("code_snippets"):
+            for rel, data in run.context["code_snippets"].items():
                 if isinstance(data, dict):
                     files[rel] = data.get("content", "")[:4000]
         return files
@@ -1372,39 +1380,39 @@ class Orchestrator:
     # ------------------------------------------------------------------
     # Fix-path validation (anti-hallucination gate)
     # ------------------------------------------------------------------
-    def _known_paths(self, inc: Incident) -> set[str]:
-        """Every path the pipeline has actually seen for this incident.
+    def _known_paths(self, run: Run) -> set[str]:
+        """Every path the pipeline has actually seen for this run.
 
         Sources: context files identified by the file-determiner, snippet keys
         produced by the retriever, and files named by the root-cause analysis.
         Anything outside this set is a model invention and must not be applied.
         """
         known: set[str] = set()
-        ctx = inc.context or {}
+        ctx = run.context or {}
         for rel in ctx.get("affected_files") or []:
             if rel:
                 known.add(rel)
         for rel in (ctx.get("code_snippets") or {}).keys():
             if rel:
                 known.add(rel)
-        for rel in (inc.root_cause or {}).get("affected_files") or []:
+        for rel in (run.root_cause or {}).get("affected_files") or []:
             if rel:
                 known.add(rel)
         return known
 
-    def _acceptable_paths(self, inc: Incident) -> set[str]:
+    def _acceptable_paths(self, run: Run) -> set[str]:
         """Paths a fix may touch: known AND verified to exist.
 
         ``known`` alone can be poisoned by a model naming a plausible path it
         never saw (e.g. a root-cause agent pattern-matching ``app/`` from the
         tool's own repo). A path only becomes acceptable once it has actually
-        been read into the incident cache or is found on the bound workspace
+        been read into the run cache or is found on the bound workspace
         disk — that is the precise guarantee behind "never apply a path that
         does not exist".
         """
-        known = self._known_paths(inc)
+        known = self._known_paths(run)
         existing: set[str] = set()
-        cached = (inc.context or {}).get("file_contents") or {}
+        cached = (run.context or {}).get("file_contents") or {}
         existing.update(cached.keys())
         root = self.sandbox_runner.repo_root
         for rel in known:
@@ -1460,7 +1468,7 @@ class Orchestrator:
     async def _generate_validated_fix(
         self,
         analysis: RootCauseAnalysis,
-        inc: Incident,
+        run: Run,
         profile: Any = None,
         feedback: str | None = None,
     ) -> FixProposal:
@@ -1468,13 +1476,13 @@ class Orchestrator:
 
         An empty diff raises immediately (a coder model with nothing to say
         should fail fast, not produce a confusing sandbox failure). Proposals
-        that reference paths outside the incident's known context are rejected
+        that reference paths outside the run's known context are rejected
         and regenerated with corrective feedback, up to ``_FIX_PATH_RETRIES``
         times, then fail with a precise message. The sandbox/apply stage is
         only ever handed a proposal whose paths were already proven to exist.
         """
-        acceptable = self._acceptable_paths(inc)
-        files = self._full_files(inc)
+        acceptable = self._acceptable_paths(run)
+        files = self._full_files(run)
         correction = feedback
         rejected = False
         last_unknown: set[str] = set()
@@ -1489,126 +1497,48 @@ class Orchestrator:
                     # out with a separate done entry so the timeline does not
                     # end on a spinner and the rejection stays on record.
                     message = "Fix regenerated with corrected paths"
-                    inc.add_activity("fix_regenerating", "done", message)
-                    incident_store.update(inc)
-                    await emit(inc.id, "fix_regenerating", "done", message)
+                    run.add_activity("fix_regenerating", "done", message)
+                    run_store.update(run)
+                    await emit(run.id, "fix_regenerating", "done", message)
                 return proposal
             rejected = True
             correction = self._path_feedback(last_unknown, acceptable)
             if round_no < _FIX_PATH_RETRIES:
                 message = "Rejected proposal: paths not found in project — regenerating"
                 # set_activity keeps a single live row across rejection rounds.
-                inc.set_activity("fix_regenerating", "running", message)
-                incident_store.update(inc)
-                await emit(inc.id, "fix_regenerating", "running", message)
+                run.set_activity("fix_regenerating", "running", message)
+                run_store.update(run)
+                await emit(run.id, "fix_regenerating", "running", message)
         # Retries exhausted — close the regenerating row as failed so the
         # timeline never ends on a dangling spinner.
         message = (
             "Could not regenerate with valid paths: "
             f"{sorted(last_unknown)}"
         )
-        inc.set_activity("fix_regenerating", "failed", message)
-        incident_store.update(inc)
-        await emit(inc.id, "fix_regenerating", "failed", message)
+        run.set_activity("fix_regenerating", "failed", message)
+        run_store.update(run)
+        await emit(run.id, "fix_regenerating", "failed", message)
         raise ValueError(
             "coder model referenced paths not present in the project: "
             f"{sorted(last_unknown)}"
         )
 
-    # ------------------------------------------------------------------
-    # Duplicate-incident suppression
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _exception_type_from_trace(trace: str) -> str:
-        """Extract the exception type from the last non-empty traceback line."""
-        if not trace:
-            return ""
-        for line in reversed(trace.splitlines()):
-            line = line.strip()
-            if not line:
-                continue
-            m = _EXCEPTION_LEADER_RE.match(line)
-            if m and m.group(1) not in _NON_EXCEPTION_LEADERS:
-                return m.group(1)
-        return ""
-
-    def _error_signature(self, detection: dict[str, Any]) -> str:
-        """Stable signature identifying one logical error on one endpoint.
-
-        Uses (method, endpoint, exception type) when available, otherwise a
-        hash of the traceback's tail so repeated polls of the same production
-        error collapse onto a single incident.
-        """
-        method = str(detection.get("method") or "GET").upper()
-        endpoint = str(detection.get("endpoint") or "")
-        trace = str(detection.get("stack_trace") or "")
-        exc = self._exception_type_from_trace(trace)
-        if exc:
-            return f"{method}|{endpoint}|{exc}"
-        tail = "\n".join(trace.strip().splitlines()[-3:]).strip()
-        if tail:
-            digest = hashlib.sha1(tail.encode("utf-8")).hexdigest()[:12]
-            return f"{method}|{endpoint}|trace:{digest}"
-        message = str(detection.get("error_message") or "").strip()
-        if message:
-            digest = hashlib.sha1(message.encode("utf-8")).hexdigest()[:12]
-            return f"{method}|{endpoint}|msg:{digest}"
-        return f"{method}|{endpoint}|no-error"
-
-    @staticmethod
-    def _is_open_for_dedup(inc: Incident) -> bool:
-        """True when an incident still represents the project's current failure.
-
-        Closed / resolved / cancelled incidents and hard terminal failures are
-        excluded so a genuinely new occurrence (or a fresh retry after a
-        failure) still creates a new incident instead of silently reusing a
-        dead one.
-        """
-        return inc.status not in {
-            IncidentStatus.PR_CREATED,
-            IncidentStatus.CANCELLED,
-            IncidentStatus.FAILED,
-            IncidentStatus.INVESTIGATION_FAILED,
-            IncidentStatus.FIX_GENERATION_FAILED,
-            IncidentStatus.VERIFICATION_FAILED,
-            IncidentStatus.REPAIR_LIMIT_REACHED,
-            IncidentStatus.REQUIRES_HUMAN_REVIEW,
-            IncidentStatus.AWAITING_REVIEW,
-        }
-
-    def _find_open_duplicate(
-        self, project_id: str, detection: dict[str, Any]
-    ) -> Incident | None:
-        """Return an existing open incident on the same project+error, if any.
-
-        This is the guard behind the incident-history clutter: sync-render
-        polls must reuse the incident already open for the same endpoint +
-        exception instead of stacking another RECEIVED row every poll.
-        """
-        signature = self._error_signature(detection)
-        for inc in incident_store.list_all(project_id):
-            if not self._is_open_for_dedup(inc):
-                continue
-            if self._error_signature(inc.detection or {}) == signature:
-                return inc
-        return None
-
-    async def create_pull_request(self, incident_id: str) -> dict[str, Any]:
+    async def create_pull_request(self, run_id: str) -> dict[str, Any]:
         from app.github.client import GitHubClient
         from app.github.service import GitHubService
 
-        inc = incident_store.get(incident_id)
-        if not inc:
-            raise ValueError(f"incident not found: {incident_id}")
-        if not inc.fix_proposal or not inc.fix_proposal.get("diff"):
-            raise ValueError("incident has no verified fix to open a PR for")
+        run = run_store.get(run_id)
+        if not run:
+            raise ValueError(f"run not found: {run_id}")
+        if not run.fix_proposal or not run.fix_proposal.get("diff"):
+            raise ValueError("run has no verified fix to open a PR for")
 
         # Check Repair Gate: must be verified
-        if inc.status not in (IncidentStatus.FIX_VERIFIED, IncidentStatus.PR_READY):
-            if not (inc.sandbox_result and inc.sandbox_result.get("passed")):
+        if run.status not in (RunStatus.FIX_VERIFIED, RunStatus.PR_READY):
+            if not (run.sandbox_result and run.sandbox_result.get("passed")):
                 raise ValueError("Cannot create PR: fix has not passed sandbox verification gates.")
 
-        project = project_store.get(inc.project_id) or project_store.get_current()
+        project = project_store.get(run.project_id) or project_store.get_current()
         if not project or not project.workspace_path or not Path(project.workspace_path).is_dir():
             raise ValueError("Cannot create PR: project workspace is not synchronized.")
 
@@ -1629,7 +1559,7 @@ class Orchestrator:
 
         # The orchestrator's context/sandbox runners are singletons whose
         # repo_root is whatever project was diagnosed last. Re-bind them to
-        # THIS incident's project so _changes_from_diff reads the correct
+        # THIS run's project so _changes_from_diff reads the correct
         # repository and commits the right file contents.
         self.context_builder.set_repo_root(project.workspace_path)
         self.sandbox_runner.set_repo_root(project.workspace_path, project.profile)
@@ -1642,67 +1572,67 @@ class Orchestrator:
         )
         service = GitHubService(gh_client)
 
-        diff = inc.fix_proposal.get("resolved_diff") or inc.fix_proposal["diff"]
+        diff = run.fix_proposal.get("resolved_diff") or run.fix_proposal["diff"]
         changes = self._changes_from_diff(diff)
         if not changes:
             raise ValueError(
                 "Could not derive file changes from the proposed diff — the workspace layout may have changed."
             )
-        summary = inc.fix_proposal.get("summary") or "Fix"
+        summary = run.fix_proposal.get("summary") or "Fix"
         title = f"fix(api-doctor): {summary}"
-        body = self._pr_body(inc)
+        body = self._pr_body(run)
 
         # Report branch work honestly: "running" while GitHub is being asked,
         # "done" only once the PR payload exists, "failed" otherwise. The old
         # flow claimed a created branch BEFORE anything happened, so a failed
         # attempt left a permanently misleading timeline.
-        branch_name = f"api-doctor/fix/{incident_id}"
-        inc.add_activity("branch_created", "running", branch_name)
-        incident_store.update(inc)
-        await emit(inc.id, "branch_created", "running", f"Creating repair branch {branch_name}")
+        branch_name = f"api-doctor/fix/{run_id}"
+        run.add_activity("branch_created", "running", branch_name)
+        run_store.update(run)
+        await emit(run.id, "branch_created", "running", f"Creating repair branch {branch_name}")
         try:
             pr_info = await service.repair(
-                incident_id=incident_id,
+                run_id=run_id,
                 changes=changes,
-                message=f"fix: {summary}\n\napi-doctor incident {incident_id}",
+                message=f"fix: {summary}\n\napi-doctor run {run_id}",
                 title=title,
                 body=body,
                 project=project,
             )
         except Exception as exc:
-            inc.set_activity("branch_created", "failed", str(exc)[:200])
-            inc.error_message = f"PR creation failed: {exc}"
-            incident_store.update(inc)
-            await emit(inc.id, "branch_created", "failed", str(exc)[:300])
+            run.set_activity("branch_created", "failed", str(exc)[:200])
+            run.error_message = f"PR creation failed: {exc}"
+            run_store.update(run)
+            await emit(run.id, "branch_created", "failed", str(exc)[:300])
             raise
 
-        inc.set_activity("branch_created", "done", branch_name)
-        incident_store.update(inc)
-        await emit(inc.id, "branch_created", "done", branch_name)
+        run.set_activity("branch_created", "done", branch_name)
+        run_store.update(run)
+        await emit(run.id, "branch_created", "done", branch_name)
 
-        await emit(inc.id, "commit_created", "done", pr_info.get("head_sha", ""))
-        inc.add_activity("commit_created", "done", pr_info.get("head_sha", ""))
+        await emit(run.id, "commit_created", "done", pr_info.get("head_sha", ""))
+        run.add_activity("commit_created", "done", pr_info.get("head_sha", ""))
 
-        inc.pr_info = pr_info
-        inc.status = IncidentStatus.PR_CREATED
-        inc.add_activity("pr_created", "done", pr_info.get("pr_url") or "")
+        run.pr_info = pr_info
+        run.status = RunStatus.PR_CREATED
+        run.add_activity("pr_created", "done", pr_info.get("pr_url") or "")
         # A retry succeeded after an earlier failed attempt — drop the stale
         # failure so the UI does not keep flagging it.
-        if (inc.error_message or "").startswith("PR creation failed"):
-            inc.error_message = ""
-        incident_store.update(inc)
-        await emit(inc.id, "pr_created", "done", pr_info.get("pr_url") or "")
+        if (run.error_message or "").startswith("PR creation failed"):
+            run.error_message = ""
+        run_store.update(run)
+        await emit(run.id, "pr_created", "done", pr_info.get("pr_url") or "")
         return pr_info
 
-    async def pr_status(self, incident_id: str) -> dict[str, Any]:
+    async def pr_status(self, run_id: str) -> dict[str, Any]:
         from app.github.client import GitHubClient
         from app.github.service import GitHubService
 
-        inc = incident_store.get(incident_id)
-        if not inc:
-            return {"present": False, "error": "incident not found"}
+        run = run_store.get(run_id)
+        if not run:
+            return {"present": False, "error": "run not found"}
 
-        project = project_store.get(inc.project_id) or project_store.get_current()
+        project = project_store.get(run.project_id) or project_store.get_current()
         github = project_store.resolve_github(project.id if project else None)
         gh_client = GitHubClient(
             token=github.get("token", ""),
@@ -1711,7 +1641,7 @@ class Orchestrator:
             default_branch=github.get("branch", "main"),
         )
         service = GitHubService(gh_client)
-        return await service.pr_status(incident_id, inc.pr_info)
+        return await service.pr_status(run_id, run.pr_info)
 
     def _changes_from_diff(self, diff: str) -> list[dict[str, str]]:
         from app.sandbox.workspace_manager import WorkspaceManager
@@ -1735,11 +1665,11 @@ class Orchestrator:
         finally:
             wm.cleanup(ws)
 
-    def _pr_body(self, inc: Incident) -> str:
-        rc = inc.root_cause or {}
-        fix = inc.fix_proposal or {}
+    def _pr_body(self, run: Run) -> str:
+        rc = run.root_cause or {}
+        fix = run.fix_proposal or {}
         lines = [
-            f"## API Doctor — Incident `{inc.id}`",
+            f"## API Doctor — Run `{run.id}`",
             "",
             f"**Classification:** {rc.get('classification') or rc.get('category')}",
             f"**Confidence:** {rc.get('confidence')}",

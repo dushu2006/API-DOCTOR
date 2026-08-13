@@ -19,8 +19,8 @@ class GitHubService:
         """Use an explicitly configured, project-scoped GitHub client."""
         self.client = client
 
-    def _branch_name(self, incident_id: str) -> str:
-        return f"api-doctor/fix/{incident_id}"
+    def _branch_name(self, run_id: str) -> str:
+        return f"api-doctor/fix/{run_id}"
 
     def sync_project_workspace(self, project: Project) -> Path:
         """Synchronize the configured GitHub repository into a local working workspace."""
@@ -45,7 +45,7 @@ class GitHubService:
 
     async def repair(
         self,
-        incident_id: str,
+        run_id: str,
         changes: list[dict[str, str]],
         message: str,
         title: str,
@@ -54,13 +54,13 @@ class GitHubService:
     ) -> dict[str, Any]:
         """Create a repair branch off the project's default branch, commit the
         changed files and open a pull request. ``main`` is never modified."""
-        branch = self._branch_name(incident_id)
+        branch = self._branch_name(run_id)
 
         # Idempotent: reuse existing PR/branch if present.
         existing = await self.client.list_pull_requests(head=branch, state="open")
         if existing:
             pr = existing[0]
-            logger.info("Reusing existing PR #%s for incident %s", pr["number"], incident_id)
+            logger.info("Reusing existing PR #%s for run %s", pr["number"], run_id)
             return self._pr_payload(pr, branch)
 
         # Ensure the base branch exists; branch off the project default branch.
@@ -71,10 +71,10 @@ class GitHubService:
 
         await self.client.create_commit(branch, message, changes)
         pr = await self.client.create_pull_request(head=branch, title=title, body=body, base=base)
-        logger.info("Created PR #%s for incident %s", pr["number"], incident_id)
+        logger.info("Created PR #%s for run %s", pr["number"], run_id)
         return self._pr_payload(pr, branch)
 
-    async def pr_status(self, incident_id: str, pr_info: dict | None) -> dict[str, Any]:
+    async def pr_status(self, run_id: str, pr_info: dict | None) -> dict[str, Any]:
         number = (pr_info or {}).get("pr_number") or (pr_info or {}).get("number")
         if not number:
             return {"present": False}

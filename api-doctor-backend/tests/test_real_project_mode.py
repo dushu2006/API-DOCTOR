@@ -207,29 +207,31 @@ async def test_api_project_file_content_traversal_rejected(tmp_path, auth_header
     assert res.status_code == 404
 
 
-async def test_api_ingest_incident_endpoint(auth_headers):
+async def test_api_ingest_run_endpoint(auth_headers, project_factory):
+    project = project_factory()
     body = {
         "source": "manual",
         "log_text": "Traceback (most recent call last):\n  File \"app/test.py\", line 10, in foo\nValueError: invalid param\n",
         "message": "ValueError: invalid param",
+        "project_id": project.id,
         "auto_diagnose": False,
     }
-    res = await _request("POST", "/api/incidents/ingest", json_body=body, headers=auth_headers)
+    res = await _request("POST", "/api/diagnosis/start", json_body=body, headers=auth_headers)
     assert res.status_code == 200
     data = res.json()
-    assert "incident_id" in data
+    assert "run_id" in data
     assert data["status"] in ("RECEIVED", "DETECTED")
 
 
 async def test_api_sync_render_unconfigured(auth_headers, project_factory):
     project_factory()
 
-    res = await _request("POST", "/api/incidents/sync-render", headers=auth_headers)
+    res = await _request("POST", "/api/diagnosis/sync-render", headers=auth_headers)
     assert res.status_code == 200
     data = res.json()
     assert data["status"] == "error"
     assert data["error_type"] == "unconfigured"
-    assert data["incidents_created"] == []
+    assert data["run_id"] is None
 
 
 def _configure_render(project_id: str = "default") -> None:
@@ -241,8 +243,8 @@ def _configure_render(project_id: str = "default") -> None:
     )
 
 
-async def test_api_sync_render_success_creates_incident(httpx_mock, tmp_path, auth_headers, project_factory, caplog):
-    caplog.set_level(logging.INFO, logger="app.incidents.router")
+async def test_api_sync_render_success_creates_run(httpx_mock, tmp_path, auth_headers, project_factory, caplog):
+    caplog.set_level(logging.INFO, logger="app.runs.router")
     (tmp_path / "app").mkdir()
     (tmp_path / "app" / "services").mkdir()
     (tmp_path / "app" / "services" / "payment.py").write_text("def charge():\n    pass\n")
@@ -270,14 +272,14 @@ async def test_api_sync_render_success_creates_incident(httpx_mock, tmp_path, au
         },
     )
 
-    res = await _request("POST", "/api/incidents/sync-render?auto_diagnose=false", headers=auth_headers)
+    res = await _request("POST", "/api/diagnosis/sync-render?auto_diagnose=false", headers=auth_headers)
     assert res.status_code == 200
     data = res.json()
     assert data["status"] == "success"
     assert data["project_id"] == project.id
     assert data["logs_retrieved"] == 4
     assert len(data["logs"]) == 4
-    assert len(data["incidents_created"]) == 1
+    assert data["run_id"]
     assert data["diagnosis_started"] is False
     assert "Sample Render log entries:" in caplog.text
     assert "AttributeError: 'NoneType' object has no attribute 'token'" in caplog.text
@@ -285,11 +287,11 @@ async def test_api_sync_render_success_creates_incident(httpx_mock, tmp_path, au
 
 
 async def test_api_render_logs_returns_sanitized_entries(httpx_mock, auth_headers, project_factory, monkeypatch):
-    # The raw viewer must not invoke detection or create incidents.
+    # The raw viewer must not invoke detection or create runs.
     def should_not_detect(*args, **kwargs):
-        raise AssertionError("raw log viewer must not detect incidents")
+        raise AssertionError("raw log viewer must not detect runs")
 
-    monkeypatch.setattr("app.incidents.router.FailureDetector.detect_from_logs", should_not_detect)
+    monkeypatch.setattr("app.runs.router.FailureDetector.detect_from_logs", should_not_detect)
     project = project_factory()
     _configure_render(project.id)
     httpx_mock.add_response(
@@ -309,7 +311,7 @@ async def test_api_render_logs_returns_sanitized_entries(httpx_mock, auth_header
         },
     )
 
-    res = await _request("GET", f"/api/incidents/render-logs?project_id={project.id}", headers=auth_headers)
+    res = await _request("GET", f"/api/diagnosis/render-logs?project_id={project.id}", headers=auth_headers)
     assert res.status_code == 200
     data = res.json()
     assert data["project_id"] == project.id
@@ -327,12 +329,12 @@ async def test_api_sync_render_404_is_error(httpx_mock, auth_headers, project_fa
         status_code=404,
         text="service missing",
     )
-    res = await _request("POST", "/api/incidents/sync-render", headers=auth_headers)
+    res = await _request("POST", "/api/diagnosis/sync-render", headers=auth_headers)
     assert res.status_code == 200
     data = res.json()
     assert data["status"] == "error"
     assert data["error_type"] == "not_found"
-    assert data["incidents_created"] == []
+    assert data["run_id"] is None
 
 
 async def test_lifespan_does_not_sync_repository(monkeypatch):

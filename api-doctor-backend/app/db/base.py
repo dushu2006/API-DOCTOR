@@ -90,8 +90,43 @@ def _migrate_missing_columns() -> None:
                 conn.execute(text(ddl))
 
 
+def _remove_unmapped_tables() -> None:
+    """Delete the obsolete durable workflow table and all data in it.
+
+    Match its schema instead of deleting every unknown table: deployments may
+    share a database with other applications, and unrelated tables must remain
+    untouched.
+    """
+    from sqlalchemy import inspect, text
+
+    signature = {
+        "project_id",
+        "detection",
+        "stack_trace",
+        "root_cause",
+        "fix_proposal",
+        "sandbox_result",
+        "activity",
+    }
+    mapped = set(Base.metadata.tables)
+    inspector = inspect(engine)
+    preparer = engine.dialect.identifier_preparer
+    with engine.begin() as connection:
+        for table_name in inspector.get_table_names():
+            if table_name.startswith("sqlite_") or table_name in mapped:
+                continue
+            columns = {column["name"] for column in inspector.get_columns(table_name)}
+            project_linked = any(
+                foreign_key.get("referred_table") == "projects"
+                for foreign_key in inspector.get_foreign_keys(table_name)
+            )
+            if project_linked and signature.issubset(columns):
+                connection.execute(text(f"DROP TABLE IF EXISTS {preparer.quote(table_name)}"))
+
+
 def init_db() -> None:
     from app.db import models  # noqa: F401
 
+    _remove_unmapped_tables()
     Base.metadata.create_all(bind=engine)
     _migrate_missing_columns()

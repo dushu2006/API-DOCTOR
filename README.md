@@ -1,6 +1,6 @@
 # API Doctor
 
-AI-assisted backend incident diagnosis, repair generation, sandbox verification, and pull-request workflow with a FastAPI backend and React/Vite dashboard.
+AI-assisted, point-in-time backend diagnosis, repair generation, sandbox verification, and pull-request workflow with a FastAPI backend and React/Vite dashboard. Diagnosis state is ephemeral: only the current run exists, and no diagnosis history is stored.
 
 ## Run the full project locally
 

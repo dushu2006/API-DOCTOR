@@ -48,6 +48,11 @@ async def logout(
         token = authorization.split(" ", 1)[1] if authorization.lower().startswith("bearer ") else authorization
     else:
         token = request.query_params.get("session_token")
+    user = auth_store.get_user_by_token(token)
+    if user:
+        from app.orchestrator import orchestrator
+
+        await orchestrator.reset_current(user.id)
     auth_store.revoke_session(token)
     return MessageResponse(message="Logged out.")
 
@@ -77,6 +82,9 @@ async def change_password(payload: ChangePasswordRequest, user: UserResponse = D
 @router.delete("/me", response_model=MessageResponse)
 async def delete_me(user: UserResponse = Depends(require_authenticated_user)) -> MessageResponse:
     try:
+        from app.orchestrator import orchestrator
+
+        await orchestrator.reset_current(user.id)
         auth_store.delete_account(user.id)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
