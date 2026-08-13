@@ -48,6 +48,11 @@ export default function App() {
 
   const [projectFiles, setProjectFiles] = useState({ files: [], tree: [] });
   const [selectedFile, setSelectedFile] = useState('');
+  // VS Code-style file tabs: every file the user opens pins a tab across the
+  // top of the editor. Tabs keep their open order, are re-activated by
+  // clicking, and closed with the x control (closing the active tab moves
+  // focus to the right neighbour, then the left one).
+  const [openFiles, setOpenFiles] = useState([]);
   const [fileContent, setFileContent] = useState('');
 
   const [incidentsList, setIncidentsList] = useState([]);
@@ -101,11 +106,92 @@ export default function App() {
     [currentProject]
   );
 
+  // Explorer badges per file, driven by the incident's real read timeline
+  // rather than the coarse "diagnosing" flag:
+  //   modified — touched by the current patch proposal
+  //   reading  — a workspace read of this file is in flight right now
+  //   analyzed — the agent finished reading this file
+  // Files identified but not yet read (waiting for read approval) get no
+  // badge, and a paused/finished incident never shows a stale "reading".
+  const fileStatuses = useMemo(() => {
+    const modified = new Set(incidentDiff?.files_changed || []);
+    const implicated = incidentContext?.implicated_files || [];
+
+    // The backend records one `file_read` activity event per file read:
+    // "Reading <path>" (running), updated in place to
+    // "Read <path> · N lines" (done). The latest event per path is that
+    // file's real read state.
+    const readState = new Map();
+    for (const event of activeIncident?.activity || []) {
+      if (event.step !== 'file_read' || !event.message) continue;
+      const match = event.message.match(/^(?:Reading|Read)\s+(.+?)(?:\s+·\s*\d+\s*lines?)?$/);
+      if (match) readState.set(match[1].trim(), event.status);
+    }
+
+    const statuses = {};
+    const awaitingReadApproval = activeIncident?.status === 'AWAITING_FILE_READ_APPROVAL';
+    for (const path of implicated) {
+      if (modified.has(path)) continue; // badge assigned below
+      const state = readState.get(path);
+      if (state === 'running') statuses[path] = 'reading';
+      else if (state === 'done') statuses[path] = 'analyzed';
+      else if (awaitingReadApproval) continue; // identified, not read yet
+      else if (isDiagnosing) statuses[path] = 'reading';
+      else statuses[path] = 'analyzed';
+    }
+    for (const path of modified) {
+      statuses[path] = 'modified';
+    }
+    return statuses;
+  }, [incidentContext, incidentDiff, activeIncident, isDiagnosing]);
+
+  // Reset only the incident-scoped surfaces (panel, diff editor, bottom
+  // panel, timeline) back to the "fresh console" state. Unlike
+  // clearIncidentWorkspace this keeps the incident history list so the
+  // user can still pick an older incident afterwards.
+  const resetActiveIncident = useCallback(() => {
+    setActiveIncidentId(null);
+    setActiveIncident(null);
+    setIncidentContext(null);
+    setIncidentDiff(null);
+    setIncidentSandbox(null);
+    setIncidentPR(null);
+    setTimelineEvents([]);
+    setIsDiagnosing(false);
+    setHighlightLine(null);
+    setFailureReason('');
+    setIsDiffMode(false);
+  }, []);
+
   const clearProjectWorkspace = useCallback(() => {
     setProjectFiles({ files: [], tree: [] });
     setSelectedFile('');
+    setOpenFiles([]);
     setFileContent('');
   }, []);
+
+  // Pin a tab for every file that gets opened; reselecting an already-open
+  // path just activates its existing tab (no duplicates).
+  useEffect(() => {
+    if (!selectedFile) return;
+    setOpenFiles(prev => (prev.includes(selectedFile) ? prev : [...prev, selectedFile]));
+  }, [selectedFile]);
+
+  const handleSelectTab = (path) => {
+    openProjectFile(path);
+    setIsDiffMode(false);
+  };
+
+  const handleCloseTab = (path) => {
+    const idx = openFiles.indexOf(path);
+    if (idx === -1) return;
+    const next = openFiles.filter(p => p !== path);
+    setOpenFiles(next);
+    if (path !== selectedFile) return; // closing a background tab keeps the editor put
+    const neighbour = next[Math.min(idx, next.length - 1)] || '';
+    setSelectedFile(neighbour);
+    if (!neighbour) setFileContent('');
+  };
 
   const clearIncidentWorkspace = useCallback(() => {
     setIncidentsList([]);
@@ -121,6 +207,9 @@ export default function App() {
     setRenderLogsMeta(null);
     setHighlightLine(null);
     setFailureReason('');
+    setOpenFiles([]);
+    setSelectedFile('');
+    setFileContent('');
   }, []);
 
   const bootstrapApp = useCallback(async () => {
@@ -236,10 +325,15 @@ export default function App() {
       setCurrentProject(project);
       setIncidentsList(incidents || []);
 
-      setActiveIncidentId(prev => {
-        if (prev && (incidents || []).some(item => item.id === prev)) return prev;
-        return incidents?.[0]?.id || null;
-      });
+      // Fresh-start rule: never auto-open an incident just because one
+      // exists — the workspace boots to an idle console with only the
+      // Start Diagnosis affordance, and an incident opens only when the
+      // user explicitly picks it (or a new sync/diagnosis creates one).
+      // A previously selected incident that vanished from the list simply
+      // clears back to the fresh state.
+      setActiveIncidentId(prev =>
+        prev && (incidents || []).some(item => item.id === prev) ? prev : null
+      );
 
       if (project?.is_connected) {
         await loadProjectFiles(project.id);
@@ -380,8 +474,12 @@ export default function App() {
   useEffect(() => {
     if (activeIncidentId) {
       fetchIncidentDetails(activeIncidentId);
+    } else {
+      // Fresh state — drop any stale incident data so the panel, editor and
+      // bottom panel render the idle console instead of a previous report.
+      resetActiveIncident();
     }
-  }, [activeIncidentId, fetchIncidentDetails]);
+  }, [activeIncidentId, fetchIncidentDetails, resetActiveIncident]);
 
   useEffect(() => {
     if (!activeIncidentId) return;
@@ -777,14 +875,18 @@ export default function App() {
   };
 
   const handleCommitChanges = async () => {
-    if (!activeIncidentId) return;
+    if (!activeIncidentId || isIncidentActionPending) return;
+    setIsIncidentActionPending(true);
     try {
       const res = await api.commitFix(activeIncidentId);
       if (res?.sha) {
         await fetchIncidentDetails(activeIncidentId);
       }
     } catch (err) {
+      await fetchIncidentDetails(activeIncidentId);
       alert(`Commit failed: ${err.message}`);
+    } finally {
+      setIsIncidentActionPending(false);
     }
   };
 
@@ -816,12 +918,18 @@ export default function App() {
   };
 
   const handleCreatePR = async () => {
-    if (!activeIncidentId) return;
+    if (!activeIncidentId || isIncidentActionPending) return;
+    setIsIncidentActionPending(true);
     try {
       await api.createPR(activeIncidentId);
       await fetchIncidentDetails(activeIncidentId);
     } catch (err) {
+      // Refresh so the timeline shows the branch_created failure record and
+      // any configuration guidance from the backend.
+      await fetchIncidentDetails(activeIncidentId);
       alert(`Failed to create GitHub PR: ${err.message}`);
+    } finally {
+      setIsIncidentActionPending(false);
     }
   };
 
@@ -889,10 +997,7 @@ export default function App() {
           <Explorer
             selectedFile={selectedFile}
             setSelectedFile={setSelectedFile}
-            fileStatuses={{
-              ...Object.fromEntries((incidentContext?.implicated_files || []).map(path => [path, isDiagnosing ? 'reading' : 'analyzed'])),
-              ...Object.fromEntries((incidentDiff?.files_changed || []).map(path => [path, 'modified']))
-            }}
+            fileStatuses={fileStatuses}
             filesList={projectFiles.files}
             filesTree={projectFiles.tree}
             projectName={currentProject?.name || 'Workspace'}
@@ -925,6 +1030,9 @@ export default function App() {
             highlightLine={highlightLine}
             failureReason={failureReason}
             isProjectConnected={isConnected}
+            openFiles={openFiles}
+            onSelectTab={handleSelectTab}
+            onCloseTab={handleCloseTab}
           />
 
           {isDoctorOpen && (
@@ -948,7 +1056,8 @@ export default function App() {
             onCommitChanges={handleCommitChanges}
             onApproveFileRead={handleApproveFileRead}
             onCreatePR={handleCreatePR}
-            onSelectIncident={(id) => setActiveIncidentId(id)}
+            onSelectIncident={(id) => { setActiveIncidentId(id); setIsDoctorOpen(true); }}
+            onNewDiagnosis={resetActiveIncident}
             onSyncRender={handleSyncRender}
             onOpenIngestModal={() => setShowIngestModal(true)}
             doctorWidth={doctorWidth}

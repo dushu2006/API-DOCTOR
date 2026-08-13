@@ -10,9 +10,20 @@ import {
   Settings,
   Stethoscope,
   User,
-  X
+  X,
+  RadioTower,
+  CheckCircle2,
+  XCircle,
+  Check
 } from 'lucide-react';
+import './doctor.css';
 
+/**
+ * Top command strip — retro operator band (light grey, beveled controls),
+ * matching the reference console: dark status pill on the left, signal /
+ * health / settings glyphs, and the raised START DIAGNOSIS push button.
+ * Behaviour and props are unchanged.
+ */
 export default function TopBar({
   projects = [],
   currentUser,
@@ -77,54 +88,73 @@ export default function TopBar({
     onStopDiagnosis();
   };
 
+  const incidentDone = Boolean(activeIncident) && !isDiagnosing;
+
   return (
-    <header style={{
-      height: '44px',
-      backgroundColor: 'var(--surface-1)',
-      borderBottom: '1px solid var(--border-color)',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      padding: '0 16px',
-      position: 'relative',
-      zIndex: 50
-    }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-primary)', fontWeight: 700, fontSize: '13px' }}>
-          <div style={{ width: '24px', height: '24px', borderRadius: 'var(--radius-sm)', background: 'var(--color-accent)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#0A0E14', boxShadow: '0 0 10px var(--color-accent-glow)' }}>
-            <Stethoscope size={14} />
+    <header
+      className="dr-band"
+      style={{
+        height: '46px',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        padding: '0 12px',
+        position: 'relative',
+        zIndex: 50
+      }}
+    >
+      {/* ---- left: product + project + branch ---- */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div
+            style={{
+              width: 24,
+              height: 24,
+              borderRadius: 2,
+              background: '#17181d',
+              border: '1px solid #000',
+              boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.15), 0 1px 0 rgba(255,255,255,0.5)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: 'var(--dr-amber, #f5a524)',
+              flexShrink: 0
+            }}
+          >
+            <Stethoscope size={13} />
           </div>
-          <span style={{ fontFamily: 'var(--font-heading)', letterSpacing: '0.04em', fontWeight: 700 }}>API DOCTOR</span>
+          <span style={{ fontFamily: 'var(--font-heading)', letterSpacing: '0.06em', fontWeight: 700, fontSize: 13, color: 'var(--dr-ink, #15171b)' }}>
+            API DOCTOR
+          </span>
         </div>
 
-        <div style={{ width: '1px', height: '16px', backgroundColor: 'var(--border-color)' }} />
+        <div className="dr-band-divider" />
 
         <div style={{ position: 'relative' }}>
           <button
             onClick={() => setIsProjectMenuOpen(prev => !prev)}
-            style={{
-              background: 'transparent',
-              border: 'none',
-              color: 'var(--text-primary)',
-              fontSize: '12px',
-              fontWeight: 600,
-              display: 'flex',
-              alignItems: 'center',
-              gap: '8px',
-              cursor: 'pointer',
-              padding: '4px 8px',
-              borderRadius: '4px'
-            }}
-            className="hover-bg"
+            className="dr-btn"
+            style={{ padding: '4px 10px', maxWidth: 220 }}
           >
-            <span>{currentProjectLabel}</span>
-            <ChevronDown size={11} style={{ color: 'var(--text-muted)' }} />
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{currentProjectLabel}</span>
+            <ChevronDown size={11} />
           </button>
 
           {isProjectMenuOpen && (
-            <div style={{ position: 'absolute', top: 'calc(100% + 8px)', left: 0, width: '300px', backgroundColor: 'var(--surface-1)', border: '1px solid var(--border-color)', borderRadius: '10px', boxShadow: '0 12px 24px rgba(0,0,0,0.45)', overflow: 'hidden' }}>
-              <div style={{ padding: '10px 12px', fontSize: '10px', color: 'var(--text-muted)', letterSpacing: '0.06em', fontWeight: 700, borderBottom: '1px solid var(--border-color)' }}>PROJECTS</div>
-              <div style={{ maxHeight: '240px', overflowY: 'auto' }}>
+            <div
+              className="dr-card"
+              style={{
+                position: 'absolute',
+                top: 'calc(100% + 6px)',
+                left: 0,
+                width: 300,
+                overflow: 'hidden',
+                color: 'var(--dr-text, #e8e9ec)',
+                zIndex: 100
+              }}
+            >
+              <div className="dr-kicker" style={{ padding: '9px 12px', borderBottom: '1px solid var(--dr-frame-soft, #262930)' }}>PROJECTS</div>
+              <div style={{ maxHeight: 240, overflowY: 'auto' }}>
                 {projects.map(project => (
                   <button
                     key={project.id}
@@ -132,25 +162,27 @@ export default function TopBar({
                       setIsProjectMenuOpen(false);
                       onSelectProject(project);
                     }}
-                    style={{ width: '100%', textAlign: 'left', background: 'transparent', border: 'none', padding: '10px 12px', cursor: 'pointer', color: 'var(--text-primary)' }}
-                    className="hover-bg"
+                    className="dr-file-row"
+                    style={{ width: '100%', background: 'transparent', border: 'none', borderBottom: '1px solid var(--dr-frame-soft, #262930)', textAlign: 'left' }}
                   >
-                    <div style={{ fontSize: '12px', fontWeight: 600 }}>{project.name}</div>
-                    <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{project.github_owner}/{project.github_repo}</div>
+                    <span>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--dr-text, #e8e9ec)' }}>{project.name}</div>
+                      <div style={{ fontSize: 10, color: 'var(--dr-faint, #6b7078)', fontFamily: 'var(--font-mono)' }}>{project.github_owner}/{project.github_repo}</div>
+                    </span>
                   </button>
                 ))}
               </div>
-              <div style={{ borderTop: '1px solid var(--border-color)', padding: '8px', display: 'grid', gap: '8px' }}>
-                <button type="button" onClick={() => { setIsProjectMenuOpen(false); onOpenProjectSelector(); }} className="btn-outline" style={{ width: '100%', justifyContent: 'center' }}>
-                  <Settings size={14} />
+              <div style={{ borderTop: '1px solid var(--dr-frame-soft, #262930)', padding: 8, display: 'grid', gap: 6 }}>
+                <button type="button" onClick={() => { setIsProjectMenuOpen(false); onOpenProjectSelector(); }} className="dr-btn" style={{ width: '100%' }}>
+                  <Settings size={13} />
                   <span>Manage Projects</span>
                 </button>
-                <button type="button" onClick={() => { setIsProjectMenuOpen(false); onOpenProjectSettings(); }} className="btn-outline" style={{ width: '100%', justifyContent: 'center' }}>
-                  <Server size={14} />
+                <button type="button" onClick={() => { setIsProjectMenuOpen(false); onOpenProjectSettings(); }} className="dr-btn" style={{ width: '100%' }}>
+                  <Server size={13} />
                   <span>Project Settings</span>
                 </button>
-                <button type="button" onClick={() => { setIsProjectMenuOpen(false); onOpenProjectWizard(); }} className="btn-primary" style={{ width: '100%', justifyContent: 'center' }}>
-                  <PlusCircle size={14} />
+                <button type="button" onClick={() => { setIsProjectMenuOpen(false); onOpenProjectWizard(); }} className="dr-btn dr-btn-blue" style={{ width: '100%' }}>
+                  <PlusCircle size={13} />
                   <span>New Project</span>
                 </button>
               </div>
@@ -158,100 +190,125 @@ export default function TopBar({
           )}
         </div>
 
-        <span style={{ color: 'var(--text-muted)' }}>/</span>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--text-muted)', fontSize: '12px', padding: '4px 6px' }}>
-          <GitBranch size={13} style={{ color: 'var(--color-accent)' }} />
-          <span style={{ color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>{currentBranch}</span>
+        <div className="dr-well-band">
+          <GitBranch size={11} />
+          <span>{currentBranch}</span>
         </div>
       </div>
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: 'var(--text-muted)' }}>
-          <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: isBackendConnected ? 'var(--color-success)' : 'var(--color-failure)' }} />
-          <span>{isBackendConnected ? 'Backend Connected' : 'Disconnected'}</span>
-          {backendHealth?.project_count !== undefined && (
-            <span style={{ fontFamily: 'var(--font-mono)', fontSize: '10px' }}>PROJECTS: {backendHealth.project_count}</span>
-          )}
-        </div>
-
-        <button onClick={handleViewRenderLogsClick} disabled={isLoadingRenderLogs || projectProvider !== 'render'} className="btn-outline" title="View the latest runtime logs without creating incidents" style={{ padding: '4px 10px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-          <Server size={12} style={{ color: 'var(--color-accent)' }} />
-          <span>{isLoadingRenderLogs ? 'Loading logs...' : 'View Render Logs'}</span>
-        </button>
-
-        <button onClick={handleSyncRenderClick} disabled={isSyncingRender || projectProvider !== 'render'} className="btn-outline" title="Retrieve Render logs and detect incidents" style={{ padding: '4px 10px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-          <Server size={12} style={{ color: 'var(--color-accent)' }} />
-          <span>{isSyncingRender ? 'Syncing...' : 'Sync & Detect'}</span>
-        </button>
-
-        <button onClick={onOpenIngestModal} className="btn-outline" title="Paste production logs or stack trace" style={{ padding: '4px 10px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-          <PlusCircle size={12} style={{ color: 'var(--color-accent)' }} />
-          <span>Manual Error</span>
-        </button>
-
-        {isDiagnosing && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', backgroundColor: 'rgba(124, 140, 248, 0.12)', border: '1px solid rgba(124, 140, 248, 0.3)', padding: '3px 10px', borderRadius: '12px', fontSize: '12px', color: 'var(--color-accent)' }}>
-            <span className="agent-dot" />
-            <span style={{ fontWeight: 500 }}>Diagnosing...</span>
-          </div>
+      {/* ---- right: agent status + controls ---- */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+        {activeIncident && (
+          <span className="dr-pill-dark" title={isDiagnosing ? 'Diagnosis in progress' : 'Diagnosis complete'}>
+            {isDiagnosing ? (
+              <>
+                <span className="dr-pulse" style={{ width: 6, height: 6 }} />
+                <span>DIAGNOSING…</span>
+              </>
+            ) : incidentDone ? (
+              <>
+                <Check size={10} style={{ color: 'var(--dr-green, #34d17b)' }} />
+                <span>Diagnosis complete</span>
+              </>
+            ) : null}
+          </span>
         )}
 
-        <div>
-          {isDiagnosing ? (
-            <button onClick={() => setShowStopDialog(true)} className="btn-danger-outline" style={{ minWidth: '90px', justifyContent: 'center' }}>
-              <OctagonAlert size={13} />
-              <span>Stop</span>
-            </button>
-          ) : (
-            <button onClick={() => onStartDiagnosis()} className="btn-primary" style={{ minWidth: '120px', justifyContent: 'center' }}>
-              <Stethoscope size={13} />
-              <span>Start Diagnosis</span>
-            </button>
+        <span className="dr-pill-dark" title={isBackendConnected ? 'Backend connected' : 'Backend disconnected'}>
+          <span
+            style={{
+              width: 6,
+              height: 6,
+              borderRadius: '50%',
+              background: isBackendConnected ? 'var(--dr-green, #34d17b)' : 'var(--dr-red, #f4526a)'
+            }}
+          />
+          <span>{isBackendConnected ? 'Backend Connected' : 'Disconnected'}</span>
+          {backendHealth?.project_count !== undefined && (
+            <span style={{ color: '#8a8f99' }}>· {backendHealth.project_count} PROJECTS</span>
           )}
-        </div>
-      </div>
+        </span>
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
-        <div title="Active Incident / Branch" style={{ display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--text-muted)', fontSize: '12px' }}>
-          <GitCommit size={15} />
-          <span style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--color-warning)' }}>
-            {activeIncident ? `#${activeIncident.id.slice(0, 7)}` : currentBranch}
-          </span>
-        </div>
-
-        <div style={{ width: '1px', height: '16px', backgroundColor: 'var(--border-color)' }} />
-
-        <button onClick={onOpenProjectSettings} title="Project settings" style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}>
+        <RadioTower size={15} style={{ color: 'rgba(0,0,0,0.62)' }} />
+        {isBackendConnected
+          ? <CheckCircle2 size={15} style={{ color: 'rgba(0,0,0,0.62)' }} />
+          : <XCircle size={15} style={{ color: '#8f1524' }} />}
+        <button
+          onClick={onOpenProjectSettings}
+          title="Project settings"
+          style={{ background: 'none', border: 'none', cursor: 'pointer', display: 'flex', color: 'rgba(0,0,0,0.62)', padding: 2 }}
+        >
           <Settings size={15} />
         </button>
 
-        <button onClick={onOpenProfile} title={userLabel} style={{ width: '28px', height: '28px', borderRadius: '50%', backgroundColor: 'var(--surface-2)', border: '1px solid var(--border-color)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: 'var(--text-primary)', fontSize: '10px', fontWeight: 700 }}>
-          {currentUser ? userInitials : <User size={14} />}
+        <div className="dr-band-divider" />
+
+        <button onClick={handleViewRenderLogsClick} disabled={isLoadingRenderLogs || projectProvider !== 'render'} className="dr-btn" title="View the latest runtime logs without creating incidents">
+          <Server size={12} />
+          <span>{isLoadingRenderLogs ? 'Loading…' : 'View Render Logs'}</span>
+        </button>
+
+        <button onClick={handleSyncRenderClick} disabled={isSyncingRender || projectProvider !== 'render'} className="dr-btn" title="Retrieve Render logs and detect incidents">
+          <Server size={12} />
+          <span>{isSyncingRender ? 'Syncing…' : 'Sync & Detect'}</span>
+        </button>
+
+        <button onClick={onOpenIngestModal} className="dr-btn" title="Paste production logs or stack trace">
+          <PlusCircle size={12} />
+          <span>Manual Error</span>
+        </button>
+
+        {isDiagnosing ? (
+          <button onClick={() => setShowStopDialog(true)} className="dr-btn dr-btn-red dr-btn-band-primary" style={{ minWidth: 90 }}>
+            <OctagonAlert size={13} />
+            <span>Stop</span>
+          </button>
+        ) : (
+          <button onClick={() => onStartDiagnosis()} className="dr-btn dr-btn-band-primary" style={{ minWidth: 150 }}>
+            <Stethoscope size={13} />
+            <span>Start Diagnosis</span>
+          </button>
+        )}
+
+        <div className="dr-band-divider" />
+
+        <div className="dr-well-band" title="Active incident / branch">
+          <GitCommit size={12} />
+          <span>{activeIncident ? `#${activeIncident.id.slice(0, 7)}` : currentBranch}</span>
+        </div>
+
+        <button
+          onClick={onOpenProfile}
+          title={userLabel}
+          className="dr-btn"
+          style={{ width: 28, height: 28, padding: 0, fontFamily: 'var(--font-mono)' }}
+        >
+          {currentUser ? userInitials : <User size={13} />}
         </button>
       </div>
 
       {showStopDialog && (
-        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.6)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <div style={{ backgroundColor: 'var(--surface-1)', border: '1px solid var(--border-color)', borderRadius: '8px', padding: '20px', width: '360px', boxShadow: '0 12px 24px rgba(0,0,0,0.5)' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-              <span style={{ fontWeight: 600, color: 'var(--color-failure)', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <OctagonAlert size={16} /> Stop Investigation?
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.65)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div className="dr-root dr-card" style={{ padding: 20, width: 380, boxShadow: '0 12px 32px rgba(0,0,0,0.6)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+              <span style={{ fontWeight: 700, color: 'var(--dr-red)', display: 'flex', alignItems: 'center', gap: 8, fontFamily: 'var(--font-heading)', letterSpacing: '0.04em' }}>
+                <OctagonAlert size={16} /> STOP INVESTIGATION?
               </span>
-              <button onClick={() => setShowStopDialog(false)} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}>
+              <button onClick={() => setShowStopDialog(false)} style={{ background: 'none', border: 'none', color: 'var(--dr-faint)', cursor: 'pointer' }}>
                 <X size={16} />
               </button>
             </div>
-            <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '16px' }}>
+            <p style={{ fontSize: 12, color: 'var(--dr-dim)', marginBottom: 16, lineHeight: 1.5 }}>
               Are you sure you want to cancel this diagnosis? The current progress will be recorded.
             </p>
-            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px' }}>
-              <button onClick={onLogout} className="btn-outline">
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+              <button onClick={onLogout} className="dr-btn">
                 <LogOut size={13} />
                 <span>Logout</span>
               </button>
-              <div style={{ display: 'flex', gap: '8px' }}>
-                <button onClick={() => setShowStopDialog(false)} className="btn-outline">Cancel</button>
-                <button onClick={confirmStop} className="btn-danger-outline">Stop Diagnosis</button>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button onClick={() => setShowStopDialog(false)} className="dr-btn">Cancel</button>
+                <button onClick={confirmStop} className="dr-btn dr-btn-red">Stop Diagnosis</button>
               </div>
             </div>
           </div>

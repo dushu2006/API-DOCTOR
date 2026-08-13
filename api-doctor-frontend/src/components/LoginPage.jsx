@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { api } from '../api';
-import { Eye, EyeOff, Loader2, LockKeyhole, ShieldCheck, Sparkles } from 'lucide-react';
+import { ArrowLeft, Eye, EyeOff, Loader2, LockKeyhole, ShieldCheck, Sparkles } from 'lucide-react';
 
 const inputStyle = {
   width: '100%',
@@ -91,9 +91,9 @@ export default function LoginPage({ onAuthenticated }) {
   };
 
   return (
-    <div style={{ minHeight: '100vh', width: '100vw', background: 'radial-gradient(circle at 30% 20%, rgba(240, 169, 58, 0.12), transparent 45%), #0A0E14', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px' }}>
-      <div style={{ width: 'min(960px, 96vw)', minHeight: 'min(680px, 92vh)', backgroundColor: 'var(--surface-1)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-lg)', overflow: 'hidden', boxShadow: 'var(--shadow-elevation)', display: 'flex' }}>
-        <div style={{ width: '42%', background: 'linear-gradient(180deg, rgba(240, 169, 58, 0.08), rgba(27, 36, 50, 0.4))', borderRight: '1px solid var(--border-color)', padding: '36px 32px', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+    <div style={{ minHeight: '100vh', width: '100vw', background: 'radial-gradient(circle at 30% 20%, rgba(240, 169, 58, 0.12), transparent 45%), #0A0E14', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px', overflowY: 'auto' }}>
+      <div className="auth-shell" style={{ width: 'min(960px, 96vw)', minHeight: 'min(680px, 92vh)', backgroundColor: 'var(--surface-1)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-lg)', overflow: 'hidden', boxShadow: 'var(--shadow-elevation)' }}>
+        <div className="auth-aside" style={{ background: 'linear-gradient(180deg, rgba(240, 169, 58, 0.08), rgba(27, 36, 50, 0.4))', borderRight: '1px solid var(--border-color)', padding: '36px 32px', display: 'flex', flexDirection: 'column', justifyContent: 'space-between', gap: '24px' }}>
           <div>
             <div style={{ display: 'inline-flex', width: '44px', height: '44px', borderRadius: 'var(--radius-md)', alignItems: 'center', justifyContent: 'center', background: 'var(--color-accent)', color: '#0A0E14', marginBottom: '20px', boxShadow: '0 4px 14px rgba(240, 169, 58, 0.3)' }}>
               <Sparkles size={22} />
@@ -120,13 +120,25 @@ export default function LoginPage({ onAuthenticated }) {
           </div>
         </div>
 
-        <div style={{ flex: 1, padding: '36px 36px 30px', display: 'flex', flexDirection: 'column' }}>
+        <div className="auth-main" style={{ padding: '36px 36px 30px', display: 'flex', flexDirection: 'column', position: 'relative' }}>
+          {mode === 'register' && (
+            <button
+              type="button"
+              onClick={() => { setMode('login'); setError(''); }}
+              className="auth-back"
+              title="Back to Login"
+              aria-label="Back to Login"
+            >
+              <ArrowLeft size={15} />
+            </button>
+          )}
+
           <div style={{ display: 'flex', gap: '8px', marginBottom: '28px' }}>
-            <button type="button" onClick={() => setMode('login')} className={mode === 'login' ? 'btn-primary' : 'btn-outline'}>
+            <button type="button" onClick={() => { setMode('login'); setError(''); }} className={mode === 'login' ? 'btn-primary' : 'btn-outline'}>
               <LockKeyhole size={14} />
               <span>Login</span>
             </button>
-            <button type="button" onClick={() => setMode('register')} className={mode === 'register' ? 'btn-primary' : 'btn-outline'}>
+            <button type="button" onClick={() => { setMode('register'); setError(''); }} className={mode === 'register' ? 'btn-primary' : 'btn-outline'}>
               <Sparkles size={14} />
               <span>Register</span>
             </button>
