@@ -1,6 +1,9 @@
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;1,400&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
+/* NOTE: webfonts are loaded non-blocking from index.html (<link media="print">).
+   A render-blocking @import here used to stall the whole stylesheet whenever
+   the font host was unreachable, leaving the app as an unstyled white page. */
 
 :root {
+  color-scheme: dark;
   /* Color Tokens - Cold Technical + Amber Signal */
   --bg-canvas: #0A0E14;
   --surface-1: #131A24;
@@ -50,9 +53,14 @@ html, body, #root {
   width: 100vw;
   height: 100vh;
   overflow: hidden;
-  background-color: var(--bg-canvas);
-  color: var(--text-primary);
-  font-family: var(--font-ui);
+  /* Literal fallback first: even if every CSS variable fails to resolve,
+     the app renders dark-on-dark-visible — never a white page. */
+  background-color: #0a0e14;
+  background-color: var(--bg-canvas, #0a0e14);
+  color: #e8ecf1;
+  color: var(--text-primary, #e8ecf1);
+  font-family: 'Plus Jakarta Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-family: var(--font-ui, 'Plus Jakarta Sans', sans-serif);
   font-size: 13px;
   line-height: 1.4;
   -webkit-font-smoothing: antialiased;

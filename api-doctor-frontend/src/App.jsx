@@ -213,9 +213,10 @@ export default function App() {
   }, []);
 
   const bootstrapApp = useCallback(async () => {
+    let health = null;
     try {
       try {
-        const health = await api.getHealth();
+        health = await api.getHealth();
         setBackendHealth(health);
         setIsBackendConnected(health.status === 'ok');
       } catch (err) {
@@ -257,7 +258,10 @@ export default function App() {
 
       if (!projectList || projectList.length === 0) {
         setCurrentProject(null);
-        setShowProjectWizard(true);
+        // Demo mode skips the mandatory setup wizard so operators can run the
+        // built-in demo diagnosis straight away. Use the locally fetched
+        // health (state is not committed yet inside this async flow).
+        setShowProjectWizard(!health?.demo_mode);
         setShowProjectSelector(false);
         clearProjectWorkspace();
         clearIncidentWorkspace();
@@ -330,10 +334,14 @@ export default function App() {
       // Start Diagnosis affordance, and an incident opens only when the
       // user explicitly picks it (or a new sync/diagnosis creates one).
       // A previously selected incident that vanished from the list simply
-      // clears back to the fresh state.
-      setActiveIncidentId(prev =>
-        prev && (incidents || []).some(item => item.id === prev) ? prev : null
-      );
+      // clears back to the fresh state. Demo-scenario incidents live under
+      // the built-in demo project, so they are kept pinned even though they
+      // never appear in the current project's incident list.
+      setActiveIncidentId(prev => {
+        if (!prev) return null;
+        if (prev === demoIncidentIdRef.current) return prev;
+        return (incidents || []).some(item => item.id === prev) ? prev : null;
+      });
 
       if (project?.is_connected) {
         await loadProjectFiles(project.id);
@@ -735,6 +743,32 @@ export default function App() {
     }
   };
 
+  // Demo-mode trigger: runs a real diagnosis against the built-in demo API
+  // (deterministic bugs). Only offered while the backend reports demo mode.
+  const demoIncidentIdRef = useRef(null);
+  const [isDemoPending, setIsDemoPending] = useState(false);
+  const handleRunDemoScenario = async (scenario = 'external_api') => {
+    if (isDemoPending) return;
+    setIsDemoPending(true);
+    setIsDiagnosing(true);
+    try {
+      const res = await api.triggerDemoScenario(scenario);
+      if (res?.incident_id) {
+        demoIncidentIdRef.current = res.incident_id;
+        setActiveIncidentId(res.incident_id);
+        fetchIncidentDetails(res.incident_id);
+      } else {
+        setIsDiagnosing(false);
+        alert('Demo scenario did not return an incident.');
+      }
+    } catch (err) {
+      setIsDiagnosing(false);
+      alert(`Demo diagnosis failed: ${err.message}`);
+    } finally {
+      setIsDemoPending(false);
+    }
+  };
+
   const handleStartDiagnosis = async () => {
     if (!currentProject?.id) {
       setShowProjectSelector(true);
@@ -934,7 +968,9 @@ export default function App() {
   };
 
   const isConnected = Boolean(currentProject?.is_connected);
-  const showFullScreenWizard = !isBootstrapping && currentUser && projects.length === 0;
+  // In backend demo mode a fresh account can jump straight into the workspace
+  // and run the built-in demo diagnosis — no project setup required.
+  const showFullScreenWizard = !isBootstrapping && currentUser && projects.length === 0 && !backendHealth?.demo_mode;
 
   if (!isBootstrapping && !currentUser) {
     return <LoginPage onAuthenticated={handleAuthenticated} />;
@@ -1060,6 +1096,9 @@ export default function App() {
             onNewDiagnosis={resetActiveIncident}
             onSyncRender={handleSyncRender}
             onOpenIngestModal={() => setShowIngestModal(true)}
+            demoMode={Boolean(backendHealth?.demo_mode)}
+            onRunDemoScenario={handleRunDemoScenario}
+            isDemoPending={isDemoPending}
             doctorWidth={doctorWidth}
             isDoctorOpen={isDoctorOpen}
             setIsDoctorOpen={setIsDoctorOpen}
