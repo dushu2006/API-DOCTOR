@@ -571,11 +571,11 @@ class Orchestrator:
                     read_info = await asyncio.to_thread(self._read_workspace_file, rel)
                     if read_info:
                         run.context.setdefault("file_contents", {})[rel] = read_info["content"]
-                    run.set_activity("file_read", "done", f"Reading {rel}")
-                    run_store.update(run)
                     detail = f"Reading {rel}"
                     if read_info:
                         detail = f"Read {rel} · {read_info['lines']} lines"
+                    run.set_activity("file_read", "done", detail)
+                    run_store.update(run)
                     await emit(run.id, "file_read", "done", detail)
 
                 # Assemble the full context bundle for the investigator. Keep

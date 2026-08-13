@@ -12,9 +12,12 @@ import LoginPage from './components/LoginPage';
 import ProfileModal from './components/ProfileModal';
 import ProjectSettingsModal from './components/ProjectSettingsModal';
 import { api } from './api';
+import { useProgressiveTimeline } from './useProgressiveTimeline';
+import { normalizedTarget } from './diagnosisTimeline';
 import { FileText, Loader2, Server, Sparkles, X } from 'lucide-react';
 import './index.css';
 import './reference-ui.css';
+import './doctor-panel.css';
 
 const ACTIVE_DIAGNOSIS_STATUSES = new Set([
   'DETECTING',
@@ -85,8 +88,12 @@ export default function App() {
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
 
   const [explorerWidth, setExplorerWidth] = useState(188);
-  const [doctorWidth, setDoctorWidth] = useState(280);
+  const [doctorWidth, setDoctorWidth] = useState(420);
   const [bottomHeight, setBottomHeight] = useState(220);
+
+  // Progressive, backend-driven timeline. The revealer paces how quickly the
+  // (real) backend events are presented so the viewer can follow each step.
+  const revealedStages = useProgressiveTimeline(timelineEvents);
 
   const [highlightLine, setHighlightLine] = useState(null);
   const [failureReason, setFailureReason] = useState('');
@@ -408,6 +415,19 @@ export default function App() {
     setSelectedFile(path);
   }, [projectFiles]);
 
+  // While API Doctor is reading source, keep the editor focused on the exact
+  // file it is examining so the viewer sees the live inspection in context.
+  useEffect(() => {
+    const readStage = revealedStages.find((stage) => stage.id === 'read');
+    if (!readStage?.rows?.length) return;
+    const last = readStage.rows[readStage.rows.length - 1];
+    if (last.step !== 'file_read' || last.status === 'failed') return;
+    const target = normalizedTarget(last.message);
+    if (target && target !== selectedFileRef.current) {
+      openProjectFile(target);
+    }
+  }, [revealedStages, openProjectFile]);
+
   // SSE updates and button handlers can request the same run at nearly the
   // same time. Keep the newest response, rather than dropping a required
   // post-action refresh while an older request is in flight.
@@ -510,7 +530,7 @@ export default function App() {
       if (isDraggingExplorer.current) {
         setExplorerWidth(Math.min(Math.max(e.clientX - 48, 160), 450));
       } else if (isDraggingDoctor.current) {
-        setDoctorWidth(Math.min(Math.max(window.innerWidth - e.clientX, 280), 550));
+        setDoctorWidth(Math.min(Math.max(window.innerWidth - e.clientX, 340), 680));
       } else if (isDraggingBottom.current) {
         setBottomHeight(Math.min(Math.max(window.innerHeight - e.clientY, 80), 500));
       }
@@ -974,8 +994,8 @@ export default function App() {
   return (
     <div className="ide-desktop">
       <div className="ide-window-title">
-        <span>▣ API Doctor - Workspace ({isDiagnosing ? 'Diagnosing' : activeRun ? 'Complete' : 'Idle'})</span>
-        <span>☆ ♡ ♧</span>
+        <span>API Doctor — {currentProject?.name || 'Workspace'}</span>
+        <span>{isDiagnosing ? 'Diagnosing' : activeRun ? 'Diagnosis complete' : 'Ready'}</span>
       </div>
       <div className="ide-shell">
       <TopBar
@@ -1007,6 +1027,10 @@ export default function App() {
             isExplorerOpen={isExplorerOpen}
             setIsExplorerOpen={setIsExplorerOpen}
             hasActiveRun={Boolean(activeRun)}
+            onOpenTerminal={() => {
+              setIsBottomCollapsed(false);
+              setActiveBottomTab('terminal');
+            }}
           />
 
           <Explorer
@@ -1060,7 +1084,7 @@ export default function App() {
             runDiff={runDiff}
             runSandbox={runSandbox}
             runPR={runPR}
-            timelineEvents={timelineEvents}
+            stages={revealedStages}
             isDiagnosing={isDiagnosing}
             isRunActionPending={isRunActionPending}
             onKeepChanges={handleKeepChanges}
