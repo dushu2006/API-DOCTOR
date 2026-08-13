@@ -57,6 +57,28 @@ const STEP_LABELS = {
 // Steps that repeat with a different target per event (one row per file).
 const REPEATING_STEPS = new Set(['file_read']);
 
+// The pipeline is made up of distinct, observable specialists. Keep this
+// mapping in the UI (rather than guessing from the incident status) so a card
+// only becomes active when the backend has emitted evidence for that stage.
+const AGENT_ROLES = [
+  { id: 'detector', name: 'Failure detector', steps: ['error_detected', 'logs_retrieved', 'stack_trace_parsed'], icon: '◈' },
+  { id: 'file-determiner', name: 'File determiner', steps: ['relevant_source_identified', 'files_to_read', 'file_read', 'collecting_context'], icon: '⌁' },
+  { id: 'investigator', name: 'Investigator', steps: ['investigating', 'root_cause_identified'], icon: '◉' },
+  { id: 'coder', name: 'Coder', steps: ['fix_generated', 'diff_ready', 'fix_approval'], icon: '⌘' },
+  { id: 'tester', name: 'Tester', steps: ['sandbox_started', 'tests_started', 'test_passed', 'fix_verified'], icon: '✓' }
+];
+
+function agentState(role, rows) {
+  const relevant = rows.filter(row => role.steps.includes(row.step));
+  if (!relevant.length) return { state: 'idle', detail: 'Waiting to start' };
+  const running = relevant.find(row => row.status === 'running' || row.status === 'pending' || row.status === 'paused');
+  const failed = relevant.find(row => row.status === 'failed' || row.status === 'cancelled');
+  const completed = [...relevant].reverse().find(row => row.status === 'done');
+  if (running) return { state: 'working', detail: running.message || 'Working' };
+  if (failed) return { state: 'failed', detail: failed.message || 'Stage failed' };
+  return { state: 'done', detail: completed?.message || 'Completed' };
+}
+
 function normalizeFileReadMessage(message = '') {
   return message.replace(/^(Reading|Read)\s+/, '').split(' · ')[0].trim();
 }
@@ -105,6 +127,34 @@ export function buildTimeline(events = []) {
     }
   }
   return rows;
+}
+
+function AgentTeam({ rows }) {
+  return (
+    <div>
+      <div style={{ fontSize: '10px', fontWeight: 700, color: 'var(--text-muted)', letterSpacing: '0.05em', marginBottom: '10px' }}>
+        AGENT TEAM
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
+        {AGENT_ROLES.map(role => {
+          const { state, detail } = agentState(role, rows);
+          const color = state === 'working' ? 'var(--color-accent)' : state === 'failed' ? 'var(--color-failure)' : state === 'done' ? 'var(--color-success)' : 'var(--text-muted)';
+          return (
+            <div key={role.id} title={detail} style={{ border: '1px solid var(--border-color)', borderRadius: '5px', padding: '8px', background: 'var(--surface-2)', minWidth: 0 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color }}>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: '13px', width: '14px', textAlign: 'center' }}>{role.icon}</span>
+                <span style={{ fontSize: '11px', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{role.name}</span>
+                {state === 'working' && <span className="agent-dot" style={{ marginLeft: 'auto' }} />}
+              </div>
+              <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '4px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {state === 'idle' ? 'Not started' : state === 'working' ? 'In progress' : state === 'failed' ? 'Failed' : 'Complete'}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 function TimelineRow({ row }) {
@@ -361,7 +411,10 @@ export default function APIDoctorPanel({
               )}
             </div>
 
-            {/* Section 2: Live Investigation Timeline — driven only by real backend events */}
+            {/* Section 2: Agent roles — derived from real progress events */}
+            <AgentTeam rows={timelineRows} />
+
+            {/* Section 3: Live Investigation Timeline — driven only by real backend events */}
             <div>
               <div style={{ fontSize: '10px', fontWeight: 700, color: 'var(--text-muted)', letterSpacing: '0.05em', marginBottom: '10px' }}>
                 LIVE INVESTIGATION

@@ -409,6 +409,9 @@ class Orchestrator:
                     inc.status = IncidentStatus.AWAITING_FILE_READ_APPROVAL
                     incident_store.update(inc)
                     await emit(
+                        inc.id, "files_to_read", "pending", f"{len(identified)} files identified for reading"
+                    )
+                    await emit(
                         inc.id, "file_read_approval", "pending", f"Approval needed: {len(identified)} files"
                     )
                     await emit(inc.id, "pipeline", "paused", "Waiting for file read approval")
@@ -676,9 +679,11 @@ class Orchestrator:
                 inc.status = IncidentStatus.VERIFICATION_FAILED
                 inc.error_message = f"sandbox error: {exc}"
                 inc.set_activity("sandbox_started", "failed", str(exc)[:200])
+                inc.set_activity("tests_started", "failed", str(exc)[:200])
                 log_operation(logger, inc.id, "sandbox", "failed", error=str(exc))
                 incident_store.update(inc)
                 await emit(inc.id, "sandbox_started", "failed", str(exc)[:500])
+                await emit(inc.id, "tests_started", "failed", str(exc)[:500])
                 return
 
             log_operation(
@@ -713,6 +718,7 @@ class Orchestrator:
                 inc.add_activity(step.name, "done" if step.passed else "failed", _summarize_step(step))
             inc.add_activity("fix_verified", "done")
             await emit(inc.id, "test_passed", "done", "Sandbox tests passed")
+            await emit(inc.id, "tests_started", "done", "All sandbox tests passed")
             await emit(inc.id, "sandbox_started", "done", "Verification passed")
             await emit(inc.id, "fix_verified", "done", "Fix verified")
         else:
@@ -721,6 +727,7 @@ class Orchestrator:
             inc.set_activity("sandbox_started", "failed", inc.error_message[:200])
             inc.set_activity("tests_started", "failed", inc.error_message[:200])
             inc.add_activity("fix_verified", "failed", inc.error_message[:200])
+            await emit(inc.id, "tests_started", "failed", inc.error_message[:500])
             await emit(inc.id, "fix_verified", "failed", inc.error_message[:500])
 
         # Finalize the Keep-Changes workspace application based on the result.
