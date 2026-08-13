@@ -109,8 +109,14 @@ def _register_routes() -> None:
         except Exception:
             docker_ok = False
 
-        current = project_store.get_current()
-        projects = project_store.list_all()
+        current = None
+        projects: list = []
+        try:
+            projects = project_store.list_all()
+            current = project_store.get_current()
+        except Exception:
+            logger.exception("Health check could not resolve project state")
+
         return {
             "status": "ok",
             "demo_mode": settings.DEMO_MODE,

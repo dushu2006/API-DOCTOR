@@ -125,9 +125,23 @@ export default function App() {
 
   const bootstrapApp = useCallback(async () => {
     try {
-      const health = await api.getHealth();
-      setBackendHealth(health);
-      setIsBackendConnected(health.status === 'ok');
+      try {
+        const health = await api.getHealth();
+        setBackendHealth(health);
+        setIsBackendConnected(health.status === 'ok');
+      } catch (err) {
+        // /health is informational. A 500 here used to abort bootstrap entirely,
+        // which hid the login/workspace behind a spinner after a project-store
+        // inconsistency. Only a true network outage should stop the rest of boot.
+        if (err?.isNetworkError) {
+          setIsBackendConnected(false);
+          setBackendHealth(null);
+          return;
+        }
+        console.warn('Health check failed:', err);
+        setBackendHealth(null);
+        setIsBackendConnected(true);
+      }
 
       let user = null;
       try {
