@@ -27,23 +27,36 @@ function registerTheme() {
   monaco.editor.defineTheme(THEME_NAME, {
     base: 'vs-dark',
     inherit: true,
+    // Dark+ inspired palette. Monaco emits language-specific token suffixes
+    // (for example `keyword.python` and `type.identifier.ts`), so broad base
+    // selectors are intentional: every supported file type receives useful
+    // contrast instead of falling back to an all-white editor.
     rules: [
-      { token: 'comment', foreground: '686B74', fontStyle: 'italic' },
-      { token: 'keyword', foreground: '9A91FF' },
-      { token: 'keyword.flow', foreground: '9A91FF' },
-      { token: 'string', foreground: 'D6D2A4' },
-      { token: 'string.escape', foreground: 'B9B3FF' },
-      { token: 'number', foreground: 'C3BFFF' },
-      { token: 'constant', foreground: 'C3BFFF' },
-      { token: 'type', foreground: 'A8A2FF' },
-      { token: 'class', foreground: 'A8A2FF' },
-      { token: 'function', foreground: 'E2E0FF' },
-      { token: 'variable', foreground: 'E4E5EA' },
-      { token: 'tag', foreground: '9A91FF' },
-      { token: 'attribute.name', foreground: 'B1ABFF' },
-      { token: 'attribute.value', foreground: 'D6D2A4' },
-      { token: 'delimiter', foreground: '858893' },
-      { token: 'regexp', foreground: 'FF5575' }
+      { token: '', foreground: 'D4D4D4' },
+      { token: 'comment', foreground: '6A9955', fontStyle: 'italic' },
+      { token: 'keyword', foreground: 'C586C0' },
+      { token: 'keyword.flow', foreground: 'C586C0' },
+      { token: 'keyword.control', foreground: 'C586C0' },
+      { token: 'operator', foreground: 'D4D4D4' },
+      { token: 'string', foreground: 'CE9178' },
+      { token: 'string.escape', foreground: 'D7BA7D' },
+      { token: 'number', foreground: 'B5CEA8' },
+      { token: 'constant', foreground: '4FC1FF' },
+      { token: 'type', foreground: '4EC9B0' },
+      { token: 'type.identifier', foreground: '4EC9B0' },
+      { token: 'class', foreground: '4EC9B0' },
+      { token: 'function', foreground: 'DCDCAA' },
+      { token: 'function.call', foreground: 'DCDCAA' },
+      { token: 'identifier.function', foreground: 'DCDCAA' },
+      { token: 'variable', foreground: '9CDCFE' },
+      { token: 'variable.predefined', foreground: '4FC1FF' },
+      { token: 'tag', foreground: '569CD6' },
+      { token: 'metatag', foreground: '569CD6' },
+      { token: 'attribute.name', foreground: '9CDCFE' },
+      { token: 'attribute.value', foreground: 'CE9178' },
+      { token: 'delimiter', foreground: '808080' },
+      { token: 'delimiter.bracket', foreground: 'FFD700' },
+      { token: 'regexp', foreground: 'D16969' }
     ],
     colors: {
       'editor.background': '#070809',
@@ -69,23 +82,38 @@ const LANGUAGE_BY_EXT = {
   py: 'python', pyi: 'python',
   js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'javascript',
   ts: 'typescript', tsx: 'typescript',
-  html: 'html', htm: 'html',
+  html: 'html', htm: 'html', vue: 'html', svelte: 'html',
   css: 'css', scss: 'scss', less: 'less',
   json: 'json', jsonc: 'json',
   md: 'markdown', markdown: 'markdown',
   yml: 'yaml', yaml: 'yaml',
   xml: 'xml', svg: 'xml',
-  sql: 'sql',
-  sh: 'shell', bash: 'shell', zsh: 'shell',
-  toml: 'ini', ini: 'ini', cfg: 'ini',
+  sql: 'sql', graphql: 'graphql', gql: 'graphql',
+  sh: 'shell', bash: 'shell', zsh: 'shell', fish: 'shell',
+  toml: 'ini', ini: 'ini', cfg: 'ini', conf: 'ini', env: 'ini', properties: 'ini',
   dockerfile: 'dockerfile',
-  java: 'java', go: 'go', rs: 'rust', rb: 'ruby', php: 'php',
-  c: 'c', h: 'c', cpp: 'cpp', hpp: 'cpp'
+  java: 'java', go: 'go', rs: 'rust', rb: 'ruby', php: 'php', swift: 'swift', kt: 'kotlin',
+  c: 'c', h: 'c', cpp: 'cpp', cc: 'cpp', cxx: 'cpp', hpp: 'cpp', cs: 'csharp'
+};
+
+const LANGUAGE_BY_NAME = {
+  dockerfile: 'dockerfile',
+  makefile: 'makefile',
+  'package.json': 'json',
+  'package-lock.json': 'json',
+  'tsconfig.json': 'json',
+  'jsconfig.json': 'json',
+  'requirements.txt': 'plaintext',
+  '.env': 'ini',
+  '.env.example': 'ini',
+  '.gitignore': 'plaintext',
 };
 
 function languageForPath(path = '') {
   const name = path.split('/').pop() || '';
-  if (/^dockerfile$/i.test(name)) return 'dockerfile';
+  const lowerName = name.toLowerCase();
+  if (LANGUAGE_BY_NAME[lowerName]) return LANGUAGE_BY_NAME[lowerName];
+  if (lowerName.startsWith('.env.')) return 'ini';
   const ext = (name.includes('.') ? name.split('.').pop() : '').toLowerCase();
   return LANGUAGE_BY_EXT[ext] || 'plaintext';
 }
