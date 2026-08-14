@@ -151,8 +151,8 @@ export const api = {
   // One current diagnosis. The backend never returns a history collection.
   getCurrentRun: (projectId) => request(`/api/diagnosis/current${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ''}`, { suppressErrorLog: true }),
   resetCurrentRun: () => request('/api/diagnosis/current', { method: 'DELETE' }),
-  getRun: (id) => request(`/api/diagnosis/${id}`),
-  getRunStatus: (id) => request(`/api/diagnosis/${id}/status`),
+  getRun: (id) => request(`/api/diagnosis/${id}`, { suppressErrorLog: true }),
+  getRunStatus: (id) => request(`/api/diagnosis/${id}/status`, { suppressErrorLog: true }),
   getRunContext: (id) => request(`/api/diagnosis/${id}/context`, { suppressErrorLog: true }),
   getRunDiff: (id) => request(`/api/diagnosis/${id}/diff`, { suppressErrorLog: true }),
   getRunSandbox: (id) => request(`/api/diagnosis/${id}/sandbox`, { suppressErrorLog: true }),

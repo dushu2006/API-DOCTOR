@@ -452,6 +452,21 @@ export default function App() {
         api.getRunPR(id)
       ]);
 
+      // If the core run endpoint 404s, the backend no longer has this run
+      // (process restart, replaced by a fresh diagnosis, or explicit reset).
+      // Clear the stale activeRunId so the UI falls back to the idle console
+      // instead of hammering 404s forever.
+      const runRejected = run.status === 'rejected';
+      const runNotFound = runRejected && (run.reason?.status === 404 || String(run.reason?.message || '').toLowerCase().includes('not found'));
+      if (runNotFound) {
+        if (requestVersion !== runFetchVersion.current) return;
+        // Avoid resetting if we already moved to a newer run.
+        if (id === activeRunId || activeRunId === null) {
+          resetActiveRun();
+        }
+        return;
+      }
+
       const runData = run.status === 'fulfilled' ? run.value : null;
       const contextData = ctx.status === 'fulfilled' ? ctx.value : null;
       const diffData = diff.status === 'fulfilled' ? diff.value : null;
@@ -497,7 +512,7 @@ export default function App() {
     } catch (err) {
       console.error('Failed to fetch run details:', err);
     }
-  }, []);
+  }, [activeRunId, resetActiveRun]);
 
   useEffect(() => {
     if (activeRunId) {
