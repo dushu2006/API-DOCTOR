@@ -16,13 +16,47 @@ import html as _html
 import json
 import logging
 import re
-from typing import Type, TypeVar
+from typing import Any, Type, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
 from app.ai.base import AIProviderError, create_ai_client
 from app.ai.cache import get_global_cache, make_cache_key
 from app.core.config import settings
+
+
+def _is_schema_echo(obj: dict, expected_name: str | None = None) -> bool:
+    """Detect when the model echoed the JSON schema definition itself.
+
+    The schema we send has shape:
+        {\"name\": \"FixProposal\", \"type\": \"object\", \"properties\": {\"summary\": {\"type\": ...}}, \"required\": [...]}
+    An instance should NEVER contain a top-level 'properties' dict whose values
+    look like field definitions. Treat such objects as malformed so the retry
+    logic kicks in with a stronger anti-echo instruction.
+    """
+    if not isinstance(obj, dict):
+        return False
+    if "properties" not in obj:
+        return False
+    props = obj["properties"]
+    if not isinstance(props, dict) or not props:
+        return False
+    # Heuristic: property values are dicts containing 'type'/'description'
+    looks_like_field_def = 0
+    for v in props.values():
+        if isinstance(v, dict) and ("type" in v or "description" in v):
+            looks_like_field_def += 1
+    if looks_like_field_def == 0:
+        return False
+    # If it also has 'type' == 'object' or 'name' matching expected model, it's almost certainly the schema
+    if obj.get("type") == "object":
+        return True
+    if expected_name and obj.get("name") == expected_name:
+        return True
+    if "required" in obj and isinstance(obj["required"], list):
+        return True
+    # Fallback: if at least half the values look like field defs, call it schema echo
+    return looks_like_field_def >= max(1, len(props) // 2)
 
 logger = logging.getLogger(__name__)
 
@@ -105,13 +139,24 @@ class LLMClient:
                     logger.debug("Semantic cache lookup failed: %s", exc)
 
         schema = _json_schema(response_model)
+        # Build a more explicit prompt that forbids echoing the schema definition.
+        # Previous models (e.g. nemotron-3.5-lightning) were returning the schema
+        # object itself (name/properties/type) instead of an instance, which then
+        # failed Pydantic validation with missing 'summary'. Stating the rule
+        # explicitly reduces that failure mode.
+        schema_instruction = (
+            "You MUST return a JSON object that is an INSTANCE matching the schema described below, "
+            "NOT the schema definition itself.\n"
+            "The object must have ONLY the fields listed in 'required' / 'properties' with real values.\n"
+            "Do NOT include top-level keys like 'properties', 'name', or 'type' unless they are defined "
+            "as fields in the schema properties. Do NOT wrap the instance in any extra explanation.\n"
+            "Schema (for reference):\n" + json.dumps(schema, indent=2)
+        )
         messages = [
             {"role": "system", "content": system_prompt},
             {
                 "role": "user",
-                "content": user_prompt
-                + "\n\nReturn ONLY valid JSON matching this schema:\n"
-                + json.dumps(schema, indent=2),
+                "content": user_prompt + "\n\n" + schema_instruction,
             },
         ]
 
@@ -142,14 +187,18 @@ class LLMClient:
 
             for attempt in range(attempt_budget):
                 if last_error:
+                    # On retries, restate the anti-echo rule explicitly so the model
+                    # does not keep returning the schema definition.
+                    repair_instruction = (
+                        f"Your previous response failed JSON validation:\n{last_error}\n\n"
+                        "Return ONLY a valid JSON INSTANCE (with real field values) matching the schema below, "
+                        "NOT the schema definition itself. Do NOT include 'properties' or 'name' keys at top level.\n"
+                        f"Schema:\n{json.dumps(schema, indent=2)}"
+                    )
                     messages = messages[:1] + [
                         {
                             "role": "user",
-                            "content": user_prompt
-                            + "\n\nYour previous response failed JSON validation:\n"
-                            + last_error
-                            + "\n\nReturn ONLY valid JSON matching this schema:\n"
-                            + json.dumps(schema, indent=2),
+                            "content": user_prompt + "\n\n" + repair_instruction,
                         }
                     ]
                 try:
@@ -192,7 +241,7 @@ class LLMClient:
                     )
                     continue
                 try:
-                    parsed = _parse_json(content)
+                    parsed = _parse_json(content, expected_name=response_model.__name__)
                 except (json.JSONDecodeError, ValueError, SyntaxError, TypeError) as exc:
                     last_error = f"Malformed JSON: {exc}"
                     logger.warning(
@@ -201,6 +250,24 @@ class LLMClient:
                         attempt + 1,
                         attempt_budget,
                         exc,
+                        content[:2000],
+                    )
+                    continue
+
+                # Hard reject if the model echoed the schema definition itself.
+                if _is_schema_echo(parsed, expected_name=response_model.__name__):
+                    last_error = (
+                        f"Returned the JSON schema definition itself instead of an instance: "
+                        f"top-level keys {list(parsed.keys())}. "
+                        "Return an object with real field values like summary, files_changed, etc. "
+                        "Do NOT include 'properties' or 'name'."
+                    )
+                    logger.warning(
+                        "Structured response was schema echo (attempt %s/%s) model=%s\\n"
+                        "RAW CONTENT: %s",
+                        attempt + 1,
+                        attempt_budget,
+                        try_model,
                         content[:2000],
                     )
                     continue
@@ -426,7 +493,7 @@ def _parse_object(value: str) -> dict | None:
     return None
 
 
-def _parse_json(content: str) -> dict:
+def _parse_json(content: str, expected_name: str | None = None) -> dict:
     if not isinstance(content, str):
         content = "" if content is None else str(content)
     content = _THINK_BLOCK.sub("", content).strip()
@@ -438,17 +505,23 @@ def _parse_json(content: str) -> dict:
     ).strip()
     content = _repair_html_entities(content)
 
+    def _is_acceptable(obj: dict) -> bool:
+        # Filter out schema-echo objects immediately in the fast paths.
+        if _is_schema_echo(obj, expected_name=expected_name):
+            return False
+        return True
+
     # 1. Direct JSON parse (fast path & preserves embedded markdown fences)
     try:
         res = json.loads(content, strict=False)
-        if isinstance(res, dict):
+        if isinstance(res, dict) and _is_acceptable(res):
             return res
     except (json.JSONDecodeError, TypeError):
         pass
 
     # 2. Direct Python-dict literal parse (single quotes, True/False/None or true/false/null)
     dict_res = _parse_dict_literal(content)
-    if dict_res is not None:
+    if dict_res is not None and _is_acceptable(dict_res):
         return dict_res
 
     # 3. If wrapped in outer markdown fence, extract block content
@@ -460,12 +533,12 @@ def _parse_json(content: str) -> dict:
                 inner = content[first_newline + 1 : last_fence].strip()
                 try:
                     res = json.loads(inner, strict=False)
-                    if isinstance(res, dict):
+                    if isinstance(res, dict) and _is_acceptable(res):
                         return res
                 except (json.JSONDecodeError, TypeError):
                     pass
                 dict_inner = _parse_dict_literal(inner)
-                if dict_inner is not None:
+                if dict_inner is not None and _is_acceptable(dict_inner):
                     return dict_inner
 
     # 4. Scan each balanced object rather than spanning the first and last
@@ -474,29 +547,56 @@ def _parse_json(content: str) -> dict:
     parsed_candidates: list[dict] = []
     for candidate in _extract_json_candidates(content):
         parsed = _parse_object(candidate)
-        if parsed is not None:
+        if parsed is not None and _is_acceptable(parsed):
             parsed_candidates.append(parsed)
 
-    # Prefer a substantive object.  Keep a one-key fallback for response
-    # models that legitimately have only one field.
+    # Prefer a substantive object that is not a schema echo.
+    # Keep a one-key fallback for response models that legitimately have only one field.
     for parsed in parsed_candidates:
         if len(parsed) > 1:
             return parsed
     if parsed_candidates:
         return parsed_candidates[0]
 
+    # If we filtered everything as schema echo, try to surface a clear error.
+    # Check if any candidate was a schema echo to give a better message.
+    all_candidates_raw: list[dict] = []
+    for candidate in _extract_json_candidates(content):
+        parsed = _parse_object(candidate)
+        if parsed is not None:
+            all_candidates_raw.append(parsed)
+    for raw in all_candidates_raw:
+        if _is_schema_echo(raw, expected_name=expected_name):
+            raise ValueError(
+                f"Model returned JSON schema definition instead of instance (keys={list(raw.keys())})"
+            )
+
     # Final attempt with standard json.loads so proper JSONDecodeError is raised if invalid
     try:
-        return json.loads(content)
+        final = json.loads(content)
+        if isinstance(final, dict) and _is_schema_echo(final, expected_name=expected_name):
+            raise ValueError(
+                f"Model returned JSON schema definition instead of instance (keys={list(final.keys())})"
+            )
+        return final
     except json.JSONDecodeError:
         # Some models substitute HTML entities for JSON-unsafe characters
         # instead of properly escaping them -- recover and retry once.
         repaired = _repair_html_entities(content)
         try:
-            return json.loads(repaired)
+            final2 = json.loads(repaired)
+            if isinstance(final2, dict) and _is_schema_echo(final2, expected_name=expected_name):
+                raise ValueError(
+                    f"Model returned JSON schema definition instead of instance (keys={list(final2.keys())})"
+                )
+            return final2
         except json.JSONDecodeError:
             dict_repaired = _parse_dict_literal(repaired)
             if dict_repaired is not None:
+                if _is_schema_echo(dict_repaired, expected_name=expected_name):
+                    raise ValueError(
+                        f"Model returned JSON schema definition instead of instance (keys={list(dict_repaired.keys())})"
+                    )
                 return dict_repaired
             raise
 
