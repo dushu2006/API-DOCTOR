@@ -91,7 +91,13 @@ export default function App() {
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
 
   const [explorerWidth, setExplorerWidth] = useState(220);
-  const [doctorWidth, setDoctorWidth] = useState(540);
+  // Give the diagnostic console roughly half of the initial viewport. The
+  // workspace remains available as evidence, but no longer competes with the
+  // product's primary workflow.
+  const [doctorWidth, setDoctorWidth] = useState(() => {
+    if (typeof window === 'undefined') return 640;
+    return Math.min(760, Math.max(520, Math.round(window.innerWidth * 0.46)));
+  });
   const [bottomHeight, setBottomHeight] = useState(220);
 
   // Progressive, backend-driven timeline. The revealer paces how quickly the
@@ -532,7 +538,7 @@ export default function App() {
       if (isDraggingExplorer.current) {
         setExplorerWidth(Math.min(Math.max(e.clientX - 48, 160), 450));
       } else if (isDraggingDoctor.current) {
-        setDoctorWidth(Math.min(Math.max(window.innerWidth - e.clientX, 340), 680));
+        setDoctorWidth(Math.min(Math.max(window.innerWidth - e.clientX, 420), 840));
       } else if (isDraggingBottom.current) {
         setBottomHeight(Math.min(Math.max(window.innerHeight - e.clientY, 80), 500));
       }
@@ -687,9 +693,12 @@ export default function App() {
       setShowProjectSelector(true);
       return;
     }
+    resetActiveRun();
+    setIsDiagnosing(true);
     try {
       const res = await api.syncRenderLogs(null, currentProject.id);
       if (res.status === 'error' || res.status === 'unconfigured') {
+        setIsDiagnosing(false);
         alert(res.message || 'Failed to retrieve logs.');
         return;
       }
@@ -697,6 +706,9 @@ export default function App() {
       // starts exactly one fresh diagnosis.
       showRenderLogs(res);
       if (res.run_id) {
+        // Logs remain available on demand, but the diagnosis keeps the full
+        // vertical workspace instead of opening a competing bottom panel.
+        setIsBottomCollapsed(true);
         setActiveRunId(res.run_id);
         if (res.diagnosis_started) setIsDiagnosing(true);
         fetchRunDetails(res.run_id);
@@ -708,6 +720,7 @@ export default function App() {
         );
       }
     } catch (err) {
+      setIsDiagnosing(false);
       alert(`Failed to sync logs: ${err.message}`);
     }
   };
@@ -729,6 +742,12 @@ export default function App() {
     }
 
     setIsIngesting(true);
+    resetActiveRun();
+    // Transition to the live console immediately. The first visible operation
+    // buffers while the backend creates the run, rather than leaving the user
+    // staring at an unchanged form until several fast operations have finished.
+    setIsDiagnosing(true);
+    setShowIngestModal(false);
     try {
       const res = await api.ingestRun({
         ...ingestForm,
@@ -737,10 +756,9 @@ export default function App() {
         stack_trace: ingestForm.log_text,
         auto_diagnose: true,
       });
-      if (res?.run_id) {
+      if (!res?.run_id) throw new Error('Backend did not return a diagnosis run.');
+      if (res.run_id) {
         setActiveRunId(res.run_id);
-        setActiveBottomTab('logs');
-        setIsBottomCollapsed(false);
         setShowIngestModal(false);
         setIsDiagnosing(true);
         setIngestForm({ source: 'manual', message: '', log_text: '', endpoint: '', method: 'GET' });
@@ -748,6 +766,8 @@ export default function App() {
         fetchRunDetails(res.run_id);
       }
     } catch (err) {
+      setIsDiagnosing(false);
+      setShowIngestModal(true);
       alert(`Ingestion failed: ${err.message}`);
     } finally {
       setIsIngesting(false);
@@ -799,12 +819,6 @@ export default function App() {
         alert(`Failed to stop diagnosis: ${detail}`);
       }
     }
-  };
-
-  const handleApproveFix = async (approved) => {
-    // Legacy entry point (diff-view buttons). Route to the Keep/Reject flow.
-    if (approved) return handleKeepChanges();
-    return handleRejectChanges();
   };
 
   const handleRestart = async () => {
@@ -1036,14 +1050,6 @@ export default function App() {
             isDiagnosing={isDiagnosing}
             isDiffMode={isDiffMode}
             setIsDiffMode={setIsDiffMode}
-            onApproveFix={(
-              !activeRun?.activity?.some(
-                event => event.step === 'changes_applied' && event.status === 'failed'
-              ) && (
-                activeRun?.status === 'AWAITING_FIX_APPROVAL'
-                || (runSandbox?.passed && !runDiff?.applied)
-              )
-            ) ? handleApproveFix : null}
             highlightLine={highlightLine}
             failureReason={failureReason}
             isProjectConnected={isConnected}

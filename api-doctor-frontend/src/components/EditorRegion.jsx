@@ -11,6 +11,22 @@ import {
 } from 'lucide-react';
 import CodeEditor from './CodeEditor';
 
+const FILE_ACCENTS = {
+  py: '#4B8BBE',
+  js: '#F7DF1E', jsx: '#F7DF1E',
+  ts: '#3178C6', tsx: '#3178C6',
+  json: '#CBCB41', jsonc: '#CBCB41',
+  html: '#E44D26', css: '#42A5F5', scss: '#CD6799',
+  md: '#7C8CF8', yml: '#CB171E', yaml: '#CB171E',
+  go: '#00ADD8', rs: '#DEA584', java: '#E76F00',
+};
+
+function fileAccent(path = '') {
+  const name = path.split('/').pop() || '';
+  const ext = name.includes('.') ? name.split('.').pop().toLowerCase() : '';
+  return FILE_ACCENTS[ext] || '#8B8F99';
+}
+
 export default function EditorRegion({
   selectedFile,
   fileContent = '',
@@ -19,7 +35,6 @@ export default function EditorRegion({
   isDiagnosing,
   isDiffMode,
   setIsDiffMode,
-  onApproveFix,
   highlightLine = null,
   failureReason = '',
   isProjectConnected = false,
@@ -141,7 +156,7 @@ export default function EditorRegion({
                   }
                 }}
               >
-                <FileCode size={13} style={{ color: '#3572A5', flexShrink: 0 }} />
+                <FileCode size={13} style={{ color: fileAccent(tab.path), flexShrink: 0 }} />
                 <span className="tabstrip-name">{tab.name}</span>
                 {tab.isAgentActive && <span className="agent-dot" style={{ width: '6px', height: '6px', flexShrink: 0 }} />}
                 <button
@@ -228,26 +243,6 @@ export default function EditorRegion({
                 </span>
               </div>
 
-              {onApproveFix && !runDiff.applied && (
-                <div style={{ display: 'flex', gap: '6px', flexShrink: 0 }}>
-                  <button
-                    onClick={() => onApproveFix(true)}
-                    className="btn-success"
-                    style={{ padding: '2px 8px', fontSize: '11px' }}
-                  >
-                    <Check size={11} />
-                    <span>Keep Changes</span>
-                  </button>
-                  <button
-                    onClick={() => onApproveFix(false)}
-                    className="btn-outline"
-                    style={{ padding: '2px 8px', fontSize: '11px' }}
-                  >
-                    <X size={11} />
-                    <span>Reject</span>
-                  </button>
-                </div>
-              )}
               {runDiff.applied && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: '5px', color: 'var(--color-success)', fontWeight: 600, flexShrink: 0 }}>
                   <Check size={12} />

@@ -653,6 +653,10 @@ class Orchestrator:
         run.set_activity("repository_check", "done", detail)
         run.add_activity("repository_connected", "done", detail)
         run_store.update(run)
+        # Close the exact operation that was opened above. Emitting only the
+        # secondary `repository_connected` event left live clients displaying
+        # CHECKING WORKSPACE forever until they reloaded the activity snapshot.
+        await emit(run.id, "repository_check", "done", detail)
         await emit(run.id, "repository_connected", "done", detail)
 
         if branch:

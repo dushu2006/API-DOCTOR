@@ -25,6 +25,10 @@ const TICK_MS = 150; // base scheduler tick
 
 const TERMINAL = new Set(['done', 'failed', 'cancelled', 'skipped']);
 
+function lastRowMessage(stage) {
+  return [...(stage.rows || [])].reverse().find((row) => row.message)?.message || '';
+}
+
 /**
  * @param {Array} rawEvents — the raw SSE/activity event list for the active run.
  * @returns {Array} progressively revealed stage objects. Each stage carries a
@@ -62,19 +66,30 @@ export function useProgressiveTimeline(rawEvents = []) {
         return;
       }
 
-      // Reconcile already-settled rows with newer statuses/messages (e.g. a
-      // WAITING stage flipping to done after the developer approves).
+      // Reconcile already-settled rows with newer statuses/messages (most
+      // importantly WAITING → done after an approval). A status transition is
+      // committed on its own beat; the next operation must not appear in the
+      // same paint as the approval tick.
       let reconciled = false;
+      let statusChanged = false;
       const base = current.map((row) => {
         if (row.phase !== 'settled') return row;
         const targetRow = target.find((r) => r.key === row.key);
         if (!targetRow) return row;
-        if (targetRow.status !== row.status || targetRow.message !== row.message) {
+        const messageChanged = lastRowMessage(targetRow) !== lastRowMessage(row);
+        if (targetRow.status !== row.status || messageChanged) {
           reconciled = true;
+          statusChanged ||= targetRow.status !== row.status;
           return { ...targetRow, phase: 'settled' };
         }
         return row;
       });
+
+      if (statusChanged) {
+        commit(base);
+        deadline = now + STEP_GAP_MS;
+        return;
+      }
 
       // 1. Settle the buffering row once the backend reports a terminal status.
       const bufferingIndex = base.findIndex((r) => r.phase === 'buffering');
@@ -104,8 +119,9 @@ export function useProgressiveTimeline(rawEvents = []) {
       // 2. Reveal the next stage. Waiting/failed stages surface immediately
       // (there is nothing to "buffer" — the user must act); every other stage
       // appears with a short in-progress beat before it ticks over.
-      if (base.length < target.length) {
-        const targetRow = target[base.length];
+      const visibleKeys = new Set(base.map((row) => row.key));
+      const targetRow = target.find((row) => !visibleKeys.has(row.key));
+      if (targetRow) {
         const instant = targetRow.status === 'waiting' || targetRow.status === 'failed';
         const revealed = instant
           ? { ...targetRow, phase: 'settled' }

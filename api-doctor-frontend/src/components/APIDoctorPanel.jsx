@@ -263,17 +263,35 @@ function StepDetail({ stage, run, runContext, runDiff, runSandbox, onOpenFile, o
       );
     case 'repo': {
       const conn = (stage.rows || []).find((r) => r.step === 'repository_connected')?.message;
-      const disc = (stage.rows || []).find((r) => r.step === 'project_discovered')?.message;
       return (
         <div className="dp-detail">
-          <Row k="Workspace" v={conn || '—'} mono />
-          {disc && <Row k="Project" v={disc} />}
+          <Row k="Check" v="Repository directory, Git branch and current commit" />
+          <Row k="Result" v={conn || lastMessage(stage) || '—'} mono />
         </div>
       );
     }
+    case 'sync':
+      return (
+        <div className="dp-detail">
+          <Row k="Checked" v="Working tree state and uncommitted changes" />
+          <Row k="Result" v={lastMessage(stage) || 'Workspace state checked'} mono />
+        </div>
+      );
+    case 'project':
+      return (
+        <div className="dp-detail">
+          <Row k="Inspected" v="Repository manifests and source layout" />
+          <Row k="Detected" v={lastMessage(stage) || 'Project profile detected'} />
+        </div>
+      );
+    case 'source':
     case 'access':
       return (
         <div className="dp-detail">
+          <Row
+            k={stage.id === 'access' ? 'Permission' : 'Conclusion'}
+            v={stage.id === 'access' ? 'Read only the listed source files' : lastMessage(stage)}
+          />
           <div className="dp-detail-title">Files identified for reading</div>
           {files.length ? (
             files.map((f) => (
@@ -401,6 +419,7 @@ export default function APIDoctorPanel({
 }) {
   const bodyRef = useRef(null);
   const [expanded, setExpanded] = useState(null);
+  const [submittedApproval, setSubmittedApproval] = useState(null);
 
   // Elapsed time for the step currently buffering.
   const [, setTick] = useState(0);
@@ -428,6 +447,17 @@ export default function APIDoctorPanel({
 
   const isAwaitingRead = activeRun?.status === 'AWAITING_FILE_READ_APPROVAL';
   const isAwaitingFix = activeRun?.status === 'AWAITING_FIX_APPROVAL';
+  const visibleReadApproval = stages.some(
+    (stage) => stage.id === 'access' && stage.phase === 'settled' && stage.status === 'waiting'
+  );
+  const visibleFixApproval = stages.some(
+    (stage) => stage.id === 'review' && stage.phase === 'settled' && stage.status === 'waiting'
+  );
+  // Backend state can reach an approval gate before the deliberately paced
+  // timeline reaches it. Only surface the sticky action card when that real
+  // approval step has itself been revealed.
+  const showReadApproval = isAwaitingRead && visibleReadApproval;
+  const showFixApproval = isAwaitingFix && visibleFixApproval;
   const rejected = activeRun?.status === 'REQUIRES_HUMAN_REVIEW';
   const failed =
     Boolean(runSandbox?.present && runSandbox.passed === false) ||
@@ -444,7 +474,7 @@ export default function APIDoctorPanel({
   const rejectedSourceAccess = (activeRun?.activity || []).some(
     (e) => e.step === 'file_read_approval' && e.status === 'failed'
   );
-  const headerStatus = isAwaitingRead || isAwaitingFix
+  const headerStatus = showReadApproval || showFixApproval
     ? 'WAITING'
     : failed
       ? 'FAILED'
@@ -453,6 +483,24 @@ export default function APIDoctorPanel({
         : isDiagnosing
           ? 'DIAGNOSING'
           : 'READY';
+
+  useEffect(() => {
+    setSubmittedApproval(null);
+  }, [activeRun?.id]);
+
+  useEffect(() => {
+    if (!submittedApproval) return;
+    const approvalStage = stages.find((stage) =>
+      submittedApproval === 'read' ? stage.id === 'access' : stage.id === 'review'
+    );
+    if (approvalStage && approvalStage.status !== 'waiting') setSubmittedApproval(null);
+  }, [stages, submittedApproval]);
+
+  useEffect(() => {
+    if (!submittedApproval || isRunActionPending) return;
+    const backendStillWaiting = submittedApproval === 'read' ? isAwaitingRead : isAwaitingFix;
+    if (backendStillWaiting) setSubmittedApproval(null);
+  }, [submittedApproval, isRunActionPending, isAwaitingRead, isAwaitingFix]);
 
   const elapsedOf = (stage) => {
     const start = startsRef.current.get(stage.key);
@@ -496,7 +544,7 @@ export default function APIDoctorPanel({
         </div>
       </header>
 
-      {!activeRun ? (
+      {!activeRun && !isDiagnosing ? (
         <div className="dp-idle">
           <div className="dp-idle-main">
             <div className="dp-kicker">DIAGNOSTIC ENGINE</div>
@@ -613,20 +661,20 @@ export default function APIDoctorPanel({
           </div>
 
           <footer className="dp-footer">
-            {isRunActionPending && (isAwaitingRead || isAwaitingFix) && (
+            {submittedApproval && (
               <div className="dp-approval is-processing">
                 <div className="dp-approval-title">
                   <Loader2 size={13} className="spin" />
-                  Recording approval
+                  Approval recorded
                 </div>
                 <p className="dp-approval-text">
-                  Waiting for approval — API Doctor is resuming the diagnosis and
-                  will continue with the next step.
+                  API Doctor is recording your decision. The approval step will
+                  tick complete before the next operation begins.
                 </p>
               </div>
             )}
 
-            {isAwaitingRead && (
+            {showReadApproval && submittedApproval !== 'read' && (
               <div className="dp-approval">
                 <div className="dp-approval-title">
                   <span className="dp-wait-dot" /> Waiting for approval
@@ -646,7 +694,10 @@ export default function APIDoctorPanel({
                     type="button"
                     className="dp-btn is-ghost"
                     disabled={isRunActionPending}
-                    onClick={() => onApproveFileRead(false)}
+                    onClick={() => {
+                      setSubmittedApproval('read');
+                      onApproveFileRead(false);
+                    }}
                   >
                     Reject
                   </button>
@@ -654,7 +705,10 @@ export default function APIDoctorPanel({
                     type="button"
                     className="dp-btn is-primary"
                     disabled={isRunActionPending}
-                    onClick={() => onApproveFileRead(true)}
+                    onClick={() => {
+                      setSubmittedApproval('read');
+                      onApproveFileRead(true);
+                    }}
                   >
                     {isRunActionPending ? <Loader2 size={13} className="spin" /> : <Check size={13} />}
                     <span>Approve &amp; Continue</span>
@@ -663,7 +717,7 @@ export default function APIDoctorPanel({
               </div>
             )}
 
-            {isAwaitingFix && (
+            {showFixApproval && submittedApproval !== 'fix' && (
               <div className="dp-approval">
                 <div className="dp-approval-title">
                   <span className="dp-wait-dot" /> Waiting for approval
@@ -682,7 +736,10 @@ export default function APIDoctorPanel({
                     type="button"
                     className="dp-btn is-ghost"
                     disabled={isRunActionPending}
-                    onClick={onRejectChanges}
+                    onClick={() => {
+                      setSubmittedApproval('fix');
+                      onRejectChanges();
+                    }}
                   >
                     Reject
                   </button>
@@ -697,7 +754,10 @@ export default function APIDoctorPanel({
                     type="button"
                     className="dp-btn is-primary"
                     disabled={isRunActionPending}
-                    onClick={onKeepChanges}
+                    onClick={() => {
+                      setSubmittedApproval('fix');
+                      onKeepChanges();
+                    }}
                   >
                     {isRunActionPending ? <Loader2 size={13} className="spin" /> : <Sparkles size={13} />}
                     <span>Keep Changes</span>
@@ -706,7 +766,7 @@ export default function APIDoctorPanel({
               </div>
             )}
 
-            {!isAwaitingRead && !isAwaitingFix && rejected && (
+            {!showReadApproval && !showFixApproval && !submittedApproval && rejected && (
               <div className="dp-approval is-rejected">
                 <div className="dp-approval-title">
                   <X size={13} /> {rejectedSourceAccess ? 'Source access rejected' : 'Patch rejected'}
@@ -725,7 +785,7 @@ export default function APIDoctorPanel({
               </div>
             )}
 
-            {!isAwaitingRead && !isAwaitingFix && !rejected && failed && (
+            {!showReadApproval && !showFixApproval && !submittedApproval && !rejected && failed && (
               <div className="dp-approval is-failed">
                 <div className="dp-approval-title">
                   <XCircle size={13} /> Diagnosis failed
@@ -742,7 +802,7 @@ export default function APIDoctorPanel({
               </div>
             )}
 
-            {!isAwaitingRead && !isAwaitingFix && !rejected && !failed && verified && (
+            {!showReadApproval && !showFixApproval && !submittedApproval && !rejected && !failed && verified && (
               <div className="dp-result">
                 <div className="dp-result-head">
                   <CheckCircle2 size={15} className="dp-ok" />
@@ -781,7 +841,7 @@ export default function APIDoctorPanel({
               </div>
             )}
 
-            {!isAwaitingRead && !isAwaitingFix && !rejected && !failed && !verified && (
+            {!showReadApproval && !showFixApproval && !submittedApproval && !rejected && !failed && !verified && (
               <div className="dp-working">
                 <Loader2 size={12} className="spin" />
                 <span className="dp-working-text">
